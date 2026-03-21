@@ -2,7 +2,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "NEW_REVISION_ID"
+revision = "598fff10fb75"
 down_revision = "ede38d0f9acb"
 branch_labels = None
 depends_on = None
@@ -45,7 +45,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_constraint("fk_tasks_parent_task_id_tasks", "tasks", type_="foreignkey")
     op.drop_index(op.f("ix_tasks_parent_task_id"), table_name="tasks")
-
     op.drop_column("tasks", "blocking_reason")
     op.drop_column("tasks", "is_blocked")
     op.drop_column("tasks", "sequence_order")

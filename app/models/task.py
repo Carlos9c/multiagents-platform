@@ -4,6 +4,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 
+PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
@@ -37,7 +40,11 @@ class Task(Base):
     priority: Mapped[str] = mapped_column(String(50), nullable=False, default="medium")
     task_type: Mapped[str] = mapped_column(String(50), nullable=False, default="implementation")
     planning_level: Mapped[str] = mapped_column(String(50), nullable=False, default="high_level")
-    executor_type: Mapped[str] = mapped_column(String(50), nullable=False, default="code_executor")
+    executor_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    )
 
     sequence_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

@@ -10,6 +10,7 @@ def create_artifact(
     content: str,
     created_by: str,
     task_id: int | None = None,
+    auto_commit: bool = True,
 ) -> Artifact:
     artifact = Artifact(
         project_id=project_id,
@@ -19,6 +20,9 @@ def create_artifact(
         created_by=created_by,
     )
     db.add(artifact)
-    db.commit()
-    db.refresh(artifact)
+
+    if auto_commit:
+        db.commit()
+        db.refresh(artifact)
+
     return artifact

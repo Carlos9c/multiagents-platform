@@ -17,12 +17,14 @@ TaskType = Literal[
 Priority = Literal["high", "medium", "low"]
 
 
-class PlannedTask(BaseModel):
+class RefinedTaskOutput(BaseModel):
     title: str = Field(min_length=10, max_length=255)
     description: str = Field(min_length=30)
     summary: str = Field(min_length=20)
     objective: str = Field(min_length=20)
-    implementation_notes: str = Field(min_length=40)
+    proposed_solution: str = Field(min_length=40)
+    implementation_steps: list[str] = Field(min_length=2, max_length=12)
+    tests_required: list[str] = Field(min_length=1, max_length=10)
     acceptance_criteria: str = Field(min_length=20)
     technical_constraints: str = Field(min_length=10)
     out_of_scope: str = Field(min_length=10)
@@ -30,6 +32,6 @@ class PlannedTask(BaseModel):
     task_type: TaskType
 
 
-class PlannerOutput(BaseModel):
-    plan_summary: str = Field(min_length=40)
-    tasks: list[PlannedTask] = Field(min_length=4, max_length=10)
+class TechnicalTaskRefinementOutput(BaseModel):
+    refinement_summary: str = Field(min_length=30)
+    refined_tasks: list[RefinedTaskOutput] = Field(min_length=1, max_length=8)

@@ -9,6 +9,9 @@ from app.services.artifacts import create_artifact
 from app.services.planner_client import call_planner_model
 
 
+PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
+
+
 def validate_task_quality(tasks: list[Task]) -> None:
     vague_titles = {
         "crear backend",
@@ -28,29 +31,22 @@ def validate_task_quality(tasks: list[Task]) -> None:
             raise ValueError(f"Vague task title not allowed: {task.title}")
 
         if len((task.implementation_notes or "").strip()) < 60:
-            raise ValueError(f"implementation_notes too short in task: {task.title}")
+            raise ValueError(
+                f"implementation_notes too short in task: {task.title}"
+            )
 
         if len((task.acceptance_criteria or "").strip()) < 30:
-            raise ValueError(f"acceptance_criteria too short in task: {task.title}")
+            raise ValueError(
+                f"acceptance_criteria too short in task: {task.title}"
+            )
 
         if len((task.out_of_scope or "").strip()) < 20:
             raise ValueError(f"out_of_scope too short in task: {task.title}")
 
         if len((task.technical_constraints or "").strip()) < 20:
-            raise ValueError(f"technical_constraints too short in task: {task.title}")
-
-
-def validate_required_task_mix(tasks: list[Task]) -> None:
-    task_types = {task.task_type for task in tasks}
-
-    if "documentation" not in task_types:
-        raise ValueError("Planner output must include at least one documentation task.")
-
-    if "onboarding" not in task_types:
-        raise ValueError("Planner output must include at least one onboarding task.")
-
-    if "implementation" not in task_types:
-        raise ValueError("Planner output must include at least one implementation task.")
+            raise ValueError(
+                f"technical_constraints too short in task: {task.title}"
+            )
 
 
 def generate_project_plan(db: Session, project_id: int) -> dict:
@@ -83,7 +79,7 @@ def generate_project_plan(db: Session, project_id: int) -> dict:
             priority=planned_task.priority,
             task_type=planned_task.task_type,
             planning_level="high_level",
-            executor_type="code_executor",
+            executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
             sequence_order=index,
             status="pending",
             is_blocked=False,
@@ -93,10 +89,7 @@ def generate_project_plan(db: Session, project_id: int) -> dict:
         created_tasks.append(task)
 
     db.flush()
-
-    validate_required_task_mix(created_tasks)
     validate_task_quality(created_tasks)
-
     db.commit()
 
     for task in created_tasks:
