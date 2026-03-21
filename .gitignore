@@ -1,0 +1,98 @@
+# =========================
+# PYTHON
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtualenvs
+.env
+.venv
+venv/
+ENV/
+
+# Poetry
+poetry.lock
+
+# =========================
+# FASTAPI / UVICORN
+# =========================
+*.log
+
+# =========================
+# DATABASE
+# =========================
+*.sqlite3
+*.db
+
+# =========================
+# ALEMBIC
+# =========================
+# (mantenemos migrations versionadas)
+!alembic/versions/*.py
+
+# =========================
+# TESTS / COVERAGE
+# =========================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# =========================
+# IDEs
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# DOCKER
+# =========================
+docker-compose.override.yml
+
+# =========================
+# ENV VARS / SECRETS
+# =========================
+.env.*
+!.env.example
+
+# =========================
+# CACHE / TEMP
+# =========================
+.cache/
+tmp/
+temp/
+
+# =========================
+# CELERY
+# =========================
+celerybeat-schedule
+celerybeat.pid
+
+# =========================
+# ARTIFACTS GENERADOS (IMPORTANTE)
+# =========================
+artifacts/
+storage/
+uploads/
+
+# =========================
+# LOGS
+# =========================
+logs/
+*.log
+
+# =========================
+# MISC
+# =========================
+*.bak
+*.old
