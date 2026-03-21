@@ -1,4 +1,5 @@
 import json
+import re
 
 from sqlalchemy.orm import Session
 
@@ -11,6 +12,30 @@ from app.services.atomic_task_generator_client import call_atomic_task_generator
 
 PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
 AVAILABLE_EXECUTORS = ["code_executor"]
+MAX_ATOMIC_TASKS_PER_REFINED = 8
+
+COMPOUND_TITLE_PATTERNS = [
+    r"\bdefinir y\b",
+    r"\bidentificar y\b",
+    r"\bdocumentar y\b",
+    r"\bredactar y\b",
+    r"\banalizar y\b",
+    r"\bcrear y\b",
+    r"\bextraer y\b",
+    r"\bintegrar y\b",
+    r"\bvalidar y\b",
+    r"\borganizar y\b",
+]
+
+BROAD_DESCRIPTION_PATTERNS = [
+    r"\bjunto con\b",
+    r"\basí como\b",
+    r"\by también\b",
+    r"\btanto .* como\b",
+]
+
+DOCUMENT_LIKE_TASK_TYPES = {"requirements", "documentation", "onboarding"}
+STRICTER_TASK_TYPES = {"implementation", "testing", "review"}
 
 
 def _format_bullet_list(items: list[str]) -> str:
@@ -28,7 +53,95 @@ def _validate_parent_task(project: Project, task: Task) -> None:
         raise ValueError("Refined task must still be pending atomic executor assignment")
 
 
+def _looks_compound_title(title: str) -> bool:
+    normalized = title.strip().lower()
+    return any(re.search(pattern, normalized) for pattern in COMPOUND_TITLE_PATTERNS)
+
+
+def _looks_broad_description(description: str) -> bool:
+    normalized = (description or "").strip().lower()
+    return any(re.search(pattern, normalized) for pattern in BROAD_DESCRIPTION_PATTERNS)
+
+
+def _implementation_steps_count(implementation_steps: str) -> int:
+    lines = [line.strip() for line in implementation_steps.splitlines() if line.strip()]
+    return sum(1 for line in lines if line.startswith("- "))
+
+
+def _normalized_title(title: str | None) -> str:
+    return (title or "").strip().lower()
+
+
+def _count_atomicity_risk_signals(task: Task) -> int:
+    risk_signals = 0
+    title = _normalized_title(task.title)
+    description = (task.description or "").strip().lower()
+
+    if _looks_compound_title(title):
+        risk_signals += 1
+
+    if _looks_broad_description(description):
+        risk_signals += 1
+
+    if "integrar" in title and "redact" in title:
+        risk_signals += 1
+
+    if "documentar" in title and "definir" in title:
+        risk_signals += 1
+
+    if "analizar" in title and "redact" in title:
+        risk_signals += 1
+
+    if "extraer" in title and "integrar" in title:
+        risk_signals += 1
+
+    return risk_signals
+
+
+def _validate_atomic_step_count(task: Task) -> None:
+    step_count = _implementation_steps_count(task.implementation_steps or "")
+    task_type = (task.task_type or "").strip().lower()
+    risk_signals = _count_atomicity_risk_signals(task)
+
+    # Para tareas más cercanas a ejecución o validación, mantenemos guardrails más estrictos.
+    if task_type in STRICTER_TASK_TYPES:
+        if step_count > 6:
+            raise ValueError(
+                f"Atomic task has too many implementation steps and may be too broad: {task.title}"
+            )
+        return
+
+    # Para tareas documentales/requirements no rechazamos solo por número de pasos.
+    # Rechazamos cuando hay exceso de pasos junto con señales semánticas de mezcla.
+    if task_type in DOCUMENT_LIKE_TASK_TYPES:
+        if step_count > 10 and risk_signals >= 1:
+            raise ValueError(
+                f"Atomic task is too broad for a document-like task: {task.title}"
+            )
+        if step_count > 8 and risk_signals >= 2:
+            raise ValueError(
+                f"Atomic task mixes too many concerns for a document-like task: {task.title}"
+            )
+        return
+
+    # Regla general para otros tipos: combinar tamaño y señales semánticas.
+    if step_count > 8 and risk_signals >= 1:
+        raise ValueError(
+            f"Atomic task appears too broad based on combined signals: {task.title}"
+        )
+    if step_count > 6 and risk_signals >= 2:
+        raise ValueError(
+            f"Atomic task appears too broad based on multiple atomicity risks: {task.title}"
+        )
+
+
 def _validate_atomic_task_quality(tasks: list[Task], available_executors: list[str]) -> None:
+    if len(tasks) > MAX_ATOMIC_TASKS_PER_REFINED:
+        raise ValueError(
+            f"Atomic generation produced too many tasks ({len(tasks)}). "
+            f"Maximum allowed in this phase is {MAX_ATOMIC_TASKS_PER_REFINED}."
+        )
+
     for task in tasks:
         if task.executor_type not in available_executors:
             raise ValueError(f"Invalid executor_type in atomic task: {task.executor_type}")
@@ -44,6 +157,38 @@ def _validate_atomic_task_quality(tasks: list[Task], available_executors: list[s
 
         if len((task.acceptance_criteria or "").strip()) < 20:
             raise ValueError(f"acceptance_criteria too short in atomic task: {task.title}")
+
+        # Señales semánticas fuertes: estas siguen siendo motivo de rechazo directo.
+        normalized_title = _normalized_title(task.title)
+
+        if _looks_compound_title(task.title):
+            raise ValueError(
+                f"Atomic task title suggests multiple responsibilities: {task.title}"
+            )
+
+        if _looks_broad_description(task.description or ""):
+            raise ValueError(
+                f"Atomic task description suggests multiple combined actions: {task.title}"
+            )
+
+        if "integrar" in normalized_title and "redact" in normalized_title:
+            raise ValueError(
+                f"Atomic task title mixes content creation and integration: {task.title}"
+            )
+
+        if "documentar" in normalized_title and "definir" in normalized_title:
+            raise ValueError(
+                f"Atomic task title mixes definition and documentation: {task.title}"
+            )
+
+        if "analizar" in normalized_title and "redact" in normalized_title:
+            raise ValueError(
+                f"Atomic task title mixes analysis and writing: {task.title}"
+            )
+
+        # El número de pasos ya no se usa como regla universal,
+        # sino como validación contextual por tipo de tarea.
+        _validate_atomic_step_count(task)
 
 
 def generate_atomic_tasks(
