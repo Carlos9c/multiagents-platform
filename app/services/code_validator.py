@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -171,7 +170,6 @@ class LocalCodeValidator(BaseCodeValidator):
     def _build_short_circuit_result(
         self,
         task: Task,
-        execution_run_id: int,
         executor_result: CodeExecutorResult,
         decision: str,
         decision_reason: str,
@@ -353,7 +351,6 @@ class LocalCodeValidator(BaseCodeValidator):
         if executor_result.execution_status == CODE_EXECUTION_STATUS_REJECTED:
             return self._build_short_circuit_result(
                 task=task,
-                execution_run_id=execution_run_id,
                 executor_result=executor_result,
                 decision=CODE_VALIDATION_DECISION_FAILED,
                 decision_reason=(
@@ -365,7 +362,6 @@ class LocalCodeValidator(BaseCodeValidator):
         if executor_result.execution_status == CODE_EXECUTION_STATUS_FAILED:
             return self._build_short_circuit_result(
                 task=task,
-                execution_run_id=execution_run_id,
                 executor_result=executor_result,
                 decision=CODE_VALIDATION_DECISION_FAILED,
                 decision_reason=(

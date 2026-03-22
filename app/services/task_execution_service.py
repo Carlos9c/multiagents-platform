@@ -15,10 +15,21 @@ from app.models.task import (
     PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     Task,
 )
+from app.schemas.code_execution import (
+    CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
+    CODE_EXECUTION_STATUS_FAILED,
+    CODE_EXECUTION_STATUS_REJECTED,
+    CodeExecutorResult,
+)
 from app.schemas.code_validation import (
-    CODE_VALIDATION_DECIDED_STATUS_COMPLETED,
-    CODE_VALIDATION_DECIDED_STATUS_FAILED,
-    CODE_VALIDATION_DECIDED_STATUS_PARTIAL,
+    CODE_VALIDATION_DECISION_COMPLETED,
+    CODE_VALIDATION_DECISION_FAILED,
+    CODE_VALIDATION_DECISION_PARTIAL,
+)
+from app.services.code_executor import (
+    CodeExecutorInternalError,
+    CodeExecutorRejectedError,
+    LocalCodeExecutor,
 )
 from app.services.execution_runs import (
     create_execution_run,
@@ -28,7 +39,6 @@ from app.services.execution_runs import (
     mark_execution_run_started,
     mark_execution_run_succeeded,
 )
-from app.services.executor import execute_atomic_task
 from app.services.task_validation_service import (
     TaskValidationServiceError,
     validate_code_task,
@@ -38,18 +48,15 @@ from app.services.tasks import (
     mark_task_running,
 )
 
+
 SUPPORTED_EXECUTORS = {
     CODE_EXECUTOR,
 }
 
-EXECUTOR_STATUS_AWAITING_VALIDATION = "awaiting_validation"
-EXECUTOR_STATUS_FAILED = "failed"
-EXECUTOR_STATUS_REJECTED = "rejected"
-
 VALID_EXECUTOR_FINAL_STATUSES = {
-    EXECUTOR_STATUS_AWAITING_VALIDATION,
-    EXECUTOR_STATUS_FAILED,
-    EXECUTOR_STATUS_REJECTED,
+    CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
+    CODE_EXECUTION_STATUS_FAILED,
+    CODE_EXECUTION_STATUS_REJECTED,
 }
 
 
@@ -75,7 +82,7 @@ class SyncTaskExecutionResult:
     output_snapshot: str | None
     message: str
     final_task_status: str | None = None
-    validation_decided_status: str | None = None
+    validation_decision: str | None = None
 
 
 def _get_task_or_raise(db: Session, task_id: int) -> Task:
@@ -133,7 +140,7 @@ def _build_sync_result(
     output_snapshot: str | None,
     message: str,
     final_task_status: str | None = None,
-    validation_decided_status: str | None = None,
+    validation_decision: str | None = None,
 ) -> SyncTaskExecutionResult:
     return SyncTaskExecutionResult(
         task_id=task.id,
@@ -143,8 +150,21 @@ def _build_sync_result(
         output_snapshot=output_snapshot,
         message=message,
         final_task_status=final_task_status,
-        validation_decided_status=validation_decided_status,
+        validation_decision=validation_decision,
     )
+
+
+def _extract_artifacts_created(executor_result: CodeExecutorResult) -> str | None:
+    artifact_refs: list[str] = []
+
+    for note in executor_result.journal.notes_for_validator:
+        if "artifact_id=" in note:
+            artifact_refs.append(note.strip())
+
+    if not artifact_refs:
+        return None
+
+    return " | ".join(artifact_refs)
 
 
 def _validate_after_execution(
@@ -152,7 +172,7 @@ def _validate_after_execution(
     *,
     task: Task,
     run_id: int,
-    executor_result,
+    executor_result: CodeExecutorResult,
 ) -> SyncTaskExecutionResult:
     try:
         validation_service_result = validate_code_task(
@@ -167,17 +187,17 @@ def _validate_after_execution(
             f"Execution finished but validation could not be completed for task {task.id}: {str(exc)}"
         ) from exc
 
-    decided_status = validation_service_result.validation_result.decided_task_status
+    decision = validation_service_result.validation_result.decision
 
-    if decided_status == CODE_VALIDATION_DECIDED_STATUS_COMPLETED:
+    if decision == CODE_VALIDATION_DECISION_COMPLETED:
         message = "Execution and validation completed successfully."
-    elif decided_status == CODE_VALIDATION_DECIDED_STATUS_PARTIAL:
+    elif decision == CODE_VALIDATION_DECISION_PARTIAL:
         message = "Execution finished and validation concluded the task is partial."
-    elif decided_status == CODE_VALIDATION_DECIDED_STATUS_FAILED:
+    elif decision == CODE_VALIDATION_DECISION_FAILED:
         message = "Execution finished but validation concluded the task failed."
     else:
         raise TaskExecutionServiceError(
-            f"Unsupported validation decided_task_status '{decided_status}'."
+            f"Unsupported validation decision '{decision}'."
         )
 
     refreshed_task = _get_task_or_raise(db, task.id)
@@ -185,11 +205,11 @@ def _validate_after_execution(
     return _build_sync_result(
         task=refreshed_task,
         run_id=run_id,
-        run_status=EXECUTOR_STATUS_AWAITING_VALIDATION,
+        run_status=CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
         output_snapshot=executor_result.output_snapshot,
         message=message,
         final_task_status=validation_service_result.final_task_status,
-        validation_decided_status=decided_status,
+        validation_decision=decision,
     )
 
 
@@ -208,28 +228,28 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         mark_execution_run_started(db, run_id)
         mark_task_running(db, task.id)
 
-        executor_result = execute_atomic_task(
-            db=db,
+        executor = LocalCodeExecutor(db=db)
+        executor_result = executor.execute(
             task=task,
             execution_run_id=run_id,
         )
 
-        if executor_result.status not in VALID_EXECUTOR_FINAL_STATUSES:
+        if executor_result.execution_status not in VALID_EXECUTOR_FINAL_STATUSES:
             raise TaskExecutionServiceError(
-                f"Unsupported executor result status '{executor_result.status}' returned by executor. "
+                f"Unsupported executor result status '{executor_result.execution_status}' returned by executor. "
                 f"Allowed statuses: {sorted(VALID_EXECUTOR_FINAL_STATUSES)}"
             )
 
-        if executor_result.status == EXECUTOR_STATUS_AWAITING_VALIDATION:
+        if executor_result.execution_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION:
             mark_execution_run_succeeded(
                 db=db,
                 run_id=run_id,
                 output_snapshot=executor_result.output_snapshot,
-                work_summary=executor_result.work_summary,
-                work_details=executor_result.work_details,
-                artifacts_created=executor_result.artifacts_created,
-                completed_scope=executor_result.completed_scope,
-                validation_notes=executor_result.validation_notes,
+                work_summary=executor_result.journal.summary,
+                work_details=executor_result.edit_plan.summary,
+                artifacts_created=_extract_artifacts_created(executor_result),
+                completed_scope=executor_result.journal.claimed_completed_scope,
+                validation_notes="; ".join(executor_result.journal.notes_for_validator),
             )
 
             return _validate_after_execution(
@@ -239,14 +259,25 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 executor_result=executor_result,
             )
 
-        if executor_result.status == EXECUTOR_STATUS_FAILED:
+        if executor_result.execution_status == CODE_EXECUTION_STATUS_FAILED:
             mark_execution_run_failed(
                 db=db,
                 run_id=run_id,
-                error_message=executor_result.work_summary or "Executor reported a failed execution.",
+                error_message=executor_result.journal.summary or "Executor reported a failed execution.",
                 failure_type=FAILURE_TYPE_INTERNAL,
                 failure_code="executor_failed",
                 recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
+                work_summary=executor_result.journal.summary,
+                work_details=executor_result.edit_plan.summary,
+                artifacts_created=_extract_artifacts_created(executor_result),
+                completed_scope=executor_result.journal.claimed_completed_scope,
+                remaining_scope=executor_result.journal.claimed_remaining_scope,
+                blockers_found=(
+                    "; ".join(executor_result.journal.encountered_uncertainties)
+                    if executor_result.journal.encountered_uncertainties
+                    else None
+                ),
+                validation_notes="; ".join(executor_result.journal.notes_for_validator),
             )
             mark_task_failed(db, task.id)
 
@@ -254,24 +285,28 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             return _build_sync_result(
                 task=refreshed_task,
                 run_id=run_id,
-                run_status=EXECUTOR_STATUS_FAILED,
+                run_status=CODE_EXECUTION_STATUS_FAILED,
                 output_snapshot=executor_result.output_snapshot,
                 message="Execution failed before validation.",
                 final_task_status=refreshed_task.status,
-                validation_decided_status=None,
+                validation_decision=None,
             )
 
-        if executor_result.status == EXECUTOR_STATUS_REJECTED:
+        if executor_result.execution_status == CODE_EXECUTION_STATUS_REJECTED:
             mark_execution_run_rejected(
                 db=db,
                 run_id=run_id,
-                error_message=executor_result.work_summary or "Executor rejected the task.",
+                error_message=executor_result.journal.summary or "Executor rejected the task.",
                 failure_code="executor_rejected",
                 recovery_action=RECOVERY_ACTION_REATOMIZE,
-                work_summary=executor_result.work_summary,
-                work_details=executor_result.work_details,
-                blockers_found=executor_result.blockers_found,
-                validation_notes=executor_result.validation_notes,
+                work_summary=executor_result.journal.summary,
+                work_details=executor_result.edit_plan.summary,
+                blockers_found=(
+                    "; ".join(executor_result.journal.encountered_uncertainties)
+                    if executor_result.journal.encountered_uncertainties
+                    else None
+                ),
+                validation_notes="; ".join(executor_result.journal.notes_for_validator),
             )
             mark_task_failed(db, task.id)
 
@@ -279,19 +314,67 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             return _build_sync_result(
                 task=refreshed_task,
                 run_id=run_id,
-                run_status=EXECUTOR_STATUS_REJECTED,
+                run_status=CODE_EXECUTION_STATUS_REJECTED,
                 output_snapshot=executor_result.output_snapshot,
                 message="Execution was rejected before validation.",
                 final_task_status=refreshed_task.status,
-                validation_decided_status=None,
+                validation_decision=None,
             )
 
         raise TaskExecutionServiceError(
-            f"Unhandled executor status '{executor_result.status}'."
+            f"Unhandled executor status '{executor_result.execution_status}'."
         )
 
     except TaskExecutionServiceError:
         raise
+
+    except CodeExecutorRejectedError as exc:
+        mark_execution_run_rejected(
+            db=db,
+            run_id=run_id,
+            error_message=exc.message,
+            failure_code=exc.failure_code,
+            recovery_action=RECOVERY_ACTION_REATOMIZE,
+            work_summary=exc.message,
+            work_details="The executor deliberately rejected the task before execution.",
+            blockers_found=exc.blockers_found,
+            validation_notes="Execution was rejected at the executor boundary.",
+        )
+        mark_task_failed(db, task.id)
+
+        refreshed_task = _get_task_or_raise(db, task.id)
+        return _build_sync_result(
+            task=refreshed_task,
+            run_id=run_id,
+            run_status=CODE_EXECUTION_STATUS_REJECTED,
+            output_snapshot=None,
+            message="Execution was rejected before validation.",
+            final_task_status=refreshed_task.status,
+            validation_decision=None,
+        )
+
+    except CodeExecutorInternalError as exc:
+        mark_execution_run_failed(
+            db=db,
+            run_id=run_id,
+            error_message=exc.message,
+            failure_type=FAILURE_TYPE_INTERNAL,
+            failure_code=exc.failure_code,
+            recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
+            validation_notes="Internal execution failure.",
+        )
+        mark_task_failed(db, task.id)
+
+        refreshed_task = _get_task_or_raise(db, task.id)
+        return _build_sync_result(
+            task=refreshed_task,
+            run_id=run_id,
+            run_status=CODE_EXECUTION_STATUS_FAILED,
+            output_snapshot=None,
+            message="Execution failed before validation.",
+            final_task_status=refreshed_task.status,
+            validation_decision=None,
+        )
 
     except Exception as exc:
         mark_execution_run_failed(
@@ -308,35 +391,16 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         return _build_sync_result(
             task=refreshed_task,
             run_id=run_id,
-            run_status=EXECUTOR_STATUS_FAILED,
+            run_status=CODE_EXECUTION_STATUS_FAILED,
             output_snapshot=None,
             message="Execution failed before validation.",
             final_task_status=refreshed_task.status,
-            validation_decided_status=None,
+            validation_decision=None,
         )
 
 
 def execute_task_sync(db: Session, task_id: int) -> SyncTaskExecutionResult:
     task = _get_task_or_raise(db, task_id)
     _validate_task_is_executable(task)
-
-    execution_run = _create_execution_run_for_task(db, task)
-    return execute_existing_run_sync(db=db, run_id=execution_run.id)
-
-
-def start_task_execution_async(db: Session, task_id: int) -> AsyncTaskExecutionStartResult:
-    task = _get_task_or_raise(db, task_id)
-    _validate_task_is_executable(task)
-
-    execution_run = _create_execution_run_for_task(db, task)
-
-    from app.workers.tasks import execute_task as execute_task_job
-
-    async_result = execute_task_job.delay(execution_run.id)
-
-    return AsyncTaskExecutionStartResult(
-        task_id=task.id,
-        execution_run_id=execution_run.id,
-        celery_task_id=async_result.id,
-        executor_type=task.executor_type,
-    )
+    run = _create_execution_run_for_task(db, task)
+    return execute_existing_run_sync(db, run.id)

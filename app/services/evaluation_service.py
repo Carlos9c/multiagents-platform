@@ -24,6 +24,7 @@ from app.schemas.project_memory import ProjectOperationalContext
 from app.services.artifacts import create_artifact
 from app.services.evaluation_client import call_evaluation_model
 from app.services.project_memory_service import (
+    build_and_persist_project_operational_context,
     build_project_operational_context,
     persist_project_operational_context,
 )
@@ -174,7 +175,6 @@ def build_evaluation_input(
     executed_task_ids_since_last_checkpoint: list[int],
     artifact_ids_since_last_checkpoint: list[int],
     recovery_context: RecoveryContext | None = None,
-    persist_project_context_snapshot: bool = False,
 ) -> EvaluationInput:
     project = db.get(Project, project_id)
     if not project:
@@ -267,13 +267,6 @@ def build_evaluation_input(
         project_id=project_id,
     )
 
-    if persist_project_context_snapshot:
-        persist_project_operational_context(
-            db=db,
-            project_context=project_operational_context,
-            created_by="evaluation_service",
-        )
-
     return EvaluationInput(
         project_id=project.id,
         project_name=project.name,
@@ -310,7 +303,6 @@ def evaluate_checkpoint(
     executed_task_ids_since_last_checkpoint: list[int],
     artifact_ids_since_last_checkpoint: list[int],
     recovery_context: RecoveryContext | None = None,
-    persist_project_context_snapshot: bool = False,
 ) -> EvaluationDecision:
     evaluation_input = build_evaluation_input(
         db=db,
@@ -320,7 +312,6 @@ def evaluate_checkpoint(
         executed_task_ids_since_last_checkpoint=executed_task_ids_since_last_checkpoint,
         artifact_ids_since_last_checkpoint=artifact_ids_since_last_checkpoint,
         recovery_context=recovery_context,
-        persist_project_context_snapshot=persist_project_context_snapshot,
     )
     return call_evaluation_model(evaluation_input)
 
@@ -336,7 +327,7 @@ def persist_evaluation_decision(
         raise EvaluationServiceError(f"Project {project_id} not found")
 
     content = _serialize_evaluation_decision(decision)
-    return create_artifact(
+    artifact = create_artifact(
         db=db,
         project_id=project_id,
         task_id=None,
@@ -344,3 +335,34 @@ def persist_evaluation_decision(
         content=content,
         created_by=created_by,
     )
+
+    # Persist a fresh cumulative project memory snapshot after every checkpoint evaluation.
+    # Checkpoint evaluations are always important enough to deserve a memory refresh.
+    build_and_persist_project_operational_context(
+        db=db,
+        project_id=project_id,
+        created_by="evaluation_service",
+    )
+
+    return artifact
+
+
+def persist_project_operational_context_snapshot(
+    db: Session,
+    project_id: int,
+    created_by: str = "evaluation_service",
+) -> ProjectOperationalContext:
+    """
+    Explicit helper kept for callers that want to persist project memory
+    independently of a checkpoint decision artifact.
+    """
+    project_context = build_project_operational_context(
+        db=db,
+        project_id=project_id,
+    )
+    persist_project_operational_context(
+        db=db,
+        project_context=project_context,
+        created_by=created_by,
+    )
+    return project_context
