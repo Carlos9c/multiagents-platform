@@ -19,7 +19,11 @@ from app.services.execution_plan_service import (
     persist_execution_plan,
 )
 from app.services.planner import generate_project_plan
-from app.services.post_batch_service import process_batch_after_execution
+from app.services.post_batch_service import (
+    PostBatchServiceError,
+    process_batch_after_execution,
+)
+from app.services.project_storage import CODE_DOMAIN, ProjectStorageError, ProjectStorageService
 from app.services.task_execution_service import (
     TaskExecutionServiceError,
     execute_task_sync,
@@ -38,6 +42,37 @@ def _get_project_or_raise(db: Session, project_id: int) -> Project:
     return project
 
 
+def _bootstrap_project_storage_for_execution(project_id: int) -> None:
+    """
+    Ensures the local project storage structure exists before the workflow
+    enters any execution-capable phase.
+
+    Current pragmatic decision:
+    - bootstrap universal project storage
+    - bootstrap code domain storage
+    - write/update a storage manifest
+
+    This is done at workflow start so storage failures happen early and
+    predictably, instead of appearing mid-execution.
+    """
+    try:
+        storage_service = ProjectStorageService()
+        storage_service.ensure_project_storage(project_id)
+        storage_service.ensure_domain_storage(project_id, CODE_DOMAIN)
+        storage_service.write_project_storage_manifest(
+            project_id=project_id,
+            enabled_domains=[CODE_DOMAIN],
+        )
+    except ProjectStorageError as exc:
+        raise ProjectWorkflowServiceError(
+            f"Failed to bootstrap project storage for project {project_id}: {str(exc)}"
+        ) from exc
+    except Exception as exc:
+        raise ProjectWorkflowServiceError(
+            f"Unexpected error while bootstrapping project storage for project {project_id}: {str(exc)}"
+        ) from exc
+
+
 def _has_tasks_at_level(db: Session, project_id: int, planning_level: str) -> bool:
     task = (
         db.query(Task)
@@ -50,7 +85,11 @@ def _has_tasks_at_level(db: Session, project_id: int, planning_level: str) -> bo
     return task is not None
 
 
-def _get_pending_tasks_at_level(db: Session, project_id: int, planning_level: str) -> list[Task]:
+def _get_pending_tasks_at_level(
+    db: Session,
+    project_id: int,
+    planning_level: str,
+) -> list[Task]:
     return (
         db.query(Task)
         .filter(
@@ -111,14 +150,63 @@ def _run_atomic_generation_phase(db: Session, project_id: int) -> bool:
     return True
 
 
-def _execute_batch_tasks_synchronously(db: Session, batch_task_ids: list[int]) -> None:
+def _execute_batch_tasks_synchronously(
+    db: Session,
+    batch_task_ids: list[int],
+) -> None:
+    """
+    Executes each task in the batch synchronously.
+
+    Important semantic contract:
+    execute_task_sync(...) performs the full local task pipeline:
+    - execution
+    - validation
+    - final task-state consolidation
+
+    Therefore, when this function returns successfully for a task, that task
+    must already be in a terminal state suitable for post-batch processing.
+    """
     for task_id in batch_task_ids:
         try:
-            execute_task_sync(db=db, task_id=task_id)
+            result = execute_task_sync(db=db, task_id=task_id)
+
+            if result.final_task_status is None:
+                raise ProjectWorkflowServiceError(
+                    f"Task {task_id} finished execution without a final consolidated task status."
+                )
+
         except TaskExecutionServiceError as exc:
             raise ProjectWorkflowServiceError(
-                f"Failed to execute task {task_id} synchronously: {str(exc)}"
+                f"Failed to execute and validate task {task_id} synchronously: {str(exc)}"
             ) from exc
+
+
+def _process_batch_after_terminal_tasks(
+    db: Session,
+    project_id: int,
+    plan: ExecutionPlan,
+    batch_id: str,
+    current_finalization_iteration_count: int,
+    max_finalization_iterations: int,
+):
+    """
+    Runs post-batch processing only after the batch tasks have completed
+    execution+validation and are in terminal task states.
+    """
+    try:
+        return process_batch_after_execution(
+            db=db,
+            project_id=project_id,
+            plan=plan,
+            batch_id=batch_id,
+            persist_result=True,
+            finalization_iteration_count=current_finalization_iteration_count,
+            max_finalization_iterations=max_finalization_iterations,
+        )
+    except PostBatchServiceError as exc:
+        raise ProjectWorkflowServiceError(
+            f"Post-batch processing failed for batch '{batch_id}': {str(exc)}"
+        ) from exc
 
 
 def _run_execution_iteration(
@@ -137,15 +225,17 @@ def _run_execution_iteration(
     current_finalization_iteration_count = finalization_iteration_count
 
     for batch in plan.execution_batches:
-        _execute_batch_tasks_synchronously(db=db, batch_task_ids=batch.task_ids)
+        _execute_batch_tasks_synchronously(
+            db=db,
+            batch_task_ids=batch.task_ids,
+        )
 
-        post_batch_result = process_batch_after_execution(
+        post_batch_result = _process_batch_after_terminal_tasks(
             db=db,
             project_id=project_id,
             plan=plan,
             batch_id=batch.batch_id,
-            persist_result=True,
-            finalization_iteration_count=current_finalization_iteration_count,
+            current_finalization_iteration_count=current_finalization_iteration_count,
             max_finalization_iterations=max_finalization_iterations,
         )
 
@@ -212,6 +302,7 @@ def run_project_workflow(
     max_finalization_iterations: int = 2,
 ) -> ProjectWorkflowResult:
     _get_project_or_raise(db=db, project_id=project_id)
+    _bootstrap_project_storage_for_execution(project_id=project_id)
 
     planning_completed = _run_planner_if_needed(db=db, project_id=project_id)
     refinement_completed = _run_technical_refinement_phase(db=db, project_id=project_id)

@@ -46,6 +46,8 @@ NON_TERMINAL_RUN_STATUSES = {
     EXECUTION_RUN_STATUS_RUNNING,
 }
 
+CODE_VALIDATION_RESULT_ARTIFACT_TYPE = "code_validation_result"
+
 
 class PostBatchServiceError(Exception):
     """Base exception for post-batch orchestration errors."""
@@ -79,6 +81,21 @@ def _get_latest_run_for_task(db: Session, task_id: int) -> ExecutionRun | None:
         db.query(ExecutionRun)
         .filter(ExecutionRun.task_id == task_id)
         .order_by(ExecutionRun.id.desc())
+        .first()
+    )
+
+
+def _get_latest_validation_artifact_for_task(
+    db: Session,
+    task_id: int,
+) -> Artifact | None:
+    return (
+        db.query(Artifact)
+        .filter(
+            Artifact.task_id == task_id,
+            Artifact.artifact_type == CODE_VALIDATION_RESULT_ARTIFACT_TYPE,
+        )
+        .order_by(Artifact.id.desc())
         .first()
     )
 
@@ -129,6 +146,22 @@ def _require_terminal_run_for_task(
         )
 
     return latest_run
+
+
+def _require_validation_artifact_for_problematic_task(
+    db: Session,
+    *,
+    task: Task,
+    batch_id: str,
+    plan_version: int,
+) -> Artifact:
+    validation_artifact = _get_latest_validation_artifact_for_task(db, task.id)
+    if validation_artifact is None:
+        raise PostBatchServiceError(
+            f"Batch '{batch_id}' in plan version {plan_version} cannot be processed because "
+            f"task {task.id} is '{task.status}' but has no '{CODE_VALIDATION_RESULT_ARTIFACT_TYPE}' artifact."
+        )
+    return validation_artifact
 
 
 def _get_artifact_ids_for_tasks(
@@ -184,6 +217,47 @@ def _build_remaining_plan_summary(plan: ExecutionPlan, batch_id: str) -> str | N
         "blocked_task_ids": plan.blocked_task_ids,
         "sequencing_rationale": plan.sequencing_rationale,
         "uncertainties": plan.uncertainties,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _build_execution_context_summary(
+    *,
+    task: Task,
+    latest_run: ExecutionRun,
+) -> str:
+    payload = {
+        "task_id": task.id,
+        "task_status": task.status,
+        "latest_run": {
+            "run_id": latest_run.id,
+            "run_status": latest_run.status,
+            "failure_type": latest_run.failure_type,
+            "failure_code": latest_run.failure_code,
+            "work_summary": latest_run.work_summary,
+            "work_details": latest_run.work_details,
+            "completed_scope": latest_run.completed_scope,
+            "remaining_scope": latest_run.remaining_scope,
+            "blockers_found": latest_run.blockers_found,
+            "validation_notes": latest_run.validation_notes,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _build_validation_context_summary(
+    *,
+    task: Task,
+    validation_artifact: Artifact,
+) -> str:
+    payload = {
+        "task_id": task.id,
+        "task_status": task.status,
+        "validation_artifact": {
+            "artifact_id": validation_artifact.id,
+            "artifact_type": validation_artifact.artifact_type,
+            "content": validation_artifact.content,
+        },
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -267,26 +341,53 @@ def process_batch_after_execution(
             plan_version=plan.plan_version,
         )
 
+        latest_validation_artifact = _get_latest_validation_artifact_for_task(db, task.id)
+
+        summary_failure_type = latest_run.failure_type
+        summary_failure_code = latest_run.failure_code
+
+        if task.status in {TASK_STATUS_FAILED, TASK_STATUS_PARTIAL} and latest_validation_artifact:
+            summary_failure_type = summary_failure_type or "validation_decision"
+            summary_failure_code = summary_failure_code or f"task_{task.status}"
+
         task_run_summaries.append(
             PostBatchTaskRunSummary(
                 task_id=task.id,
                 run_id=latest_run.id,
-                run_status=latest_run.status,
-                failure_type=latest_run.failure_type,
-                failure_code=latest_run.failure_code,
+                run_status=f"{latest_run.status}|task:{task.status}",
+                failure_type=summary_failure_type,
+                failure_code=summary_failure_code,
             )
         )
 
         executed_task_ids.append(task.id)
 
         if task.status in {TASK_STATUS_FAILED, TASK_STATUS_PARTIAL}:
+            validation_artifact = _require_validation_artifact_for_problematic_task(
+                db=db,
+                task=task,
+                batch_id=batch_id,
+                plan_version=plan.plan_version,
+            )
+
             problematic_run_ids.append(latest_run.id)
+
+            execution_context_summary = _build_execution_context_summary(
+                task=task,
+                latest_run=latest_run,
+            )
+            validation_context_summary = _build_validation_context_summary(
+                task=task,
+                validation_artifact=validation_artifact,
+            )
 
             decision = generate_recovery_decision(
                 db=db,
                 run_id=latest_run.id,
                 next_batch_summary=next_batch_summary,
                 remaining_plan_summary=remaining_plan_summary,
+                execution_context_summary=execution_context_summary,
+                validation_context_summary=validation_context_summary,
             )
             persist_recovery_decision(
                 db=db,
@@ -304,8 +405,10 @@ def process_batch_after_execution(
                     created_tasks=created_tasks,
                 )
             )
+
         elif task.status == TASK_STATUS_COMPLETED:
             successful_task_ids.append(task.id)
+
         else:
             raise PostBatchServiceError(
                 f"Batch '{batch_id}' in plan version {plan.plan_version} reached an "

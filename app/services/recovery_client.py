@@ -1,137 +1,175 @@
 from pydantic import ValidationError
 
-from app.schemas.recovery import RecoveryDecision, RecoveryInput
+from app.models.execution_run import ExecutionRun
+from app.models.task import Task
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
+from pydantic import BaseModel, Field
+
+
+RECOVERY_ACTION_RETRY = "retry"
+RECOVERY_ACTION_REATOMIZE = "reatomize"
+RECOVERY_ACTION_INSERT_FOLLOWUP = "insert_followup"
+RECOVERY_ACTION_MANUAL_REVIEW = "manual_review"
+
+VALID_RECOVERY_ACTIONS = {
+    RECOVERY_ACTION_RETRY,
+    RECOVERY_ACTION_REATOMIZE,
+    RECOVERY_ACTION_INSERT_FOLLOWUP,
+    RECOVERY_ACTION_MANUAL_REVIEW,
+}
+
+
+class RecoveryDecisionTaskCreate(BaseModel):
+    title: str
+    description: str
+    objective: str | None = None
+    implementation_notes: str | None = None
+    acceptance_criteria: str | None = None
+    technical_constraints: str | None = None
+    out_of_scope: str | None = None
+    task_type: str = "implementation"
+    priority: str = "medium"
+    executor_type: str = "code_executor"
+
+
+class RecoveryDecision(BaseModel):
+    action: str
+    reason: str
+    created_tasks: list[RecoveryDecisionTaskCreate] = Field(default_factory=list)
+    retry_same_task: bool = False
+    requires_manual_review: bool = False
 
 
 RECOVERY_SYSTEM_PROMPT = """
-You are a senior recovery agent in a multi-agent software development platform.
+You are a strict recovery decision agent for a multi-step code execution system.
 
-Your role is local and task-specific.
+You receive:
+- the current task
+- the latest execution run
+- execution context summary
+- validation context summary
+- the next batch summary
+- the remaining execution plan summary
 
-You analyze a problematic execution outcome for one atomic task and decide what should happen next for that task.
+Your job is to decide the best recovery action for the task.
 
-Return ONLY JSON matching the provided schema.
+Allowed actions:
+- retry
+- reatomize
+- insert_followup
+- manual_review
 
-Core mission:
-- Diagnose why the task did not complete correctly.
-- Decide the most appropriate local recovery action.
-- Avoid duplicating global planning or evaluation responsibilities.
-- Produce a structured recovery decision that downstream agents can trust.
+Critical rules:
+- Validation context is mandatory evidence for deciding recovery quality.
+- Use execution context to understand what was attempted.
+- Use validation context to understand why the task did not satisfy what was requested.
+- Prefer reatomize if the task is too broad, ambiguous, or structurally wrong.
+- Prefer insert_followup if the task mostly makes sense but now needs one or more concrete follow-up atomic tasks.
+- Prefer retry only if the task is still correct as defined and another attempt is reasonable.
+- Prefer manual_review if the situation is too ambiguous or risky.
 
-Responsibility boundaries:
-- You operate at the level of a problematic task and its execution run.
-- You do NOT decide the full project sequence.
-- You do NOT perform global evaluation of the whole batch.
-- You may propose local replacement or follow-up tasks when needed.
-- Your output will later be consumed by the evaluation layer, so be explicit and operational.
-
-Decision guidance:
-- retry_same_atomic:
-  use when the same atomic task still appears valid and should be attempted again
-- replace_atomic_task:
-  use when the task should be replaced by one or more new atomic tasks with clearer execution scope
-- re_atomize_from_parent:
-  use when the current atomic task appears structurally wrong and should be regenerated from its parent refined task
-- send_to_technical_refiner:
-  use when the issue seems deeper than atomic granularity and the parent refined specification likely needs improvement
-- manual_review:
-  use when the situation is too ambiguous or risky for automated recovery
-- mark_obsolete:
-  use when the source task should no longer be considered active and no direct replacement should be created from this recovery step
-
-Critical reasoning rules:
-- Treat rejected, partial, and failed runs as distinct signals.
-- Use recent runs and artifacts to avoid repeating obviously bad actions.
-- If the task already produced useful partial progress, reflect that in covered_gap_summary and still_blocks_progress.
-- If the next batch would be blocked unless this issue is addressed, say so explicitly.
-- Prefer replacement tasks when the current atomic task is poorly scoped or underspecified.
-- Prefer retry only when the current task still looks valid.
-- Do not propose duplicate tasks if the same local gap already appears covered by existing evidence in the context.
-- Be conservative when confidence is low.
-
-Output rules:
-- Return ONLY valid JSON.
-- Do not include markdown.
-- Do not include commentary outside the schema.
-- proposed_tasks must only be included when needed.
-- should_mark_source_task_obsolete should be true when the original task should not remain active.
-- still_blocks_progress must reflect whether the unresolved issue can safely allow the project to continue.
-- evaluation_guidance must help the evaluation agent understand the local recovery outcome without redoing your work.
-- execution_guidance must explain what the orchestration layer should do next for this local issue.
-""".strip()
+Output discipline:
+- Return ONLY JSON matching the schema.
+- Be concrete.
+- Do not propose vague suggestions.
+"""
 
 
-def build_recovery_user_prompt(
-    recovery_input: RecoveryInput,
+def _build_recovery_user_prompt(
+    *,
+    task: Task,
+    run: ExecutionRun,
+    next_batch_summary: str | None,
+    remaining_plan_summary: str | None,
+    execution_context_summary: str,
+    validation_context_summary: str,
 ) -> str:
     return f"""
-Analyze the following problematic execution outcome and return a structured recovery decision.
+Task:
+- task_id: {task.id}
+- title: {task.title}
+- description: {task.description}
+- objective: {task.objective}
+- acceptance_criteria: {task.acceptance_criteria}
+- technical_constraints: {task.technical_constraints}
+- out_of_scope: {task.out_of_scope}
+- current_task_status: {task.status}
+- planning_level: {task.planning_level}
+- executor_type: {task.executor_type}
 
-Recovery input:
-{recovery_input.model_dump_json(indent=2)}
+Latest run:
+- run_id: {run.id}
+- run_status: {run.status}
+- failure_type: {run.failure_type}
+- failure_code: {run.failure_code}
+- work_summary: {run.work_summary}
+- work_details: {run.work_details}
+- completed_scope: {run.completed_scope}
+- remaining_scope: {run.remaining_scope}
+- blockers_found: {run.blockers_found}
+- validation_notes: {run.validation_notes}
+
+Execution context summary:
+{execution_context_summary}
+
+Validation context summary:
+{validation_context_summary}
+
+Next batch summary:
+{next_batch_summary or "None"}
+
+Remaining execution plan summary:
+{remaining_plan_summary or "None"}
+
+Decide the best recovery action.
+Return only strict JSON.
 """.strip()
 
 
-def build_recovery_retry_prompt(
-    recovery_input: RecoveryInput,
-    validation_error: str,
-) -> str:
-    return f"""
-Analyze the following problematic execution outcome and return a structured recovery decision.
-
-Your previous output was invalid.
-
-Validation error:
-{validation_error}
-
-You must correct the output and return valid JSON matching the schema.
-
-Important corrections:
-- output only valid JSON
-- decision_type must be one of the allowed values
-- if replacement_task_strategy is 'none', proposed_tasks must be empty
-- if replacement_task_strategy is not 'none', proposed_tasks must not be empty
-- do not propose duplicate work already covered in context
-- still_blocks_progress must be explicit
-- evaluation_guidance must explain the local outcome for the evaluator
-- execution_guidance must explain the next orchestration action
-- mark the source task obsolete when your decision effectively replaces it
-
-Recovery input:
-{recovery_input.model_dump_json(indent=2)}
-""".strip()
+class RecoveryClientError(Exception):
+    """Base exception for recovery client."""
 
 
-def call_recovery_model(
-    recovery_input: RecoveryInput,
+def evaluate_recovery_decision(
+    *,
+    task: Task,
+    run: ExecutionRun,
+    next_batch_summary: str | None,
+    remaining_plan_summary: str | None,
+    execution_context_summary: str,
+    validation_context_summary: str,
 ) -> RecoveryDecision:
     provider = get_llm_provider()
     strict_schema = to_openai_strict_json_schema(RecoveryDecision.model_json_schema())
 
-    first_user_prompt = build_recovery_user_prompt(recovery_input)
+    user_prompt = _build_recovery_user_prompt(
+        task=task,
+        run=run,
+        next_batch_summary=next_batch_summary,
+        remaining_plan_summary=remaining_plan_summary,
+        execution_context_summary=execution_context_summary,
+        validation_context_summary=validation_context_summary,
+    )
 
     raw = provider.generate_structured(
         system_prompt=RECOVERY_SYSTEM_PROMPT,
-        user_prompt=first_user_prompt,
+        user_prompt=user_prompt,
         schema_name="recovery_decision",
         json_schema=strict_schema,
     )
 
     try:
-        return RecoveryDecision.model_validate(raw)
+        decision = RecoveryDecision.model_validate(raw)
     except ValidationError as exc:
-        retry_user_prompt = build_recovery_retry_prompt(
-            recovery_input=recovery_input,
-            validation_error=str(exc),
+        raise RecoveryClientError(
+            f"Invalid structured response from recovery model: {str(exc)}"
+        ) from exc
+
+    if decision.action not in VALID_RECOVERY_ACTIONS:
+        raise RecoveryClientError(
+            f"Unsupported recovery action '{decision.action}'. "
+            f"Allowed actions: {sorted(VALID_RECOVERY_ACTIONS)}"
         )
 
-        raw_retry = provider.generate_structured(
-            system_prompt=RECOVERY_SYSTEM_PROMPT,
-            user_prompt=retry_user_prompt,
-            schema_name="recovery_decision",
-            json_schema=strict_schema,
-        )
-
-        return RecoveryDecision.model_validate(raw_retry)
+    return decision

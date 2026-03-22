@@ -15,27 +15,41 @@ from app.models.task import (
     PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     Task,
 )
+from app.schemas.code_validation import (
+    CODE_VALIDATION_DECIDED_STATUS_COMPLETED,
+    CODE_VALIDATION_DECIDED_STATUS_FAILED,
+    CODE_VALIDATION_DECIDED_STATUS_PARTIAL,
+)
 from app.services.execution_runs import (
     create_execution_run,
     get_execution_run,
     mark_execution_run_failed,
-    mark_execution_run_partial,
     mark_execution_run_rejected,
     mark_execution_run_started,
     mark_execution_run_succeeded,
 )
-from app.services.executor import (
-    ExecutorInternalError,
-    ExecutorRejectedError,
-    execute_atomic_task,
+from app.services.executor import execute_atomic_task
+from app.services.task_validation_service import (
+    TaskValidationServiceError,
+    validate_code_task,
 )
 from app.services.tasks import (
-    mark_task_awaiting_validation,
+    mark_task_failed,
     mark_task_running,
 )
 
 SUPPORTED_EXECUTORS = {
     CODE_EXECUTOR,
+}
+
+EXECUTOR_STATUS_AWAITING_VALIDATION = "awaiting_validation"
+EXECUTOR_STATUS_FAILED = "failed"
+EXECUTOR_STATUS_REJECTED = "rejected"
+
+VALID_EXECUTOR_FINAL_STATUSES = {
+    EXECUTOR_STATUS_AWAITING_VALIDATION,
+    EXECUTOR_STATUS_FAILED,
+    EXECUTOR_STATUS_REJECTED,
 }
 
 
@@ -60,6 +74,8 @@ class SyncTaskExecutionResult:
     executor_type: str
     output_snapshot: str | None
     message: str
+    final_task_status: str | None = None
+    validation_decided_status: str | None = None
 
 
 def _get_task_or_raise(db: Session, task_id: int) -> Task:
@@ -109,6 +125,74 @@ def _create_execution_run_for_task(db: Session, task: Task) -> ExecutionRun:
     )
 
 
+def _build_sync_result(
+    *,
+    task: Task,
+    run_id: int,
+    run_status: str,
+    output_snapshot: str | None,
+    message: str,
+    final_task_status: str | None = None,
+    validation_decided_status: str | None = None,
+) -> SyncTaskExecutionResult:
+    return SyncTaskExecutionResult(
+        task_id=task.id,
+        execution_run_id=run_id,
+        run_status=run_status,
+        executor_type=task.executor_type,
+        output_snapshot=output_snapshot,
+        message=message,
+        final_task_status=final_task_status,
+        validation_decided_status=validation_decided_status,
+    )
+
+
+def _validate_after_execution(
+    db: Session,
+    *,
+    task: Task,
+    run_id: int,
+    executor_result,
+) -> SyncTaskExecutionResult:
+    try:
+        validation_service_result = validate_code_task(
+            db=db,
+            task_id=task.id,
+            execution_run_id=run_id,
+            executor_result=executor_result,
+        )
+    except TaskValidationServiceError as exc:
+        mark_task_failed(db, task.id)
+        raise TaskExecutionServiceError(
+            f"Execution finished but validation could not be completed for task {task.id}: {str(exc)}"
+        ) from exc
+
+    decided_status = validation_service_result.validation_result.decided_task_status
+
+    if decided_status == CODE_VALIDATION_DECIDED_STATUS_COMPLETED:
+        message = "Execution and validation completed successfully."
+    elif decided_status == CODE_VALIDATION_DECIDED_STATUS_PARTIAL:
+        message = "Execution finished and validation concluded the task is partial."
+    elif decided_status == CODE_VALIDATION_DECIDED_STATUS_FAILED:
+        message = "Execution finished but validation concluded the task failed."
+    else:
+        raise TaskExecutionServiceError(
+            f"Unsupported validation decided_task_status '{decided_status}'."
+        )
+
+    refreshed_task = _get_task_or_raise(db, task.id)
+
+    return _build_sync_result(
+        task=refreshed_task,
+        run_id=run_id,
+        run_status=EXECUTOR_STATUS_AWAITING_VALIDATION,
+        output_snapshot=executor_result.output_snapshot,
+        message=message,
+        final_task_status=validation_service_result.final_task_status,
+        validation_decided_status=decided_status,
+    )
+
+
 def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResult:
     run = get_execution_run(db, run_id)
     if not run:
@@ -124,101 +208,90 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         mark_execution_run_started(db, run_id)
         mark_task_running(db, task.id)
 
-        result = execute_atomic_task(db=db, task=task)
+        executor_result = execute_atomic_task(
+            db=db,
+            task=task,
+            execution_run_id=run_id,
+        )
 
-        if result.status == "succeeded":
+        if executor_result.status not in VALID_EXECUTOR_FINAL_STATUSES:
+            raise TaskExecutionServiceError(
+                f"Unsupported executor result status '{executor_result.status}' returned by executor. "
+                f"Allowed statuses: {sorted(VALID_EXECUTOR_FINAL_STATUSES)}"
+            )
+
+        if executor_result.status == EXECUTOR_STATUS_AWAITING_VALIDATION:
             mark_execution_run_succeeded(
                 db=db,
                 run_id=run_id,
-                output_snapshot=result.output_snapshot,
-                work_summary=result.work_summary,
-                work_details=result.work_details,
-                artifacts_created=result.artifacts_created,
-                completed_scope=result.completed_scope,
-                validation_notes=result.validation_notes,
-            )
-            mark_task_awaiting_validation(db, task.id)
-
-            return SyncTaskExecutionResult(
-                task_id=task.id,
-                execution_run_id=run_id,
-                run_status="succeeded",
-                executor_type=task.executor_type,
-                output_snapshot=result.output_snapshot,
-                message="Execution finished synchronously and is awaiting validation.",
+                output_snapshot=executor_result.output_snapshot,
+                work_summary=executor_result.work_summary,
+                work_details=executor_result.work_details,
+                artifacts_created=executor_result.artifacts_created,
+                completed_scope=executor_result.completed_scope,
+                validation_notes=executor_result.validation_notes,
             )
 
-        if result.status == "partial":
-            mark_execution_run_partial(
+            return _validate_after_execution(
+                db=db,
+                task=task,
+                run_id=run_id,
+                executor_result=executor_result,
+            )
+
+        if executor_result.status == EXECUTOR_STATUS_FAILED:
+            mark_execution_run_failed(
                 db=db,
                 run_id=run_id,
-                output_snapshot=result.output_snapshot,
-                work_summary=result.work_summary,
-                work_details=result.work_details,
-                artifacts_created=result.artifacts_created,
-                completed_scope=result.completed_scope,
-                remaining_scope=result.remaining_scope,
-                blockers_found=result.blockers_found,
-                validation_notes=result.validation_notes,
+                error_message=executor_result.work_summary or "Executor reported a failed execution.",
+                failure_type=FAILURE_TYPE_INTERNAL,
+                failure_code="executor_failed",
                 recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
             )
-            mark_task_awaiting_validation(db, task.id)
+            mark_task_failed(db, task.id)
 
-            return SyncTaskExecutionResult(
-                task_id=task.id,
-                execution_run_id=run_id,
-                run_status="partial",
-                executor_type=task.executor_type,
-                output_snapshot=result.output_snapshot,
-                message="Execution finished synchronously and is awaiting validation.",
+            refreshed_task = _get_task_or_raise(db, task.id)
+            return _build_sync_result(
+                task=refreshed_task,
+                run_id=run_id,
+                run_status=EXECUTOR_STATUS_FAILED,
+                output_snapshot=executor_result.output_snapshot,
+                message="Execution failed before validation.",
+                final_task_status=refreshed_task.status,
+                validation_decided_status=None,
+            )
+
+        if executor_result.status == EXECUTOR_STATUS_REJECTED:
+            mark_execution_run_rejected(
+                db=db,
+                run_id=run_id,
+                error_message=executor_result.work_summary or "Executor rejected the task.",
+                failure_code="executor_rejected",
+                recovery_action=RECOVERY_ACTION_REATOMIZE,
+                work_summary=executor_result.work_summary,
+                work_details=executor_result.work_details,
+                blockers_found=executor_result.blockers_found,
+                validation_notes=executor_result.validation_notes,
+            )
+            mark_task_failed(db, task.id)
+
+            refreshed_task = _get_task_or_raise(db, task.id)
+            return _build_sync_result(
+                task=refreshed_task,
+                run_id=run_id,
+                run_status=EXECUTOR_STATUS_REJECTED,
+                output_snapshot=executor_result.output_snapshot,
+                message="Execution was rejected before validation.",
+                final_task_status=refreshed_task.status,
+                validation_decided_status=None,
             )
 
         raise TaskExecutionServiceError(
-            f"Unsupported executor result status '{result.status}' returned by executor."
+            f"Unhandled executor status '{executor_result.status}'."
         )
 
-    except ExecutorRejectedError as exc:
-        mark_execution_run_rejected(
-            db=db,
-            run_id=run_id,
-            error_message=exc.message,
-            failure_code=exc.failure_code,
-            recovery_action=RECOVERY_ACTION_REATOMIZE,
-            work_summary=exc.work_summary,
-            work_details=exc.work_details,
-            blockers_found=exc.blockers_found,
-            validation_notes=exc.validation_notes,
-        )
-        mark_task_awaiting_validation(db, task.id)
-
-        return SyncTaskExecutionResult(
-            task_id=task.id,
-            execution_run_id=run_id,
-            run_status="rejected",
-            executor_type=task.executor_type,
-            output_snapshot=None,
-            message="Execution finished synchronously and is awaiting validation.",
-        )
-
-    except ExecutorInternalError as exc:
-        mark_execution_run_failed(
-            db=db,
-            run_id=run_id,
-            error_message=exc.message,
-            failure_type=FAILURE_TYPE_INTERNAL,
-            failure_code=exc.failure_code,
-            recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
-        )
-        mark_task_awaiting_validation(db, task.id)
-
-        return SyncTaskExecutionResult(
-            task_id=task.id,
-            execution_run_id=run_id,
-            run_status="failed",
-            executor_type=task.executor_type,
-            output_snapshot=None,
-            message="Execution finished synchronously and is awaiting validation.",
-        )
+    except TaskExecutionServiceError:
+        raise
 
     except Exception as exc:
         mark_execution_run_failed(
@@ -229,15 +302,17 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             failure_code="task_execution_service_error",
             recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
         )
-        mark_task_awaiting_validation(db, task.id)
+        mark_task_failed(db, task.id)
 
-        return SyncTaskExecutionResult(
-            task_id=task.id,
-            execution_run_id=run_id,
-            run_status="failed",
-            executor_type=task.executor_type,
+        refreshed_task = _get_task_or_raise(db, task.id)
+        return _build_sync_result(
+            task=refreshed_task,
+            run_id=run_id,
+            run_status=EXECUTOR_STATUS_FAILED,
             output_snapshot=None,
-            message="Execution finished synchronously and is awaiting validation.",
+            message="Execution failed before validation.",
+            final_task_status=refreshed_task.status,
+            validation_decided_status=None,
         )
 
 
