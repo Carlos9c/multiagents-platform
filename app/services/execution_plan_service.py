@@ -1,0 +1,260 @@
+import json
+
+from sqlalchemy.orm import Session
+
+from app.models.artifact import Artifact
+from app.models.execution_run import ExecutionRun
+from app.models.project import Project
+from app.models.task import (
+    CODE_EXECUTOR,
+    PLANNING_LEVEL_ATOMIC,
+    TASK_STATUS_PENDING,
+    Task,
+)
+from app.services.artifacts import create_artifact
+from app.services.execution_sequencer_client import call_execution_sequencer_model
+from app.schemas.execution_plan import (
+    CandidateAtomicTask,
+    CompletedTaskSummary,
+    ExecutionPlan,
+    ExecutionPlanGenerationInput,
+    ExecutionSequencingInstructions,
+    ExecutionStateSummary,
+    ProjectExecutionContext,
+    RelevantArtifactSummary,
+    UnfinishedTaskSummary,
+)
+
+
+class ExecutionPlanServiceError(Exception):
+    """Base exception for execution plan service errors."""
+
+
+def _serialize_execution_plan(plan: ExecutionPlan) -> str:
+    return json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2)
+
+
+def _build_project_context(project: Project) -> ProjectExecutionContext:
+    return ProjectExecutionContext(
+        project_id=project.id,
+        project_name=project.name,
+        project_goal=project.description or project.name,
+        project_summary=project.description,
+        current_execution_objective=(
+            "Sequence the active pending atomic tasks to maximize safe progress, "
+            "surface dependencies, enforce batch checkpoints, and guarantee stage closure evaluation."
+        ),
+    )
+
+
+def _build_candidate_atomic_task(task: Task, parent_task: Task | None) -> CandidateAtomicTask:
+    parent_refined_title = None
+    parent_high_level_title = None
+
+    if parent_task:
+        if parent_task.planning_level == "refined":
+            parent_refined_title = parent_task.title
+            grandparent = parent_task.parent_task
+            if grandparent:
+                parent_high_level_title = grandparent.title
+        elif parent_task.planning_level == "high_level":
+            parent_high_level_title = parent_task.title
+
+    return CandidateAtomicTask(
+        task_id=task.id,
+        title=task.title,
+        description=task.description,
+        summary=task.summary,
+        objective=task.objective,
+        task_type=task.task_type,
+        priority=task.priority,
+        planning_level=task.planning_level,
+        executor_type=task.executor_type,
+        status=task.status,
+        parent_task_id=task.parent_task_id,
+        parent_refined_title=parent_refined_title,
+        parent_high_level_title=parent_high_level_title,
+        implementation_steps=task.implementation_steps,
+        acceptance_criteria=task.acceptance_criteria,
+        tests_required=task.tests_required,
+        technical_constraints=task.technical_constraints,
+        out_of_scope=task.out_of_scope,
+    )
+
+
+def _build_execution_state_summary(
+    db: Session,
+    project_id: int,
+    limit_artifacts: int = 25,
+) -> ExecutionStateSummary:
+    completed_tasks = (
+        db.query(Task)
+        .filter(Task.project_id == project_id, Task.status == "completed")
+        .order_by(Task.id.asc())
+        .all()
+    )
+
+    unfinished_tasks = (
+        db.query(Task)
+        .filter(Task.project_id == project_id, Task.status.in_(["pending", "running", "failed"]))
+        .order_by(Task.id.asc())
+        .all()
+    )
+
+    recent_artifacts = (
+        db.query(Artifact)
+        .filter(Artifact.project_id == project_id)
+        .order_by(Artifact.id.desc())
+        .limit(limit_artifacts)
+        .all()
+    )
+
+    completed_summaries: list[CompletedTaskSummary] = []
+    for task in completed_tasks:
+        last_run = (
+            db.query(ExecutionRun)
+            .filter(ExecutionRun.task_id == task.id)
+            .order_by(ExecutionRun.id.desc())
+            .first()
+        )
+        completed_summaries.append(
+            CompletedTaskSummary(
+                task_id=task.id,
+                title=task.title,
+                status=task.status,
+                completed_scope=last_run.completed_scope if last_run else None,
+                artifacts_created=last_run.artifacts_created if last_run else None,
+                validation_notes=last_run.validation_notes if last_run else None,
+            )
+        )
+
+    unfinished_summaries: list[UnfinishedTaskSummary] = []
+    for task in unfinished_tasks:
+        last_run = (
+            db.query(ExecutionRun)
+            .filter(ExecutionRun.task_id == task.id)
+            .order_by(ExecutionRun.id.desc())
+            .first()
+        )
+        unfinished_summaries.append(
+            UnfinishedTaskSummary(
+                task_id=task.id,
+                title=task.title,
+                task_status=task.status,
+                last_run_status=last_run.status if last_run else None,
+                failure_type=last_run.failure_type if last_run else None,
+                failure_code=last_run.failure_code if last_run else None,
+                completed_scope=last_run.completed_scope if last_run else None,
+                remaining_scope=last_run.remaining_scope if last_run else None,
+                blockers_found=last_run.blockers_found if last_run else None,
+            )
+        )
+
+    artifact_summaries = [
+        RelevantArtifactSummary(
+            artifact_id=artifact.id,
+            artifact_type=artifact.artifact_type,
+            task_id=artifact.task_id,
+            summary=(
+                artifact.content[:500] + "..."
+                if artifact.content and len(artifact.content) > 500
+                else (artifact.content or "")
+            ),
+        )
+        for artifact in recent_artifacts
+    ]
+
+    return ExecutionStateSummary(
+        completed_tasks=completed_summaries,
+        unfinished_tasks=unfinished_summaries,
+        relevant_artifacts=artifact_summaries,
+    )
+
+
+def build_execution_plan_input(
+    db: Session,
+    project_id: int,
+) -> ExecutionPlanGenerationInput:
+    project = db.get(Project, project_id)
+    if not project:
+        raise ExecutionPlanServiceError(f"Project {project_id} not found")
+
+    candidate_tasks = (
+        db.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.planning_level == PLANNING_LEVEL_ATOMIC,
+            Task.status == TASK_STATUS_PENDING,
+            Task.is_blocked.is_(False),
+            Task.executor_type == CODE_EXECUTOR,
+        )
+        .order_by(Task.id.asc())
+        .all()
+    )
+
+    if not candidate_tasks:
+        raise ExecutionPlanServiceError(
+            f"Project {project_id} has no active pending atomic tasks to sequence"
+        )
+
+    candidate_atomic_tasks = [
+        _build_candidate_atomic_task(task, task.parent_task) for task in candidate_tasks
+    ]
+
+    execution_state = _build_execution_state_summary(db=db, project_id=project_id)
+
+    instructions = ExecutionSequencingInstructions(
+        goal=(
+            "Return a safe, reasoned execution plan for the active pending atomic tasks, "
+            "including batches, inferred dependencies, and mandatory checkpoints on every batch."
+        ),
+        requirements=[
+            "Infer dependencies conservatively when needed",
+            "Prioritize tasks that unlock other tasks",
+            "Mark blocked tasks explicitly",
+            "Every batch must end with a checkpoint",
+            "The final batch must end with a closure checkpoint",
+            "Assume the execution plan is revisable after each checkpoint",
+        ],
+        checkpoint_policy=(
+            "Create a checkpoint after every batch. Use checkpoint reasons and evaluation goals "
+            "that match the semantic risk and integration scope of the batch. "
+            "The final checkpoint must explicitly support stage closure."
+        ),
+    )
+
+    return ExecutionPlanGenerationInput(
+        project_context=_build_project_context(project),
+        candidate_atomic_tasks=candidate_atomic_tasks,
+        execution_state=execution_state,
+        instructions=instructions,
+    )
+
+
+def generate_execution_plan(
+    db: Session,
+    project_id: int,
+) -> ExecutionPlan:
+    sequencing_input = build_execution_plan_input(db=db, project_id=project_id)
+    return call_execution_sequencer_model(sequencing_input)
+
+
+def persist_execution_plan(
+    db: Session,
+    project_id: int,
+    plan: ExecutionPlan,
+    created_by: str = "execution_sequencer_agent",
+) -> Artifact:
+    project = db.get(Project, project_id)
+    if not project:
+        raise ExecutionPlanServiceError(f"Project {project_id} not found")
+
+    content = _serialize_execution_plan(plan)
+    return create_artifact(
+        db=db,
+        project_id=project_id,
+        task_id=None,
+        artifact_type="execution_plan",
+        content=content,
+        created_by=created_by,
+    )

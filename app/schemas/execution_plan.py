@@ -1,0 +1,213 @@
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+
+RiskLevel = Literal["low", "medium", "high"]
+PlanningScope = Literal["project_atomic_tasks", "refined_task_atomic_tasks"]
+CheckpointEvaluationFocus = Literal[
+    "architecture_alignment",
+    "functional_coverage",
+    "artifact_consistency",
+    "task_completion_quality",
+    "dependency_validation",
+    "risk_control",
+    "stage_closure",
+]
+
+
+class ProjectExecutionContext(BaseModel):
+    project_id: int
+    project_name: str
+    project_goal: str
+    project_summary: str | None = None
+    current_execution_objective: str
+
+
+class CandidateAtomicTask(BaseModel):
+    task_id: int
+    title: str
+    description: str | None = None
+    summary: str | None = None
+    objective: str | None = None
+    task_type: str
+    priority: str
+    planning_level: str
+    executor_type: str
+    status: str
+    parent_task_id: int | None = None
+    parent_refined_title: str | None = None
+    parent_high_level_title: str | None = None
+    implementation_steps: str | None = None
+    acceptance_criteria: str | None = None
+    tests_required: str | None = None
+    technical_constraints: str | None = None
+    out_of_scope: str | None = None
+
+    @model_validator(mode="after")
+    def validate_atomic_level(self):
+        if self.planning_level != "atomic":
+            raise ValueError("Execution sequencer only accepts atomic tasks as candidates.")
+        return self
+
+
+class CompletedTaskSummary(BaseModel):
+    task_id: int
+    title: str
+    status: str
+    completed_scope: str | None = None
+    artifacts_created: str | None = None
+    validation_notes: str | None = None
+
+
+class UnfinishedTaskSummary(BaseModel):
+    task_id: int
+    title: str
+    task_status: str
+    last_run_status: str | None = None
+    failure_type: str | None = None
+    failure_code: str | None = None
+    completed_scope: str | None = None
+    remaining_scope: str | None = None
+    blockers_found: str | None = None
+
+
+class RelevantArtifactSummary(BaseModel):
+    artifact_id: int
+    artifact_type: str
+    task_id: int | None = None
+    summary: str
+
+
+class ExecutionStateSummary(BaseModel):
+    completed_tasks: list[CompletedTaskSummary] = Field(default_factory=list)
+    unfinished_tasks: list[UnfinishedTaskSummary] = Field(default_factory=list)
+    relevant_artifacts: list[RelevantArtifactSummary] = Field(default_factory=list)
+
+
+class ExecutionSequencingInstructions(BaseModel):
+    goal: str
+    requirements: list[str] = Field(default_factory=list)
+    checkpoint_policy: str
+
+
+class ExecutionBatch(BaseModel):
+    batch_id: str
+    name: str
+    goal: str
+    task_ids: list[int] = Field(default_factory=list)
+    entry_conditions: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=list)
+    risk_level: RiskLevel
+    checkpoint_after: bool = True
+    checkpoint_id: str
+    checkpoint_reason: str
+
+    @model_validator(mode="after")
+    def validate_batch(self):
+        if not self.task_ids:
+            raise ValueError("ExecutionBatch.task_ids cannot be empty.")
+        if not self.checkpoint_after:
+            raise ValueError("Every execution batch must end with a checkpoint.")
+        if not self.checkpoint_id:
+            raise ValueError("checkpoint_id is required for every batch.")
+        if not self.checkpoint_reason:
+            raise ValueError("checkpoint_reason is required for every batch.")
+        return self
+
+
+class CheckpointDefinition(BaseModel):
+    checkpoint_id: str
+    name: str
+    reason: str
+    after_batch_id: str
+    evaluation_goal: str
+    evaluation_focus: list[CheckpointEvaluationFocus] = Field(default_factory=list)
+    can_introduce_new_tasks: bool = True
+    can_resequence_remaining_work: bool = True
+
+
+class InferredDependency(BaseModel):
+    task_id: int
+    depends_on_task_id: int
+    reason: str
+
+
+class ExecutionPlan(BaseModel):
+    plan_version: int = 1
+    supersedes_plan_version: int | None = None
+    planning_scope: PlanningScope
+    global_goal: str
+    execution_batches: list[ExecutionBatch] = Field(default_factory=list)
+    checkpoints: list[CheckpointDefinition] = Field(default_factory=list)
+    ready_task_ids: list[int] = Field(default_factory=list)
+    blocked_task_ids: list[int] = Field(default_factory=list)
+    inferred_dependencies: list[InferredDependency] = Field(default_factory=list)
+    sequencing_rationale: str
+    uncertainties: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_plan(self):
+        if not self.execution_batches:
+            raise ValueError("ExecutionPlan.execution_batches cannot be empty.")
+
+        batch_ids = {batch.batch_id for batch in self.execution_batches}
+        checkpoint_ids = {checkpoint.checkpoint_id for checkpoint in self.checkpoints}
+
+        for checkpoint in self.checkpoints:
+            if checkpoint.after_batch_id not in batch_ids:
+                raise ValueError(
+                    f"Checkpoint '{checkpoint.checkpoint_id}' references unknown batch "
+                    f"'{checkpoint.after_batch_id}'."
+                )
+
+        for batch in self.execution_batches:
+            if batch.checkpoint_id not in checkpoint_ids:
+                raise ValueError(
+                    f"Batch '{batch.batch_id}' has checkpoint_id '{batch.checkpoint_id}' "
+                    "but no matching CheckpointDefinition exists."
+                )
+
+        for checkpoint in self.checkpoints:
+            batch = next(
+                (candidate for candidate in self.execution_batches if candidate.batch_id == checkpoint.after_batch_id),
+                None,
+            )
+            if batch is None:
+                raise ValueError(
+                    f"Checkpoint '{checkpoint.checkpoint_id}' references an unknown batch."
+                )
+            if batch.checkpoint_id != checkpoint.checkpoint_id:
+                raise ValueError(
+                    f"Checkpoint '{checkpoint.checkpoint_id}' is not aligned with batch "
+                    f"'{batch.batch_id}'."
+                )
+
+        final_batch = self.execution_batches[-1]
+        final_checkpoint = next(
+            (checkpoint for checkpoint in self.checkpoints if checkpoint.checkpoint_id == final_batch.checkpoint_id),
+            None,
+        )
+        if final_checkpoint is None:
+            raise ValueError("The final batch must have a valid final checkpoint.")
+        if final_checkpoint.after_batch_id != final_batch.batch_id:
+            raise ValueError("The final checkpoint must point to the final execution batch.")
+        if "stage_closure" not in final_checkpoint.evaluation_focus:
+            raise ValueError(
+                "The final checkpoint must include 'stage_closure' in evaluation_focus."
+            )
+
+        return self
+
+
+class ExecutionPlanGenerationInput(BaseModel):
+    project_context: ProjectExecutionContext
+    candidate_atomic_tasks: list[CandidateAtomicTask] = Field(default_factory=list)
+    execution_state: ExecutionStateSummary
+    instructions: ExecutionSequencingInstructions
+
+    @model_validator(mode="after")
+    def validate_input(self):
+        if not self.candidate_atomic_tasks:
+            raise ValueError("At least one candidate atomic task is required.")
+        return self

@@ -4,7 +4,40 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 
+PLANNING_LEVEL_HIGH_LEVEL = "high_level"
+PLANNING_LEVEL_REFINED = "refined"
+PLANNING_LEVEL_ATOMIC = "atomic"
+
+TASK_STATUS_PENDING = "pending"
+TASK_STATUS_RUNNING = "running"
+TASK_STATUS_COMPLETED = "completed"
+TASK_STATUS_FAILED = "failed"
+
 PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
+CODE_EXECUTOR = "code_executor"
+
+VALID_PLANNING_LEVELS = {
+    PLANNING_LEVEL_HIGH_LEVEL,
+    PLANNING_LEVEL_REFINED,
+    PLANNING_LEVEL_ATOMIC,
+}
+
+VALID_TASK_STATUSES = {
+    TASK_STATUS_PENDING,
+    TASK_STATUS_RUNNING,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+}
+
+VALID_EXECUTOR_TYPES = {
+    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    CODE_EXECUTOR,
+}
+
+EXECUTABLE_TASK_STATUSES = {
+    TASK_STATUS_PENDING,
+    TASK_STATUS_FAILED,
+}
 
 
 class Task(Base):
@@ -28,7 +61,6 @@ class Task(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     objective: Mapped[str | None] = mapped_column(Text, nullable=True)
-
     proposed_solution: Mapped[str | None] = mapped_column(Text, nullable=True)
     implementation_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     implementation_steps: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -37,9 +69,24 @@ class Task(Base):
     technical_constraints: Mapped[str | None] = mapped_column(Text, nullable=True)
     out_of_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    priority: Mapped[str] = mapped_column(String(50), nullable=False, default="medium")
-    task_type: Mapped[str] = mapped_column(String(50), nullable=False, default="implementation")
-    planning_level: Mapped[str] = mapped_column(String(50), nullable=False, default="high_level")
+    priority: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="medium",
+    )
+
+    task_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="implementation",
+    )
+
+    planning_level: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default=PLANNING_LEVEL_HIGH_LEVEL,
+    )
+
     executor_type: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
@@ -48,9 +95,18 @@ class Task(Base):
 
     sequence_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default=TASK_STATUS_PENDING,
+    )
 
-    is_blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_blocked: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
     blocking_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     project = relationship("Project", backref="tasks")

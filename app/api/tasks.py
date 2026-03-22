@@ -2,7 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.models.task import Task
+from app.models.task import (
+    CODE_EXECUTOR,
+    EXECUTABLE_TASK_STATUSES,
+    PLANNING_LEVEL_ATOMIC,
+    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    Task,
+)
 from app.services.execution_runs import create_execution_run
 from app.workers.tasks import execute_task as execute_task_job
 
@@ -11,8 +17,9 @@ router = APIRouter(
     tags=["tasks"],
 )
 
-
-PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
+SUPPORTED_EXECUTORS = {
+    CODE_EXECUTOR,
+}
 
 
 @router.post("/{task_id}/execute")
@@ -30,7 +37,7 @@ def execute_task(
             detail=f"Task is blocked: {task.blocking_reason or 'unknown reason'}",
         )
 
-    if task.planning_level != "atomic":
+    if task.planning_level != PLANNING_LEVEL_ATOMIC:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -45,6 +52,24 @@ def execute_task(
             detail=(
                 "Task executor is not assigned yet. "
                 "Atomic task generation must assign a concrete executor before execution."
+            ),
+        )
+
+    if task.executor_type not in SUPPORTED_EXECUTORS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported executor_type '{task.executor_type}'. "
+                f"Supported executors: {sorted(SUPPORTED_EXECUTORS)}"
+            ),
+        )
+
+    if task.status not in EXECUTABLE_TASK_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Task status '{task.status}' is not executable. "
+                f"Allowed statuses: {sorted(EXECUTABLE_TASK_STATUSES)}"
             ),
         )
 

@@ -1,11 +1,21 @@
 from app.db.session import SessionLocal
-from app.models.execution_run import ExecutionRun
+from app.models.execution_run import (
+    FAILURE_TYPE_INTERNAL,
+    RECOVERY_ACTION_MANUAL_REVIEW,
+    RECOVERY_ACTION_REATOMIZE,
+)
 from app.models.task import Task
-from app.services.artifacts import create_artifact
 from app.services.execution_runs import (
+    get_execution_run,
     mark_execution_run_failed,
+    mark_execution_run_rejected,
     mark_execution_run_started,
     mark_execution_run_succeeded,
+)
+from app.services.executor import (
+    ExecutorInternalError,
+    ExecutorRejectedError,
+    execute_atomic_task,
 )
 from app.services.tasks import (
     mark_task_completed,
@@ -18,8 +28,10 @@ from app.workers.celery_app import celery_app
 @celery_app.task(name="app.workers.tasks.execute_task")
 def execute_task(run_id: int) -> str:
     db = SessionLocal()
+    task: Task | None = None
+
     try:
-        run = db.get(ExecutionRun, run_id)
+        run = get_execution_run(db, run_id)
         if not run:
             raise ValueError(f"ExecutionRun {run_id} not found")
 
@@ -30,44 +42,72 @@ def execute_task(run_id: int) -> str:
         mark_execution_run_started(db, run_id)
         mark_task_running(db, task.id)
 
-        implementation_brief = f"""
-Task ID: {task.id}
-Title: {task.title}
-Type: {task.task_type}
-Description: {task.description or "No description provided"}
-
-Objective:
-Produce the implementation brief for this task.
-
-Definition of Done:
-- Understand task scope
-- Prepare a concise implementation brief
-- Store it as an artifact
-""".strip()
-
-        create_artifact(
-            db=db,
-            project_id=task.project_id,
-            task_id=task.id,
-            artifact_type="implementation_brief",
-            content=implementation_brief,
-            created_by="executor_agent",
-        )
+        result = execute_atomic_task(db=db, task=task)
 
         mark_execution_run_succeeded(
-            db,
-            run_id,
-            output_snapshot="implementation_brief_created",
+            db=db,
+            run_id=run_id,
+            output_snapshot=result.output_snapshot,
         )
         mark_task_completed(db, task.id)
 
-        return "implementation_brief_created"
+        return result.output_snapshot
+
+    except ExecutorRejectedError as exc:
+        run = get_execution_run(db, run_id)
+        if run:
+            mark_execution_run_rejected(
+                db=db,
+                run_id=run_id,
+                error_message=exc.message,
+                failure_code=exc.failure_code,
+                recovery_action=RECOVERY_ACTION_REATOMIZE,
+            )
+
+            if task is None:
+                task = db.get(Task, run.task_id)
+            if task:
+                mark_task_failed(db, task.id)
+
+        return exc.failure_code
+
+    except ExecutorInternalError as exc:
+        run = get_execution_run(db, run_id)
+        if run:
+            mark_execution_run_failed(
+                db=db,
+                run_id=run_id,
+                error_message=exc.message,
+                failure_type=FAILURE_TYPE_INTERNAL,
+                failure_code=exc.failure_code,
+                recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
+            )
+
+            if task is None:
+                task = db.get(Task, run.task_id)
+            if task:
+                mark_task_failed(db, task.id)
+
+        raise
 
     except Exception as exc:
-        run = db.get(ExecutionRun, run_id)
+        run = get_execution_run(db, run_id)
         if run:
-            mark_execution_run_failed(db, run_id, str(exc))
-            mark_task_failed(db, run.task_id)
+            mark_execution_run_failed(
+                db=db,
+                run_id=run_id,
+                error_message=str(exc),
+                failure_type=FAILURE_TYPE_INTERNAL,
+                failure_code="worker_execution_error",
+                recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
+            )
+
+            if task is None:
+                task = db.get(Task, run.task_id)
+            if task:
+                mark_task_failed(db, task.id)
+
         raise
+
     finally:
         db.close()
