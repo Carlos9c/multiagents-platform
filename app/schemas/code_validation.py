@@ -1,55 +1,54 @@
 from pydantic import BaseModel, Field
 
+from app.schemas.code_execution import CodeExecutorInput, CodeFileEditPlan, CodeWorkingSet
+from app.schemas.project_memory import ProjectOperationalContext
 
-CODE_VALIDATION_DECIDED_STATUS_COMPLETED = "completed"
-CODE_VALIDATION_DECIDED_STATUS_PARTIAL = "partial"
-CODE_VALIDATION_DECIDED_STATUS_FAILED = "failed"
 
-VALID_CODE_VALIDATION_DECIDED_STATUSES = {
-    CODE_VALIDATION_DECIDED_STATUS_COMPLETED,
-    CODE_VALIDATION_DECIDED_STATUS_PARTIAL,
-    CODE_VALIDATION_DECIDED_STATUS_FAILED,
+CODE_VALIDATION_DECISION_COMPLETED = "completed"
+CODE_VALIDATION_DECISION_PARTIAL = "partial"
+CODE_VALIDATION_DECISION_FAILED = "failed"
+
+VALID_CODE_VALIDATION_DECISIONS = {
+    CODE_VALIDATION_DECISION_COMPLETED,
+    CODE_VALIDATION_DECISION_PARTIAL,
+    CODE_VALIDATION_DECISION_FAILED,
 }
 
 
-class CodeValidationEvidence(BaseModel):
-    """
-    Structured evidence collected during validation.
-    """
+class CodeValidationCheck(BaseModel):
+    name: str
+    command: str | None = None
+    status: str
+    output: str | None = None
 
+
+class CodeValidationEvidence(BaseModel):
     checked_files: list[str] = Field(default_factory=list)
     observed_changes: list[str] = Field(default_factory=list)
-    executed_checks: list[str] = Field(default_factory=list)
+    executed_checks: list[CodeValidationCheck] = Field(default_factory=list)
     check_outputs: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     workspace_diff: str | None = None
-
     final_file_snapshots: dict[str, str] = Field(default_factory=dict)
-    execution_summary: str | None = None
-    edit_plan_summary: str | None = None
+
+    resolved_execution_context: CodeExecutorInput
+    working_set: CodeWorkingSet
+    edit_plan: CodeFileEditPlan
+    project_operational_context: ProjectOperationalContext
 
 
 class CodeValidationFulfillmentDecision(BaseModel):
-    """
-    Strict semantic decision produced by the fulfillment validator.
-
-    It must answer only whether the produced resolution satisfies the task.
-    """
-
-    decided_task_status: str
+    decision: str
     decision_reason: str
     missing_requirements: list[str] = Field(default_factory=list)
     evidence_used: list[str] = Field(default_factory=list)
 
 
 class CodeValidationResult(BaseModel):
-    """
-    Final validation output for a code task.
-    """
-
     task_id: int
-    execution_run_id: int
-    decided_task_status: str
-    reasons: list[str] = Field(default_factory=list)
-    unresolved_gaps: list[str] = Field(default_factory=list)
+    decision: str
+    decision_reason: str
+    missing_requirements: list[str] = Field(default_factory=list)
+    evidence_used: list[str] = Field(default_factory=list)
+    validation_notes: list[str] = Field(default_factory=list)
     evidence: CodeValidationEvidence
