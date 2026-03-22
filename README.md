@@ -4,16 +4,15 @@
 
 Este proyecto implementa una **plataforma backend multiagente** cuyo objetivo es:
 
-> Transformar una idea de software en un sistema ejecutable de forma progresiva, autónoma y corregible.
+> Transformar una idea de software en un sistema ejecutable de forma progresiva, estructurada y autónoma.
 
-La idea no es solo planificar software, sino **llevarlo desde una intención inicial hasta una ejecución controlada**, con capacidad de:
+El sistema está diseñado para escalar hacia proyectos complejos mediante:
 
-- descomponer trabajo
-- secuenciarlo de forma razonada
-- ejecutarlo por etapas
-- evaluar resultados intermedios
-- recuperarse de incidencias
-- reencauzar el plan cuando sea necesario
+* planificación jerárquica
+* descomposición progresiva
+* ejecución especializada por dominio
+* validación semántica real
+* trazabilidad completa por proyecto
 
 ---
 
@@ -23,394 +22,430 @@ La idea no es solo planificar software, sino **llevarlo desde una intención ini
 
 ### 📦 Projects
 
-- multi-tenant por `project_id`
-- base de aislamiento lógico del sistema
+* Multi-tenant por `project_id`
+* Aislamiento lógico completo
+* Storage físico por proyecto (`project_storage`)
 
 ---
 
 ### 📋 Tasks (modelo avanzado)
 
-Sistema de tareas jerárquico completo.
+* Jerarquía: `high_level → refined → atomic`
+* Estados definidos:
 
-#### 🔑 Niveles de planificación
-
-- `high_level` ✅
-- `refined` ✅
-- `atomic` ✅
-
-#### 🔑 Capacidades actuales
-
-- descomposición progresiva completa
-- trazabilidad jerárquica real
-- separación clara entre planificación y ejecución
-- preparado para orquestación multiagente
-
-#### 🔑 Notas importantes
-
-- solo las tareas `atomic` son ejecutables
-- las tareas fallidas no vuelven automáticamente al backlog secuenciable
-- las tareas pueden quedar bloqueadas o quedar operativamente obsoletas si Recovery las sustituye
+  * `pending`
+  * `running`
+  * `awaiting_validation`
+  * `completed`
+  * `partial`
+  * `failed`
+* Asignación de `executor_type` en nivel atómico
 
 ---
 
-### 🤖 Planner Agent (✔️)
+### 🧠 Planner
 
-Convierte:
-
-idea → high_level tasks
-
-Genera la primera descomposición del sistema a nivel alto.
+* Genera tareas de alto nivel
+* Persistencia estructurada del plan
 
 ---
 
-### 🧠 Technical Task Refiner (✔️)
+### 🔧 Technical Task Refiner
 
-Convierte:
-
-high_level → refined
-
-Genera:
-
-- solución técnica
-- pasos de implementación
-- tests requeridos
-- mayor precisión de ejecución
+* Convierte tareas high-level en tareas técnicas refinadas
 
 ---
 
-### ⚛️ Atomic Task Generator (✔️ estabilizado)
+### ⚙️ Atomic Task Generator
 
-Convierte:
-
-refined → atomic
-
-#### ✔️ Garantías actuales
-
-- 1 responsabilidad / 1 output
-- control de granularidad
-- sin sobre-fragmentación
-- separación entre:
-  - creación de contenido
-  - ensamblado final
-- asignación de executor en fase atómica
+* Convierte tareas refinadas en tareas ejecutables atómicas
+* Asigna executor concreto (`code_executor`)
 
 ---
 
-### ⚙️ Execution Runs (✔️ ampliado)
+### 🧩 Execution Plan
 
-El sistema de execution_runs ya no es solo tracking básico.
-
-#### ✔️ Capacidades actuales
-
-- intentos (`attempt_number`)
-- relación entre runs (`parent_run_id`)
-- distinción entre:
-  - `succeeded`
-  - `partial`
-  - `failed`
-  - `rejected`
-- clasificación de fallo
-- acción de recovery sugerida
-- reporte estructurado de ejecución:
-  - `work_summary`
-  - `work_details`
-  - `artifacts_created`
-  - `completed_scope`
-  - `remaining_scope`
-  - `blockers_found`
-  - `validation_notes`
-
-Esto convierte cada ejecución en una unidad auditable.
+* Generación de batches ejecutables
+* Checkpoints obligatorios tras cada batch
+* Persistencia del plan
 
 ---
 
-### 📁 Artifacts (✔️)
+# ⚡ Ejecución de tareas (Code Executor)
 
-El sistema ya persiste artifacts como outputs de agentes y de ejecución.
+## 🧱 Pipeline completo de ejecución (7 fases)
 
-#### Hoy se usan como base para:
-
-- outputs del planner/refiner/atomic
-- execution plan
-- evaluation decision
-- recovery decision
-- resultados post-batch
-- artifacts generados por el executor mock
-
----
-
-# 🧬 Arquitectura REAL actual
-
-User Input  
-↓  
-Planner ✔️  
-↓  
-High-Level Tasks  
-↓  
-Technical Refiner ✔️  
-↓  
-Refined Tasks  
-↓  
-Atomic Generator ✔️  
-↓  
-Atomic Tasks ✔️  
-↓  
-Execution Sequencer ✔️  
-↓  
-Execution Plan (batches + checkpoints) ✔️  
-↓  
-Executor (mock estructurado) ✔️  
-↓  
-Recovery Agent ✔️  
-↓  
-Evaluation Agent ✔️  
-↓  
-Post-Batch Orchestrator ✔️  
-↓  
-Artifacts / Re-sequencing / Replanificación  
+1. **Preparación de workspace**
+2. **Resolución de contexto**
+3. **Construcción de working set**
+4. **Planificación de cambios (LLM)**
+5. **Generación de código (LLM)**
+6. **Aplicación de cambios en workspace**
+7. **Construcción de journal + resultado**
 
 ---
 
-# 🔁 Nueva fase del sistema
+## 📁 Workspace Runtime
 
-## 🧠 El sistema ya no está solo planificando
+Cada ejecución ocurre en:
 
-Antes: pipeline de planificación  
-Ahora: pipeline de ejecución controlada por lotes, con evaluación y recuperación  
+```
+executions/{run_id}/workspace/
+```
 
----
+Y se inicializa copiando:
 
-# ✅ Nueva capa implementada: secuenciación de ejecución
+```
+domain_data/code/source/
+```
 
-## 🧠 Execution Sequencer Agent (✔️)
-
-Convierte:
-
-atomic tasks activas → execution plan
-
-Incluye:
-
-- execution_batches
-- checkpoints
-- ready_task_ids
-- blocked_task_ids
-- inferred_dependencies
-- sequencing_rationale
-- uncertainties
-
-### Reglas actuales
-
-- cada batch tiene checkpoint obligatorio  
-- el último batch tiene checkpoint final de cierre  
-- el plan es revisable  
-- el árbol jerárquico NO define el orden real  
+➡️ Esto garantiza aislamiento por ejecución.
 
 ---
 
-# ✅ Nueva capa implementada: evaluación por checkpoints
+## 🧠 Fuente de conocimiento por tarea
 
-## 🧠 Evaluation Agent (✔️)
+Cada tarea construye su contexto a partir de:
 
-Funciones:
+1. **Baseline canónico**
 
-1. controlar calidad del desarrollo  
-2. decidir si continuar o corregir  
+   * `domain_data/code/source/`
 
-Evalúa:
+2. **Workspace de ejecución**
 
-- tasks ejecutadas  
-- artifacts  
-- recovery aplicado  
-- siguiente batch  
-- plan restante  
-- evidencia de contenido  
+   * copia del source en `executions/{run_id}/workspace/`
+
+3. **Contexto lógico**
+
+   * `CodeExecutorInput`
+
+4. **Working set**
+
+   * subconjunto de archivos relevantes
+
+5. **Edit plan**
+
+   * decisiones del LLM
+
+6. **Cambios reales**
+
+   * `WorkspaceChangeSet`
+
+7. **Resultado de ejecución**
+
+   * `CodeExecutorResult`
+
+---
+
+## ⚠️ Problema identificado (IMPORTANTE)
+
+Actualmente la selección de contexto es:
+
+> ❌ parcialmente heurística y rudimentaria
+
+Esto **NO es aceptable** para un sistema de este nivel.
+
+---
+
+# 🧪 Validación (Code Validator)
+
+## 🎯 Objetivo
+
+Determinar de forma estricta:
+
+> Si la tarea realmente satisface lo que se pidió
+
+---
+
+## 🔍 Qué evalúa
+
+El validador utiliza:
+
+* Task original
+* Execution result
+* Diff real del workspace
+* Snapshots finales de archivos
+* Evidencia estructurada
+
+---
+
+## 🤖 Validación semántica (LLM)
+
+Decide únicamente:
+
+* `completed`
+* `partial`
+* `failed`
+
+Sin recomendaciones ni mejoras.
+
+---
+
+## 📦 Output
+
+Se genera:
+
+* `code_validation_result` (artifact)
+
+---
+
+# 🔄 Promoción a source (CRÍTICO)
+
+## ✔️ Nueva regla del sistema
+
+Después de validación:
+
+### Si `completed`
+
+➡️ Se promociona el workspace a:
+
+```
+domain_data/code/source/
+```
+
+### Si `partial` o `failed`
+
+➡️ NO se promociona nada
+
+---
+
+## 🧠 Implicación clave
+
+> `source/` es el estado canónico del proyecto
+
+Todas las tareas futuras parten de ahí.
+
+---
+
+## ❗ Garantía fuerte
+
+Si la promoción falla:
+
+➡️ la tarea pasa a `failed`
+
+Nunca puede existir:
+
+* task `completed`
+* sin reflejo en `source/`
+
+---
+
+# 🛠️ Post Batch Processing
+
+## ✔️ Garantías actuales
+
+* Solo se ejecuta si TODAS las tareas están en estado terminal
+* Nunca con tareas en `awaiting_validation`
+
+---
+
+## 🔁 Recovery (RE-DISEÑADO)
+
+Ahora el recovery usa:
+
+### 1. Execution context
+
+* Qué hizo el executor
+
+### 2. Validation context (NUEVO)
+
+* Por qué la tarea no cumple
+
+---
+
+## ⚠️ Cambio clave
+
+Antes:
+
+* recovery basado en `ExecutionRun`
+
+Ahora:
+
+* recovery basado en:
+
+  * execution context
+  * validation context
+
+---
+
+## 🧠 Recovery ahora es semántico
 
 Puede decidir:
 
-- approve_continue  
-- request_corrections  
-- insert_new_tasks  
-- resequence_remaining_tasks  
-- replan_from_level  
-- manual_review  
-
-⚠️ Aún depende de la calidad del executor para validar realmente el contenido.
+* retry
+* reatomize
+* insert_followup
+* manual_review
 
 ---
 
-# ✅ Nueva capa implementada: recovery local
+# 🧠 Evaluación (Evaluator)
 
-## 🧠 Recovery Agent (✔️)
+* Se ejecuta tras cada batch
+* Decide:
 
-Actúa antes que Evaluation.
-
-Responsabilidades:
-
-- analizar runs problemáticos  
-- decidir acción correctiva  
-- generar nuevas tareas si necesario  
-
-Decisiones:
-
-- retry  
-- replace  
-- re-atomize  
-- refinar  
-- manual_review  
+  * continuar ejecución
+  * replanificar
+  * resecuenciar
+  * cerrar etapa
 
 ---
 
-# ✅ Nueva capa implementada: post-batch orchestration
+# 🧱 Project Storage
 
-## 🔁 Post-Batch Processor (✔️)
+## 📁 Estructura
 
-Flujo:
-
-Executor → Recovery → Evaluation
-
-Responsabilidades:
-
-- procesar resultados del batch  
-- aplicar recovery  
-- ejecutar evaluación  
-- decidir siguiente paso  
-
----
-
-# ✅ Guardrail de finalización
-
-## 🛑 Finalization Guard (✔️)
-
-Evita loops infinitos.
-
-- permite iteraciones finales limitadas  
-- si se excede:
-  - bloquea ejecución  
-  - fuerza manual review  
+```
+projects/{project_id}/
+  project_meta/
+  artifacts/
+  executions/
+  domain_data/
+    code/
+      source/
+```
 
 ---
 
-# ⚙️ Estado del executor
+## 🚀 Bootstrap automático
 
-## 🧪 Executor actual = mock
+Ahora ocurre en:
 
-Puede:
+`run_project_workflow(...)`
 
-- ejecutar  
-- fallar  
-- rechazar  
-- generar artifacts mock  
-
-NO puede aún:
-
-- modificar código real  
-- ejecutar tests reales  
-- validar outputs de verdad  
+➡️ `_bootstrap_project_storage_for_execution(...)`
 
 ---
 
-# ⚠️ Problemas ya resueltos
+# ⚠️ Limitaciones actuales
 
-✔️ planificación abstracta  
-✔️ ejecución imposible  
-✔️ explosión de tareas  
-✔️ falta de orden  
-✔️ falta de evaluación  
-✔️ loops infinitos  
+## 1. ❌ Context selection rudimentaria
 
----
+* Falta selector inteligente
+* No hay control fino de tokens/contexto
 
-# 🧠 Roles del sistema
+## 2. ❌ No hay indexación del repo
 
-Planner → piensa  
-Refiner → concreta  
-Atomic → ejecutable  
-Sequencer → ordena  
-Executor → ejecuta  
-Recovery → corrige  
-Evaluator → valida  
-Post-batch → orquesta  
+* No hay búsqueda semántica
+* No hay chunking ni embeddings
+
+## 3. ❌ Candidate files heurísticos
+
+* `_infer_candidate_files` es débil
 
 ---
 
-# 🚀 Roadmap REAL
+# 🚀 Siguientes pasos (CRÍTICOS)
 
-## 🔥 PRIORIDAD MÁXIMA
+## 🔥 1. Code Context Selector (URGENTE)
 
-### 1. Definir executor real
+Diseñar:
 
-- capacidades  
-- outputs  
-- límites  
-- definition of done  
+```
+app/services/code_context_selector.py
+```
 
----
+### Responsabilidades
 
-### 2. Definir evidencias de ejecución
+* Selección inteligente de contexto
+* Decidir:
 
-- artifacts reales  
-- outputs verificables  
-- señales claras de éxito/fallo  
-
----
-
-### 3. Reforzar evaluador
-
-- basado en evidencia real  
-- no en summaries  
+  * qué archivos entran
+  * qué excluir
+  * qué artifacts usar
+* Justificar decisiones
+* Detectar contexto insuficiente
 
 ---
 
-### 4. Flujo completo batch a batch
+## 🔥 2. Indexación del repositorio
+
+* Embeddings de archivos
+* Búsqueda semántica
+* Chunking inteligente
 
 ---
 
-### 5. Modelo de tasks sustituidas
+## 🔥 3. Mejora de working set
+
+* Dejar de depender solo de candidate files
+* Introducir scoring de relevancia
 
 ---
 
-### 6. Versionado de execution plan
+## 🔥 4. Control de contexto del LLM
+
+* Límite de tokens real
+* Priorización de contenido
+* Resúmenes automáticos
 
 ---
 
-### 7. QA Agent (futuro)
+## 🔥 5. Mejora del execution plan
+
+* Adaptativo en función del estado real del repo
+* No solo del plan inicial
 
 ---
 
-# 🎯 Estado actual
+## 🔥 6. Observabilidad
 
-## ✔️ COMPLETO
+* Debug de:
 
-- planner  
-- refiner  
-- atomic  
-- execution plan  
-- recovery  
-- evaluation  
-- post-batch  
-- guardrails  
-
-## 🔥 CRÍTICO
-
-- executor real  
-- validación real  
+  * contexto usado
+  * decisiones del LLM
+  * selección de archivos
 
 ---
 
-# 💡 Idea clave
+## 🔥 7. Multi-executor (futuro)
 
-El problema ya no es planificar.
-
-Es este:
-
-> **definir cómo se ejecuta y cómo sabemos que está bien ejecutado**
+* `code_executor` (actual)
+* `documentation_executor` (opcional)
+* otros dominios
 
 ---
 
-# ▶️ Siguiente paso
+# 🧭 Estado actual
 
-👉 Definir el executor en profundidad
+## ✔️ Lo bueno
+
+* Pipeline completo E2E funcional
+* Validación semántica real
+* Recovery inteligente
+* Workspace aislado
+* Source canónico definido
+* Arquitectura modular
 
 ---
 
-**Ahora empieza el verdadero problema interesante: la ejecución real.**
+## ⚠️ Lo que falta
+
+* Context intelligence real
+* Retrieval robusto
+* Escalabilidad de contexto
+
+---
+
+# 🧠 Conclusión
+
+El sistema ya NO es un prototipo.
+
+Es un **motor de ejecución multiagente real**, pero aún no es:
+
+> suficientemente inteligente en la selección de contexto
+
+Ese es el siguiente salto crítico.
+
+---
+
+# 🎯 Prioridad inmediata
+
+1. Code Context Selector
+2. Indexación del repo
+3. Mejora del working set
+
+Sin eso, el sistema ejecuta…
+pero no escala.
+
+Con eso, empieza a ser realmente potente.
