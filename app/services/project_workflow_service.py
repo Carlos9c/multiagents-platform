@@ -13,19 +13,22 @@ from app.schemas.workflow import (
     ProjectWorkflowResult,
     WorkflowIterationSummary,
 )
+from app.services.atomic_task_generator import generate_atomic_tasks
 from app.services.execution_plan_service import (
     generate_execution_plan,
     persist_execution_plan,
 )
+from app.services.planner import generate_project_plan
 from app.services.post_batch_service import process_batch_after_execution
+from app.services.task_execution_service import (
+    TaskExecutionServiceError,
+    execute_task_sync,
+)
+from app.services.technical_task_refiner import refine_high_level_task
 
 
 class ProjectWorkflowServiceError(Exception):
     """Base exception for project workflow orchestration failures."""
-
-
-# These imports are intentionally local inside functions if your repo wiring
-# still evolves, but they can be moved to the top once stable.
 
 
 def _get_project_or_raise(db: Session, project_id: int) -> Project:
@@ -64,13 +67,6 @@ def _run_planner_if_needed(db: Session, project_id: int) -> bool:
     if _has_tasks_at_level(db, project_id, PLANNING_LEVEL_HIGH_LEVEL):
         return True
 
-    try:
-        from app.services.planner_service import generate_project_plan
-    except ImportError as exc:
-        raise ProjectWorkflowServiceError(
-            "planner_service.generate_project_plan is not available in the current repo wiring."
-        ) from exc
-
     generate_project_plan(db=db, project_id=project_id)
     return True
 
@@ -85,18 +81,12 @@ def _run_technical_refinement_phase(db: Session, project_id: int) -> bool:
     if not pending_high_level_tasks:
         return _has_tasks_at_level(db, project_id, PLANNING_LEVEL_REFINED)
 
-    try:
-        from app.services.technical_task_refiner import refine_task_to_technical
-    except ImportError:
-        try:
-            from app.services.technical_task_refiner_service import refine_task_to_technical
-        except ImportError as exc:
-            raise ProjectWorkflowServiceError(
-                "Technical task refiner service is not available with the expected callable."
-            ) from exc
-
     for task in pending_high_level_tasks:
-        refine_task_to_technical(db=db, task_id=task.id)
+        refine_high_level_task(
+            db=db,
+            project_id=project_id,
+            task_id=task.id,
+        )
 
     return True
 
@@ -111,38 +101,24 @@ def _run_atomic_generation_phase(db: Session, project_id: int) -> bool:
     if not pending_refined_tasks:
         return _has_tasks_at_level(db, project_id, PLANNING_LEVEL_ATOMIC)
 
-    try:
-        from app.services.atomic_task_generator import generate_atomic_tasks_for_refined_task
-    except ImportError:
-        try:
-            from app.services.atomic_task_generator_service import generate_atomic_tasks_for_refined_task
-        except ImportError as exc:
-            raise ProjectWorkflowServiceError(
-                "Atomic task generator service is not available with the expected callable."
-            ) from exc
-
     for task in pending_refined_tasks:
-        generate_atomic_tasks_for_refined_task(db=db, task_id=task.id)
+        generate_atomic_tasks(
+            db=db,
+            project_id=project_id,
+            task_id=task.id,
+        )
 
     return True
 
 
-def _execute_batch_tasks_tentatively(db: Session, batch_task_ids: list[int]) -> None:
-    """
-    Tentative executor bridge.
-
-    This uses the current task execution entrypoint one task at a time.
-    It is deliberately simple because the executor is still a mock.
-    """
-    try:
-        from app.api.tasks import execute_task as trigger_task_execution
-    except ImportError as exc:
-        raise ProjectWorkflowServiceError(
-            "app.api.tasks.execute_task is not available for tentative workflow execution."
-        ) from exc
-
+def _execute_batch_tasks_synchronously(db: Session, batch_task_ids: list[int]) -> None:
     for task_id in batch_task_ids:
-        trigger_task_execution(task_id=task_id, db=db)
+        try:
+            execute_task_sync(db=db, task_id=task_id)
+        except TaskExecutionServiceError as exc:
+            raise ProjectWorkflowServiceError(
+                f"Failed to execute task {task_id} synchronously: {str(exc)}"
+            ) from exc
 
 
 def _run_execution_iteration(
@@ -161,7 +137,7 @@ def _run_execution_iteration(
     current_finalization_iteration_count = finalization_iteration_count
 
     for batch in plan.execution_batches:
-        _execute_batch_tasks_tentatively(db=db, batch_task_ids=batch.task_ids)
+        _execute_batch_tasks_synchronously(db=db, batch_task_ids=batch.task_ids)
 
         post_batch_result = process_batch_after_execution(
             db=db,
@@ -296,7 +272,6 @@ def run_project_workflow(
         manual_review_required = True
         final_status = "awaiting_manual_review"
 
-    # blocked batches are those remaining in the last known plan, if any
     if execution_plan_generated:
         try:
             current_plan = generate_execution_plan(db=db, project_id=project_id)

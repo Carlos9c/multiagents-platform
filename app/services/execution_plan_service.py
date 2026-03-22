@@ -8,11 +8,14 @@ from app.models.project import Project
 from app.models.task import (
     CODE_EXECUTOR,
     PLANNING_LEVEL_ATOMIC,
+    TASK_STATUS_AWAITING_VALIDATION,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
+    TASK_STATUS_RUNNING,
     Task,
 )
-from app.services.artifacts import create_artifact
-from app.services.execution_sequencer_client import call_execution_sequencer_model
 from app.schemas.execution_plan import (
     CandidateAtomicTask,
     CompletedTaskSummary,
@@ -24,6 +27,8 @@ from app.schemas.execution_plan import (
     RelevantArtifactSummary,
     UnfinishedTaskSummary,
 )
+from app.services.artifacts import create_artifact
+from app.services.execution_sequencer_client import call_execution_sequencer_model
 
 
 class ExecutionPlanServiceError(Exception):
@@ -89,14 +94,25 @@ def _build_execution_state_summary(
 ) -> ExecutionStateSummary:
     completed_tasks = (
         db.query(Task)
-        .filter(Task.project_id == project_id, Task.status == "completed")
+        .filter(Task.project_id == project_id, Task.status == TASK_STATUS_COMPLETED)
         .order_by(Task.id.asc())
         .all()
     )
 
     unfinished_tasks = (
         db.query(Task)
-        .filter(Task.project_id == project_id, Task.status.in_(["pending", "running", "failed"]))
+        .filter(
+            Task.project_id == project_id,
+            Task.status.in_(
+                [
+                    TASK_STATUS_PENDING,
+                    TASK_STATUS_RUNNING,
+                    TASK_STATUS_AWAITING_VALIDATION,
+                    TASK_STATUS_PARTIAL,
+                    TASK_STATUS_FAILED,
+                ]
+            ),
+        )
         .order_by(Task.id.asc())
         .all()
     )

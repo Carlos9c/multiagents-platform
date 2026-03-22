@@ -6,11 +6,21 @@ from app.models.artifact import Artifact
 from app.models.execution_run import (
     EXECUTION_RUN_STATUS_FAILED,
     EXECUTION_RUN_STATUS_PARTIAL,
+    EXECUTION_RUN_STATUS_PENDING,
     EXECUTION_RUN_STATUS_REJECTED,
+    EXECUTION_RUN_STATUS_RUNNING,
+    EXECUTION_RUN_STATUS_SUCCEEDED,
     ExecutionRun,
 )
 from app.models.project import Project
-from app.models.task import Task
+from app.models.task import (
+    TASK_STATUS_AWAITING_VALIDATION,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PARTIAL,
+    TERMINAL_TASK_STATUSES,
+    Task,
+)
 from app.schemas.evaluation import RecoveryContext
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.post_batch import PostBatchResult, PostBatchTaskRunSummary
@@ -23,6 +33,18 @@ from app.services.recovery_service import (
     merge_recovery_contexts,
     persist_recovery_decision,
 )
+
+TERMINAL_RUN_STATUSES = {
+    EXECUTION_RUN_STATUS_SUCCEEDED,
+    EXECUTION_RUN_STATUS_PARTIAL,
+    EXECUTION_RUN_STATUS_FAILED,
+    EXECUTION_RUN_STATUS_REJECTED,
+}
+
+NON_TERMINAL_RUN_STATUSES = {
+    EXECUTION_RUN_STATUS_PENDING,
+    EXECUTION_RUN_STATUS_RUNNING,
+}
 
 
 class PostBatchServiceError(Exception):
@@ -59,6 +81,54 @@ def _get_latest_run_for_task(db: Session, task_id: int) -> ExecutionRun | None:
         .order_by(ExecutionRun.id.desc())
         .first()
     )
+
+
+def _require_task_is_ready_for_post_batch(
+    *,
+    task: Task,
+    batch_id: str,
+    plan_version: int,
+) -> None:
+    if task.status == TASK_STATUS_AWAITING_VALIDATION:
+        raise PostBatchServiceError(
+            f"Batch '{batch_id}' in plan version {plan_version} cannot be processed because "
+            f"task {task.id} is still awaiting validation."
+        )
+
+    if task.status not in TERMINAL_TASK_STATUSES:
+        raise PostBatchServiceError(
+            f"Batch '{batch_id}' in plan version {plan_version} cannot be processed because "
+            f"task {task.id} is in non-terminal status '{task.status}'."
+        )
+
+
+def _require_terminal_run_for_task(
+    db: Session,
+    *,
+    task: Task,
+    batch_id: str,
+    plan_version: int,
+) -> ExecutionRun:
+    latest_run = _get_latest_run_for_task(db, task.id)
+    if latest_run is None:
+        raise PostBatchServiceError(
+            f"Batch '{batch_id}' in plan version {plan_version} cannot be processed because "
+            f"task {task.id} has no execution run."
+        )
+
+    if latest_run.status in NON_TERMINAL_RUN_STATUSES:
+        raise PostBatchServiceError(
+            f"Batch '{batch_id}' in plan version {plan_version} cannot be processed because "
+            f"task {task.id} latest run {latest_run.id} is still '{latest_run.status}'."
+        )
+
+    if latest_run.status not in TERMINAL_RUN_STATUSES:
+        raise PostBatchServiceError(
+            f"Batch '{batch_id}' in plan version {plan_version} cannot be processed because "
+            f"task {task.id} latest run {latest_run.id} has unsupported status '{latest_run.status}'."
+        )
+
+    return latest_run
 
 
 def _get_artifact_ids_for_tasks(
@@ -180,30 +250,36 @@ def process_batch_after_execution(
     for task_id in batch.task_ids:
         task = db.get(Task, task_id)
         if not task:
-            continue
+            raise PostBatchServiceError(
+                f"Batch '{batch_id}' in plan version {plan.plan_version} references missing task {task_id}."
+            )
 
-        latest_run = _get_latest_run_for_task(db, task_id)
+        _require_task_is_ready_for_post_batch(
+            task=task,
+            batch_id=batch_id,
+            plan_version=plan.plan_version,
+        )
+
+        latest_run = _require_terminal_run_for_task(
+            db=db,
+            task=task,
+            batch_id=batch_id,
+            plan_version=plan.plan_version,
+        )
 
         task_run_summaries.append(
             PostBatchTaskRunSummary(
                 task_id=task.id,
-                run_id=latest_run.id if latest_run else None,
-                run_status=latest_run.status if latest_run else None,
-                failure_type=latest_run.failure_type if latest_run else None,
-                failure_code=latest_run.failure_code if latest_run else None,
+                run_id=latest_run.id,
+                run_status=latest_run.status,
+                failure_type=latest_run.failure_type,
+                failure_code=latest_run.failure_code,
             )
         )
 
-        if not latest_run:
-            continue
-
         executed_task_ids.append(task.id)
 
-        if latest_run.status in {
-            EXECUTION_RUN_STATUS_REJECTED,
-            EXECUTION_RUN_STATUS_PARTIAL,
-            EXECUTION_RUN_STATUS_FAILED,
-        }:
+        if task.status in {TASK_STATUS_FAILED, TASK_STATUS_PARTIAL}:
             problematic_run_ids.append(latest_run.id)
 
             decision = generate_recovery_decision(
@@ -228,8 +304,13 @@ def process_batch_after_execution(
                     created_tasks=created_tasks,
                 )
             )
-        else:
+        elif task.status == TASK_STATUS_COMPLETED:
             successful_task_ids.append(task.id)
+        else:
+            raise PostBatchServiceError(
+                f"Batch '{batch_id}' in plan version {plan.plan_version} reached an "
+                f"unexpected terminal task status '{task.status}' for task {task.id}."
+            )
 
     aggregated_recovery_context = merge_recovery_contexts(recovery_contexts)
 
