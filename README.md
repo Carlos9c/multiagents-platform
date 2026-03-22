@@ -4,7 +4,16 @@
 
 Este proyecto implementa una **plataforma backend multiagente** cuyo objetivo es:
 
-> Transformar una idea de software en un sistema ejecutable de forma progresiva y autónoma.
+> Transformar una idea de software en un sistema ejecutable de forma progresiva, autónoma y corregible.
+
+La idea no es solo planificar software, sino **llevarlo desde una intención inicial hasta una ejecución controlada**, con capacidad de:
+
+- descomponer trabajo
+- secuenciarlo de forma razonada
+- ejecutarlo por etapas
+- evaluar resultados intermedios
+- recuperarse de incidencias
+- reencauzar el plan cuando sea necesario
 
 ---
 
@@ -14,25 +23,33 @@ Este proyecto implementa una **plataforma backend multiagente** cuyo objetivo es
 
 ### 📦 Projects
 
-* Multi-tenant por `project_id`
+- multi-tenant por `project_id`
+- base de aislamiento lógico del sistema
 
 ---
 
 ### 📋 Tasks (modelo avanzado)
 
-Sistema de tareas jerárquico completo:
+Sistema de tareas jerárquico completo.
 
 #### 🔑 Niveles de planificación
 
-* `high_level` ✅
-* `refined` ✅
-* `atomic` ✅
+- `high_level` ✅
+- `refined` ✅
+- `atomic` ✅
 
-#### 🔑 Capacidades
+#### 🔑 Capacidades actuales
 
-* descomposición progresiva COMPLETA
-* trazabilidad jerárquica real
-* preparado para ejecución automática
+- descomposición progresiva completa
+- trazabilidad jerárquica real
+- separación clara entre planificación y ejecución
+- preparado para orquestación multiagente
+
+#### 🔑 Notas importantes
+
+- solo las tareas `atomic` son ejecutables
+- las tareas fallidas no vuelven automáticamente al backlog secuenciable
+- las tareas pueden quedar bloqueadas o quedar operativamente obsoletas si Recovery las sustituye
 
 ---
 
@@ -40,9 +57,9 @@ Sistema de tareas jerárquico completo:
 
 Convierte:
 
-```
 idea → high_level tasks
-```
+
+Genera la primera descomposición del sistema a nivel alto.
 
 ---
 
@@ -50,311 +67,350 @@ idea → high_level tasks
 
 Convierte:
 
-```
 high_level → refined
-```
 
-✔️ Genera:
+Genera:
 
-* solución técnica
-* pasos de implementación
-* tests
+- solución técnica
+- pasos de implementación
+- tests requeridos
+- mayor precisión de ejecución
 
 ---
 
-### ⚛️ Atomic Task Generator (✔️ ESTABILIZADO)
+### ⚛️ Atomic Task Generator (✔️ estabilizado)
 
 Convierte:
 
-```
 refined → atomic
-```
 
 #### ✔️ Garantías actuales
 
-* 1 responsabilidad / 1 output
-* control de granularidad
-* sin sobre-fragmentación
-* separación:
-
-  * creación de contenido
-  * ensamblado final
-
----
-
-### ⚙️ Execution Runs
-
-* tracking completo de ejecuciones
-* base para retries y recovery
+- 1 responsabilidad / 1 output
+- control de granularidad
+- sin sobre-fragmentación
+- separación entre:
+  - creación de contenido
+  - ensamblado final
+- asignación de executor en fase atómica
 
 ---
 
-### 📁 Artifacts
+### ⚙️ Execution Runs (✔️ ampliado)
 
-* outputs persistentes
-* base de código generado
+El sistema de execution_runs ya no es solo tracking básico.
+
+#### ✔️ Capacidades actuales
+
+- intentos (`attempt_number`)
+- relación entre runs (`parent_run_id`)
+- distinción entre:
+  - `succeeded`
+  - `partial`
+  - `failed`
+  - `rejected`
+- clasificación de fallo
+- acción de recovery sugerida
+- reporte estructurado de ejecución:
+  - `work_summary`
+  - `work_details`
+  - `artifacts_created`
+  - `completed_scope`
+  - `remaining_scope`
+  - `blockers_found`
+  - `validation_notes`
+
+Esto convierte cada ejecución en una unidad auditable.
+
+---
+
+### 📁 Artifacts (✔️)
+
+El sistema ya persiste artifacts como outputs de agentes y de ejecución.
+
+#### Hoy se usan como base para:
+
+- outputs del planner/refiner/atomic
+- execution plan
+- evaluation decision
+- recovery decision
+- resultados post-batch
+- artifacts generados por el executor mock
 
 ---
 
 # 🧬 Arquitectura REAL actual
 
-```
-User Input
-   ↓
-(🔜 Requirements Gate)
-   ↓
-Planner ✔️
-   ↓
-High-Level Tasks
-   ↓
-Technical Refiner ✔️
-   ↓
-Refined Tasks
-   ↓
-Atomic Generator ✔️
-   ↓
-Atomic Tasks ✔️
-   ↓
-Executor (🔜 crítico)
-   ↓
-Artifacts
-   ↓
-Recovery System (🔜 crítico)
-```
+User Input  
+↓  
+Planner ✔️  
+↓  
+High-Level Tasks  
+↓  
+Technical Refiner ✔️  
+↓  
+Refined Tasks  
+↓  
+Atomic Generator ✔️  
+↓  
+Atomic Tasks ✔️  
+↓  
+Execution Sequencer ✔️  
+↓  
+Execution Plan (batches + checkpoints) ✔️  
+↓  
+Executor (mock estructurado) ✔️  
+↓  
+Recovery Agent ✔️  
+↓  
+Evaluation Agent ✔️  
+↓  
+Post-Batch Orchestrator ✔️  
+↓  
+Artifacts / Re-sequencing / Replanificación  
 
 ---
 
-# 🔁 Nueva fase del sistema (MUY IMPORTANTE)
+# 🔁 Nueva fase del sistema
 
-## 🧠 El sistema ya no está planificando — está empezando a ejecutar
+## 🧠 El sistema ya no está solo planificando
 
-Antes:
-
-> pipeline de planificación
-
-Ahora:
-
-> pipeline de ejecución con recuperación
+Antes: pipeline de planificación  
+Ahora: pipeline de ejecución controlada por lotes, con evaluación y recuperación  
 
 ---
 
-# 🔁 Flujo de ejecución resiliente
+# ✅ Nueva capa implementada: secuenciación de ejecución
 
-```
-Atomic Task
-   ↓
-Executor intenta ejecutar
-   ↓
-¿Éxito?
-   → Sí → continuar
-   ↓ No
-Executor rechaza tarea
-   ↓
-Recovery Service analiza
-   ↓
-Decisión:
-   ├─ Retry simple
-   ├─ Ajuste menor
-   └─ Re-atomización (solo si necesario)
-           ↓
-    Atomic Task Generator
-           ↓
-    Nuevas atomic tasks
-           ↓
-    Executor reintenta
-```
+## 🧠 Execution Sequencer Agent (✔️)
 
----
+Convierte:
 
-# 🧠 Roles del sistema (ACTUALIZADO)
+atomic tasks activas → execution plan
 
-### 🤖 Planner
+Incluye:
 
-* piensa el sistema a alto nivel
+- execution_batches
+- checkpoints
+- ready_task_ids
+- blocked_task_ids
+- inferred_dependencies
+- sequencing_rationale
+- uncertainties
+
+### Reglas actuales
+
+- cada batch tiene checkpoint obligatorio  
+- el último batch tiene checkpoint final de cierre  
+- el plan es revisable  
+- el árbol jerárquico NO define el orden real  
 
 ---
 
-### 🧠 Refiner
+# ✅ Nueva capa implementada: evaluación por checkpoints
 
-* convierte intención en tareas técnicas ejecutables
+## 🧠 Evaluation Agent (✔️)
+
+Funciones:
+
+1. controlar calidad del desarrollo  
+2. decidir si continuar o corregir  
+
+Evalúa:
+
+- tasks ejecutadas  
+- artifacts  
+- recovery aplicado  
+- siguiente batch  
+- plan restante  
+- evidencia de contenido  
+
+Puede decidir:
+
+- approve_continue  
+- request_corrections  
+- insert_new_tasks  
+- resequence_remaining_tasks  
+- replan_from_level  
+- manual_review  
+
+⚠️ Aún depende de la calidad del executor para validar realmente el contenido.
 
 ---
 
-### ⚛️ Atomic Generator
+# ✅ Nueva capa implementada: recovery local
 
-* convierte tareas técnicas en unidades ejecutables reales
-* **NO participa en cada fallo**
-* solo entra en juego si:
+## 🧠 Recovery Agent (✔️)
 
-  * la tarea no era realmente atómica
-  * la granularidad era incorrecta
+Actúa antes que Evaluation.
+
+Responsabilidades:
+
+- analizar runs problemáticos  
+- decidir acción correctiva  
+- generar nuevas tareas si necesario  
+
+Decisiones:
+
+- retry  
+- replace  
+- re-atomize  
+- refinar  
+- manual_review  
 
 ---
 
-### ⚙️ Executor (PRÓXIMO GRAN BLOQUE)
+# ✅ Nueva capa implementada: post-batch orchestration
 
-* ejecuta tareas `atomic`
-* puede:
+## 🔁 Post-Batch Processor (✔️)
 
-  * completar
-  * fallar
-  * rechazar
+Flujo:
+
+Executor → Recovery → Evaluation
+
+Responsabilidades:
+
+- procesar resultados del batch  
+- aplicar recovery  
+- ejecutar evaluación  
+- decidir siguiente paso  
 
 ---
 
-### 🧠 Recovery Service (PRÓXIMO)
+# ✅ Guardrail de finalización
 
-* interpreta fallos
-* decide estrategia:
+## 🛑 Finalization Guard (✔️)
 
-```
-retry vs replan vs re-atomize
-```
+Evita loops infinitos.
+
+- permite iteraciones finales limitadas  
+- si se excede:
+  - bloquea ejecución  
+  - fuerza manual review  
+
+---
+
+# ⚙️ Estado del executor
+
+## 🧪 Executor actual = mock
+
+Puede:
+
+- ejecutar  
+- fallar  
+- rechazar  
+- generar artifacts mock  
+
+NO puede aún:
+
+- modificar código real  
+- ejecutar tests reales  
+- validar outputs de verdad  
 
 ---
 
 # ⚠️ Problemas ya resueltos
 
-## ❌ Planes demasiado abstractos
-
-✔️ Solución:
-
-* planner + refiner + atomic
-
----
-
-## ❌ Imposibilidad de ejecutar
-
-✔️ Solución:
-
-* nivel `atomic`
+✔️ planificación abstracta  
+✔️ ejecución imposible  
+✔️ explosión de tareas  
+✔️ falta de orden  
+✔️ falta de evaluación  
+✔️ loops infinitos  
 
 ---
 
-## ❌ Explosión de tareas
+# 🧠 Roles del sistema
 
-✔️ Solución:
-
-* guardrails de atomicidad
-
----
-
-## ❌ Tasks mal definidas
-
-✔️ Solución:
-
-* validación estricta + prompts refinados
+Planner → piensa  
+Refiner → concreta  
+Atomic → ejecutable  
+Sequencer → ordena  
+Executor → ejecuta  
+Recovery → corrige  
+Evaluator → valida  
+Post-batch → orquesta  
 
 ---
 
-# 🚀 Roadmap REAL actualizado
+# 🚀 Roadmap REAL
 
-## 🔥 FASE ACTUAL (EJECUCIÓN)
+## 🔥 PRIORIDAD MÁXIMA
 
-### 1. Executor real sobre atomic (CRÍTICO)
+### 1. Definir executor real
 
-* ejecutar tareas reales
-* producir artifacts
-* detectar fallos
-
----
-
-### 2. Recovery Service (CRÍTICO)
-
-* interpretar errores
-* decidir:
-
-```
-retry | adjust | re-atomize
-```
+- capacidades  
+- outputs  
+- límites  
+- definition of done  
 
 ---
 
-### 3. Re-atomización controlada
+### 2. Definir evidencias de ejecución
 
-* Atomic Generator solo cuando:
-
-  * hay fallo estructural de tarea
-
----
-
-### 4. Loop de ejecución completo
-
-```
-atomic → execute → fail → recover → retry
-```
+- artifacts reales  
+- outputs verificables  
+- señales claras de éxito/fallo  
 
 ---
 
-# 🧠 Modelo final del sistema
+### 3. Reforzar evaluador
 
-```
-Idea
- → Planning (✔️)
- → Refinement (✔️)
- → Atomic decomposition (✔️)
- → Execution (🔜)
- → Recovery (🔜)
-```
+- basado en evidencia real  
+- no en summaries  
 
 ---
 
-# 🧪 Testing (pendiente)
-
-* refiner ✔️ validado implícitamente
-* atomic ✔️ validado
-* falta:
-
-  * executor tests
-  * recovery tests
-  * E2E real
+### 4. Flujo completo batch a batch
 
 ---
 
-# 🎯 Estado real del proyecto
-
-## ✔️ COMPLETADO
-
-* planner
-* refiner
-* atomic generator
-* modelo de tareas final
-* guardrails de calidad
+### 5. Modelo de tasks sustituidas
 
 ---
 
-## 🔥 EN CURSO (CRÍTICO)
-
-* executor real
-* recovery system
+### 6. Versionado de execution plan
 
 ---
 
-# 🧠 Visión a largo plazo
+### 7. QA Agent (futuro)
 
-Este sistema evolucionará hacia:
+---
 
-* generación completa de software
-* ejecución autónoma con supervisión
-* agentes especializados por dominio
-* soporte multimodal
+# 🎯 Estado actual
+
+## ✔️ COMPLETO
+
+- planner  
+- refiner  
+- atomic  
+- execution plan  
+- recovery  
+- evaluation  
+- post-batch  
+- guardrails  
+
+## 🔥 CRÍTICO
+
+- executor real  
+- validación real  
 
 ---
 
 # 💡 Idea clave
 
-Ya no estás construyendo un planner.
+El problema ya no es planificar.
 
-Estás construyendo:
+Es este:
 
-> **un sistema autónomo capaz de ejecutar software y recuperarse de errores**
-
----
-
-# ▶️ Siguiente paso recomendado
-
-👉 Implementar **Executor real + Recovery Service**
+> **definir cómo se ejecuta y cómo sabemos que está bien ejecutado**
 
 ---
 
-**Ahora empieza lo interesante de verdad.**
+# ▶️ Siguiente paso
+
+👉 Definir el executor en profundidad
+
+---
+
+**Ahora empieza el verdadero problema interesante: la ejecución real.**
