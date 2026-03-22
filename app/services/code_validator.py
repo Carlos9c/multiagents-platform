@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -12,20 +13,25 @@ from app.schemas.code_execution import (
     CodeExecutorResult,
 )
 from app.schemas.code_validation import (
-    CODE_VALIDATION_DECIDED_STATUS_COMPLETED,
-    CODE_VALIDATION_DECIDED_STATUS_FAILED,
-    CODE_VALIDATION_DECIDED_STATUS_PARTIAL,
+    CODE_VALIDATION_DECISION_COMPLETED,
+    CODE_VALIDATION_DECISION_FAILED,
+    CODE_VALIDATION_DECISION_PARTIAL,
+    CodeValidationCheck,
     CodeValidationEvidence,
     CodeValidationResult,
 )
 from app.services.artifacts import create_artifact
-from app.services.code_validator_client import (
+from app.services.code_validation_client import (
     CodeValidatorClientError,
     evaluate_code_task_fulfillment,
 )
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
+from app.services.project_memory_service import build_project_operational_context
 from app.services.project_storage import CODE_DOMAIN, ProjectStorageService
 from app.services.workspace_runtime import WorkspaceRuntimeError
+
+
+CODE_VALIDATION_RESULT_ARTIFACT_TYPE = "code_validation_result"
 
 
 class CodeValidatorError(Exception):
@@ -36,7 +42,8 @@ class BaseCodeValidator(ABC):
     """
     Domain validator for code tasks.
 
-    It decides the final terminal task status, but does not persist task-state transitions.
+    It decides the final terminal validation outcome for the produced code result,
+    but does not persist task-state transitions itself.
     """
 
     @abstractmethod
@@ -53,8 +60,8 @@ class LocalCodeValidator(BaseCodeValidator):
     """
     Runtime-backed validator focused on fulfillment of the task request.
 
-    It gathers real workspace evidence, then asks a strict fulfillment validator
-    to decide only whether the result satisfies the task:
+    It gathers real workspace evidence, includes resolved execution context and
+    project operational memory, then asks a strict fulfillment validator to decide:
       - completed
       - partial
       - failed
@@ -81,11 +88,44 @@ class LocalCodeValidator(BaseCodeValidator):
             db=self.db,
             project_id=task.project_id,
             task_id=task.id,
-            artifact_type="code_validation_result",
+            artifact_type=CODE_VALIDATION_RESULT_ARTIFACT_TYPE,
             content=validation_result.model_dump_json(indent=2),
             created_by="code_validator",
         )
         return artifact.id
+
+    @staticmethod
+    def _dedupe_keep_order(paths: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+
+        for path in paths:
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            result.append(path)
+
+        return result
+
+    def _collect_candidate_snapshot_paths(
+        self,
+        executor_result: CodeExecutorResult,
+    ) -> list[str]:
+        paths: list[str] = []
+
+        paths.extend(executor_result.input.primary_targets)
+        paths.extend(executor_result.input.related_files)
+        paths.extend(executor_result.input.reference_files)
+        paths.extend(executor_result.input.related_test_files)
+        paths.extend(executor_result.working_set.target_files)
+        paths.extend(executor_result.working_set.related_files)
+        paths.extend(executor_result.working_set.reference_files)
+        paths.extend(executor_result.working_set.test_files)
+        paths.extend([item.path for item in executor_result.edit_plan.planned_changes])
+        paths.extend(executor_result.workspace_changes.created_files)
+        paths.extend(executor_result.workspace_changes.modified_files)
+
+        return self._dedupe_keep_order(paths)
 
     def _read_final_file_snapshots(
         self,
@@ -101,7 +141,7 @@ class LocalCodeValidator(BaseCodeValidator):
 
         snapshots: dict[str, str] = {}
 
-        for path in sorted(set(candidate_paths)):
+        for path in candidate_paths:
             try:
                 if self.workspace_runtime.file_exists(workspace_dir, path):
                     snapshots[path] = self.workspace_runtime.read_file(workspace_dir, path)
@@ -110,20 +150,88 @@ class LocalCodeValidator(BaseCodeValidator):
 
         return snapshots
 
+    @staticmethod
+    def _build_observed_changes(executor_result: CodeExecutorResult) -> list[str]:
+        actual_changes = executor_result.workspace_changes
+        observed: list[str] = []
+
+        if actual_changes.created_files:
+            observed.append(f"Created files: {', '.join(actual_changes.created_files)}")
+        if actual_changes.modified_files:
+            observed.append(f"Modified files: {', '.join(actual_changes.modified_files)}")
+        if actual_changes.deleted_files:
+            observed.append(f"Deleted files: {', '.join(actual_changes.deleted_files)}")
+        if actual_changes.renamed_files:
+            observed.append(f"Renamed files: {', '.join(actual_changes.renamed_files)}")
+        if actual_changes.diff_summary:
+            observed.append(f"Diff summary: {actual_changes.diff_summary}")
+
+        return observed
+
+    def _build_short_circuit_result(
+        self,
+        task: Task,
+        execution_run_id: int,
+        executor_result: CodeExecutorResult,
+        decision: str,
+        decision_reason: str,
+        warning: str,
+    ) -> CodeValidationResult:
+        evidence = CodeValidationEvidence(
+            checked_files=[],
+            observed_changes=[],
+            executed_checks=[
+                CodeValidationCheck(
+                    name="executor_status_short_circuit",
+                    command=None,
+                    status="completed",
+                    output=warning,
+                )
+            ],
+            check_outputs=[],
+            warnings=[warning],
+            workspace_diff=None,
+            final_file_snapshots={},
+            resolved_execution_context=executor_result.input,
+            working_set=executor_result.working_set,
+            edit_plan=executor_result.edit_plan,
+            project_operational_context=build_project_operational_context(
+                db=self.db,
+                project_id=task.project_id,
+            ),
+        )
+
+        validation_result = CodeValidationResult(
+            task_id=task.id,
+            decision=decision,
+            decision_reason=decision_reason,
+            missing_requirements=[],
+            evidence_used=[
+                "executor execution_status",
+                "executor journal summary",
+                "resolved execution context",
+            ],
+            validation_notes=[
+                f"Validation short-circuited because executor status was '{executor_result.execution_status}'.",
+                decision_reason,
+            ],
+            evidence=evidence,
+        )
+
+        artifact_id = self._persist_validation_artifact(task, validation_result)
+        validation_result.validation_notes.append(
+            f"Structured validator artifact persisted as artifact_id={artifact_id}."
+        )
+
+        return validation_result
+
     def _build_evidence(
         self,
         task: Task,
         execution_run_id: int,
         executor_result: CodeExecutorResult,
     ) -> CodeValidationEvidence:
-        checked_files = sorted(
-            set(
-                executor_result.working_set.target_files
-                + executor_result.workspace_changes.created_files
-                + executor_result.workspace_changes.modified_files
-                + [item.path for item in executor_result.edit_plan.planned_changes]
-            )
-        )
+        checked_files = self._collect_candidate_snapshot_paths(executor_result)
 
         actual_changes = self.workspace_runtime.collect_changes(
             project_id=task.project_id,
@@ -136,48 +244,100 @@ class LocalCodeValidator(BaseCodeValidator):
             domain_name=CODE_DOMAIN,
         )
 
-        observed_changes: list[str] = []
-        if actual_changes.created_files:
-            observed_changes.append(
-                f"Created files: {', '.join(actual_changes.created_files)}"
-            )
-        if actual_changes.modified_files:
-            observed_changes.append(
-                f"Modified files: {', '.join(actual_changes.modified_files)}"
-            )
-        if actual_changes.deleted_files:
-            observed_changes.append(
-                f"Deleted files: {', '.join(actual_changes.deleted_files)}"
-            )
-
-        candidate_snapshot_paths = (
-            actual_changes.created_files
-            + actual_changes.modified_files
-            + [item.path for item in executor_result.edit_plan.planned_changes]
-        )
-
         final_file_snapshots = self._read_final_file_snapshots(
             task=task,
             execution_run_id=execution_run_id,
-            candidate_paths=candidate_snapshot_paths,
+            candidate_paths=checked_files,
+        )
+
+        observed_changes = self._build_observed_changes(executor_result)
+
+        executed_checks = [
+            CodeValidationCheck(
+                name="workspace_collect_changes",
+                command=None,
+                status="completed",
+                output="Collected workspace change set successfully.",
+            ),
+            CodeValidationCheck(
+                name="workspace_generate_diff",
+                command=None,
+                status="completed",
+                output="Generated workspace diff successfully.",
+            ),
+            CodeValidationCheck(
+                name="final_file_snapshot_read",
+                command=None,
+                status="completed",
+                output=f"Collected {len(final_file_snapshots)} final file snapshots.",
+            ),
+            CodeValidationCheck(
+                name="fulfillment_decision_llm",
+                command=None,
+                status="pending",
+                output="Structured semantic fulfillment validation pending.",
+            ),
+        ]
+
+        check_outputs: list[str] = []
+        warnings: list[str] = []
+
+        if not actual_changes.created_files and not actual_changes.modified_files:
+            warnings.append(
+                "No created or modified files were observed in the workspace change set."
+            )
+
+        project_operational_context = build_project_operational_context(
+            db=self.db,
+            project_id=task.project_id,
         )
 
         return CodeValidationEvidence(
             checked_files=checked_files,
             observed_changes=observed_changes,
-            executed_checks=[
-                "workspace_collect_changes",
-                "workspace_generate_diff",
-                "final_file_snapshot_read",
-                "fulfillment_decision_llm",
-            ],
-            check_outputs=[],
-            warnings=[],
+            executed_checks=executed_checks,
+            check_outputs=check_outputs,
+            warnings=warnings,
             workspace_diff=workspace_diff,
             final_file_snapshots=final_file_snapshots,
-            execution_summary=executor_result.journal.summary,
-            edit_plan_summary=executor_result.edit_plan.summary,
+            resolved_execution_context=executor_result.input,
+            working_set=executor_result.working_set,
+            edit_plan=executor_result.edit_plan,
+            project_operational_context=project_operational_context,
         )
+
+    def _build_validation_notes(
+        self,
+        task: Task,
+        decision: str,
+        decision_reason: str,
+        missing_requirements: list[str],
+        evidence: CodeValidationEvidence,
+    ) -> list[str]:
+        notes: list[str] = []
+
+        notes.append(f"Task {task.id} validation decision: {decision}.")
+        notes.append(decision_reason)
+
+        if evidence.resolved_execution_context.selection_rationale:
+            notes.append(
+                "Selection rationale considered during validation: "
+                f"{evidence.resolved_execution_context.selection_rationale}"
+            )
+
+        if evidence.resolved_execution_context.unresolved_questions:
+            notes.append(
+                "Context gaps considered during validation: "
+                + "; ".join(evidence.resolved_execution_context.unresolved_questions[:8])
+            )
+
+        if missing_requirements:
+            notes.append(
+                "Missing requirements detected: "
+                + "; ".join(missing_requirements[:10])
+            )
+
+        return notes
 
     def validate(
         self,
@@ -191,62 +351,28 @@ class LocalCodeValidator(BaseCodeValidator):
             )
 
         if executor_result.execution_status == CODE_EXECUTION_STATUS_REJECTED:
-            evidence = CodeValidationEvidence(
-                checked_files=[],
-                observed_changes=[],
-                executed_checks=["executor_status_short_circuit"],
-                check_outputs=[],
-                warnings=["Executor rejected the task before a valid operational execution pass."],
-                workspace_diff=None,
-                final_file_snapshots={},
-                execution_summary=executor_result.journal.summary,
-                edit_plan_summary=executor_result.edit_plan.summary,
-            )
-
-            validation_result = CodeValidationResult(
-                task_id=task.id,
+            return self._build_short_circuit_result(
+                task=task,
                 execution_run_id=execution_run_id,
-                decided_task_status=CODE_VALIDATION_DECIDED_STATUS_FAILED,
-                reasons=[
-                    "The task was rejected by the executor and therefore does not satisfy the requested resolution.",
-                ],
-                unresolved_gaps=[],
-                evidence=evidence,
+                executor_result=executor_result,
+                decision=CODE_VALIDATION_DECISION_FAILED,
+                decision_reason=(
+                    "The executor rejected the task before producing a result that could satisfy the requested resolution."
+                ),
+                warning="Executor rejected the task before a valid operational execution pass.",
             )
-            artifact_id = self._persist_validation_artifact(task, validation_result)
-            validation_result.evidence.warnings.append(
-                f"Structured validator artifact persisted as artifact_id={artifact_id}."
-            )
-            return validation_result
 
         if executor_result.execution_status == CODE_EXECUTION_STATUS_FAILED:
-            evidence = CodeValidationEvidence(
-                checked_files=[],
-                observed_changes=[],
-                executed_checks=["executor_status_short_circuit"],
-                check_outputs=[],
-                warnings=["Executor failed before a valid operational execution pass."],
-                workspace_diff=None,
-                final_file_snapshots={},
-                execution_summary=executor_result.journal.summary,
-                edit_plan_summary=executor_result.edit_plan.summary,
-            )
-
-            validation_result = CodeValidationResult(
-                task_id=task.id,
+            return self._build_short_circuit_result(
+                task=task,
                 execution_run_id=execution_run_id,
-                decided_task_status=CODE_VALIDATION_DECIDED_STATUS_FAILED,
-                reasons=[
-                    "The executor failed before producing a result that could satisfy the task.",
-                ],
-                unresolved_gaps=[],
-                evidence=evidence,
+                executor_result=executor_result,
+                decision=CODE_VALIDATION_DECISION_FAILED,
+                decision_reason=(
+                    "The executor failed before producing a result that could satisfy the task."
+                ),
+                warning="Executor failed before a valid operational execution pass.",
             )
-            artifact_id = self._persist_validation_artifact(task, validation_result)
-            validation_result.evidence.warnings.append(
-                f"Structured validator artifact persisted as artifact_id={artifact_id}."
-            )
-            return validation_result
 
         if executor_result.execution_status != CODE_EXECUTION_STATUS_AWAITING_VALIDATION:
             raise CodeValidatorError(
@@ -265,29 +391,46 @@ class LocalCodeValidator(BaseCodeValidator):
                 checked_files=[],
                 observed_changes=[],
                 executed_checks=[
-                    "workspace_collect_changes",
-                    "workspace_generate_diff",
+                    CodeValidationCheck(
+                        name="workspace_validation_failure",
+                        command=None,
+                        status="failed",
+                        output=f"Workspace validation failed: {str(exc)}",
+                    )
                 ],
                 check_outputs=[],
                 warnings=[f"Workspace validation failed: {str(exc)}"],
                 workspace_diff=None,
                 final_file_snapshots={},
-                execution_summary=executor_result.journal.summary,
-                edit_plan_summary=executor_result.edit_plan.summary,
+                resolved_execution_context=executor_result.input,
+                working_set=executor_result.working_set,
+                edit_plan=executor_result.edit_plan,
+                project_operational_context=build_project_operational_context(
+                    db=self.db,
+                    project_id=task.project_id,
+                ),
             )
 
             validation_result = CodeValidationResult(
                 task_id=task.id,
-                execution_run_id=execution_run_id,
-                decided_task_status=CODE_VALIDATION_DECIDED_STATUS_FAILED,
-                reasons=[
-                    "Validation could not inspect the execution workspace safely enough to confirm task fulfillment.",
+                decision=CODE_VALIDATION_DECISION_FAILED,
+                decision_reason=(
+                    "Validation could not inspect the execution workspace safely enough to confirm task fulfillment."
+                ),
+                missing_requirements=[],
+                evidence_used=[
+                    "workspace inspection failure",
+                    "executor journal summary",
+                    "resolved execution context",
                 ],
-                unresolved_gaps=[],
+                validation_notes=[
+                    "Workspace validation failed before semantic fulfillment could be evaluated.",
+                    f"Workspace error: {str(exc)}",
+                ],
                 evidence=evidence,
             )
             artifact_id = self._persist_validation_artifact(task, validation_result)
-            validation_result.evidence.warnings.append(
+            validation_result.validation_notes.append(
                 f"Structured validator artifact persisted as artifact_id={artifact_id}."
             )
             return validation_result
@@ -304,44 +447,65 @@ class LocalCodeValidator(BaseCodeValidator):
             )
             validation_result = CodeValidationResult(
                 task_id=task.id,
-                execution_run_id=execution_run_id,
-                decided_task_status=CODE_VALIDATION_DECIDED_STATUS_FAILED,
-                reasons=[
-                    "Validation could not reach a reliable fulfillment decision for the task.",
+                decision=CODE_VALIDATION_DECISION_FAILED,
+                decision_reason=(
+                    "Validation could not reach a reliable fulfillment decision for the task."
+                ),
+                missing_requirements=[],
+                evidence_used=[
+                    "workspace diff",
+                    "final file snapshots",
+                    "resolved execution context",
+                    "validator model failure",
                 ],
-                unresolved_gaps=[],
+                validation_notes=[
+                    "Semantic fulfillment validation failed before a reliable decision could be produced.",
+                    f"Validator client error: {str(exc)}",
+                ],
                 evidence=evidence,
             )
             artifact_id = self._persist_validation_artifact(task, validation_result)
-            validation_result.evidence.warnings.append(
+            validation_result.validation_notes.append(
                 f"Structured validator artifact persisted as artifact_id={artifact_id}."
             )
             return validation_result
 
-        decided_status = fulfillment_decision.decided_task_status
-        if decided_status not in {
-            CODE_VALIDATION_DECIDED_STATUS_COMPLETED,
-            CODE_VALIDATION_DECIDED_STATUS_PARTIAL,
-            CODE_VALIDATION_DECIDED_STATUS_FAILED,
+        if fulfillment_decision.decision not in {
+            CODE_VALIDATION_DECISION_COMPLETED,
+            CODE_VALIDATION_DECISION_PARTIAL,
+            CODE_VALIDATION_DECISION_FAILED,
         }:
             raise CodeValidatorError(
-                f"Unsupported semantic decided_task_status '{decided_status}'."
+                f"Unsupported validation decision '{fulfillment_decision.decision}'."
             )
+
+        for check in evidence.executed_checks:
+            if check.name == "fulfillment_decision_llm" and check.status == "pending":
+                check.status = "completed"
+                check.output = "Structured semantic fulfillment validation completed."
+
+        evidence.check_outputs.append(
+            f"Fulfillment evidence used: {', '.join(fulfillment_decision.evidence_used)}"
+        )
 
         validation_result = CodeValidationResult(
             task_id=task.id,
-            execution_run_id=execution_run_id,
-            decided_task_status=decided_status,
-            reasons=[fulfillment_decision.decision_reason],
-            unresolved_gaps=fulfillment_decision.missing_requirements,
+            decision=fulfillment_decision.decision,
+            decision_reason=fulfillment_decision.decision_reason,
+            missing_requirements=fulfillment_decision.missing_requirements,
+            evidence_used=fulfillment_decision.evidence_used,
+            validation_notes=self._build_validation_notes(
+                task=task,
+                decision=fulfillment_decision.decision,
+                decision_reason=fulfillment_decision.decision_reason,
+                missing_requirements=fulfillment_decision.missing_requirements,
+                evidence=evidence,
+            ),
             evidence=evidence,
-        )
-        validation_result.evidence.check_outputs.append(
-            f"Fulfillment evidence used: {fulfillment_decision.evidence_used}"
         )
 
         artifact_id = self._persist_validation_artifact(task, validation_result)
-        validation_result.evidence.warnings.append(
+        validation_result.validation_notes.append(
             f"Structured validator artifact persisted as artifact_id={artifact_id}."
         )
 

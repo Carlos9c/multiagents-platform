@@ -7,10 +7,10 @@ from sqlalchemy.orm import Session
 from app.models.task import CODE_EXECUTOR, PLANNING_LEVEL_ATOMIC, Task
 from app.schemas.code_execution import (
     CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
-    CODE_FILE_ACTION_CREATE,
-    CODE_FILE_ACTION_MODIFY,
     CODE_FILE_ROLE_REFERENCE,
+    CODE_FILE_ROLE_RELATED,
     CODE_FILE_ROLE_TARGET,
+    CODE_FILE_ROLE_TEST,
     CodeExecutorInput,
     CodeExecutorResult,
     CodeFileContext,
@@ -27,6 +27,10 @@ from app.schemas.code_generation import (
     CODE_GENERATION_DECISION_REJECT,
 )
 from app.services.artifacts import create_artifact
+from app.services.code_context_selector import (
+    CodeContextSelector,
+    CodeContextSelectorInternalError,
+)
 from app.services.code_executor_client import (
     CodeExecutorClientError,
     generate_file_contents,
@@ -48,11 +52,6 @@ class CodeExecutorError(Exception):
 
 
 class CodeExecutorRejectedError(CodeExecutorError):
-    """
-    Raised when the executor deliberately refuses to execute the task
-    because it is not safely executable in its current state.
-    """
-
     def __init__(
         self,
         message: str,
@@ -68,11 +67,6 @@ class CodeExecutorRejectedError(CodeExecutorError):
 
 
 class CodeExecutorInternalError(CodeExecutorError):
-    """
-    Raised when the executor attempted to do its job and failed
-    for an internal or technical reason.
-    """
-
     def __init__(self, message: str, failure_code: str = "code_executor_internal_error"):
         super().__init__(message)
         self.message = message
@@ -80,20 +74,6 @@ class CodeExecutorInternalError(CodeExecutorError):
 
 
 class BaseCodeExecutor(ABC):
-    """
-    Code execution interface.
-
-    Owned phases:
-    1. prepare_workspace
-    2. resolve_context
-    3. build_working_set
-    4. build_edit_plan
-    5. apply_changes
-    6. build_journal
-
-    Validation is intentionally out of scope.
-    """
-
     @abstractmethod
     def prepare_workspace(self, task: Task, execution_run_id: int) -> PreparedWorkspace:
         raise NotImplementedError
@@ -155,10 +135,10 @@ class LocalCodeExecutor(BaseCodeExecutor):
     """
     Local filesystem implementation of the code executor.
 
-    Semantic contract:
-    - awaiting_validation: operational execution finished correctly
-    - rejected: executor deliberately refused to execute
-    - failed: executor attempted execution and failed technically
+    Important:
+    - code context selection is a targeting aid, not a gatekeeper
+    - sparse history must not block execution
+    - build_working_set materializes selector roles; it does not invent its own ranking
     """
 
     def __init__(
@@ -171,6 +151,10 @@ class LocalCodeExecutor(BaseCodeExecutor):
         self.storage_service = storage_service or ProjectStorageService()
         self.workspace_runtime = workspace_runtime or LocalWorkspaceRuntime(
             storage_service=self.storage_service
+        )
+        self.context_selector = CodeContextSelector(
+            db=self.db,
+            workspace_runtime=self.workspace_runtime,
         )
 
     def _reject_if_not_executable(self, task: Task) -> None:
@@ -211,19 +195,6 @@ class LocalCodeExecutor(BaseCodeExecutor):
                 remaining_scope="Task must be enriched with executable context.",
                 blockers_found="Insufficient execution context.",
             )
-
-    def _infer_candidate_files(self, task: Task) -> list[str]:
-        inferred: list[str] = []
-
-        if task.implementation_notes:
-            lines = [line.strip() for line in task.implementation_notes.splitlines()]
-            inferred.extend([line for line in lines if "/" in line or "." in line])
-
-        if task.title:
-            slug = task.title.lower().replace(" ", "_")
-            inferred.append(f"{slug}.py")
-
-        return list(dict.fromkeys(inferred))
 
     def _persist_phase_artifact(
         self,
@@ -275,8 +246,6 @@ class LocalCodeExecutor(BaseCodeExecutor):
     ) -> CodeExecutorInput:
         self._reject_if_not_executable(task)
 
-        candidate_files = self._infer_candidate_files(task)
-
         execution_goal = (
             task.objective
             or task.summary
@@ -284,10 +253,40 @@ class LocalCodeExecutor(BaseCodeExecutor):
             or f"Execute task {task.id}: {task.title}"
         )
 
-        unresolved_questions: list[str] = []
+        try:
+            selection = self.context_selector.select_context(
+                task=task,
+                prepared_workspace=prepared_workspace,
+                execution_run_id=None,
+            )
+        except CodeContextSelectorInternalError as exc:
+            raise CodeExecutorInternalError(
+                message=f"Failed to resolve code context: {str(exc)}",
+                failure_code="code_context_selection_failed",
+            ) from exc
+
+        primary_targets = [item.path for item in selection.primary_targets]
+        related_files = [item.path for item in selection.related_files]
+        reference_files = [item.path for item in selection.reference_files]
+        related_test_files = [item.path for item in selection.related_test_files]
+
+        candidate_files: list[str] = []
+        for path in selection.candidate_file_pool:
+            if path not in candidate_files:
+                candidate_files.append(path)
+        for path in primary_targets + related_files + reference_files + related_test_files:
+            if path not in candidate_files:
+                candidate_files.append(path)
+
+        relevant_decisions = list(selection.relevant_decisions)
+        relevant_decisions.append(
+            "Code context selection was used as targeting guidance and project-memory retrieval, not as an execution gate."
+        )
+
+        unresolved_questions = list(selection.context_gaps)
         if not candidate_files:
             unresolved_questions.append(
-                "No concrete target files were inferred from task metadata."
+                "No concrete candidate files were selected; execution planning may need to infer new-file creation from task intent."
             )
 
         context = CodeExecutorInput(
@@ -301,11 +300,17 @@ class LocalCodeExecutor(BaseCodeExecutor):
             out_of_scope=task.out_of_scope,
             execution_goal=execution_goal,
             repo_root=str(prepared_workspace.workspace_dir),
-            relevant_decisions=[],
-            candidate_modules=[],
+            relevant_decisions=relevant_decisions,
+            candidate_modules=selection.candidate_modules,
             candidate_files=candidate_files,
-            relevant_symbols=[],
+            primary_targets=primary_targets,
+            related_files=related_files,
+            reference_files=reference_files,
+            related_test_files=related_test_files,
+            relevant_symbols=selection.relevant_symbols,
             unresolved_questions=unresolved_questions,
+            selection_rationale=selection.selection_rationale,
+            selection_confidence=selection.confidence_score,
         )
 
         artifact_id = self._persist_phase_artifact(
@@ -319,62 +324,104 @@ class LocalCodeExecutor(BaseCodeExecutor):
 
         return context
 
+    def _build_file_context(
+        self,
+        *,
+        workspace_dir,
+        path: str,
+        role: str,
+    ) -> CodeFileContext:
+        content: str | None = None
+        summary: str | None = None
+
+        if self.workspace_runtime.file_exists(workspace_dir, path):
+            try:
+                content = self.workspace_runtime.read_file(workspace_dir, path)
+                summary = f"Existing workspace file selected as {role}."
+            except WorkspaceRuntimeError:
+                content = None
+                summary = f"{role} file exists but could not be read safely."
+        else:
+            summary = f"{role} file does not exist yet and may be created if needed."
+
+        return CodeFileContext(
+            path=path,
+            role=role,
+            content=content,
+            summary=summary,
+            relevant_snippets=[],
+            symbols=[],
+        )
+
+    @staticmethod
+    def _dedupe_keep_order(paths: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+
+        for path in paths:
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            result.append(path)
+
+        return result
+
     def build_working_set(
         self,
         context: CodeExecutorInput,
         prepared_workspace: PreparedWorkspace,
     ) -> CodeWorkingSet:
+        """
+        Materialize the semantic roles already decided by the code context selector.
+
+        This method must not:
+        - invent its own ranking
+        - slice candidate_files arbitrarily
+        - collapse targets and supporting files into one flat bag
+
+        candidate_files remains useful as a broader pool for downstream planning,
+        but the working set is built from the explicit role-based fields.
+        """
         workspace_dir = prepared_workspace.workspace_dir
         file_contexts: list[CodeFileContext] = []
+        seen_paths: set[str] = set()
 
-        for path in context.candidate_files[:5]:
-            content: str | None = None
-            summary: str | None = None
+        target_files = self._dedupe_keep_order(context.primary_targets)
+        related_files = self._dedupe_keep_order(context.related_files)
+        reference_files = self._dedupe_keep_order(context.reference_files)
+        test_files = self._dedupe_keep_order(context.related_test_files)
 
-            if self.workspace_runtime.file_exists(workspace_dir, path):
-                try:
-                    content = self.workspace_runtime.read_file(workspace_dir, path)
-                    summary = "Existing workspace file selected as target."
-                except WorkspaceRuntimeError:
-                    content = None
-                    summary = "Target file exists but could not be read safely."
-            else:
-                summary = "Target file does not exist yet and may be created."
-
-            file_contexts.append(
-                CodeFileContext(
-                    path=path,
-                    role=CODE_FILE_ROLE_TARGET,
-                    content=content,
-                    summary=summary,
-                    relevant_snippets=[],
-                    symbols=[],
+        def add_paths(paths: list[str], role: str) -> None:
+            for path in paths:
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                file_contexts.append(
+                    self._build_file_context(
+                        workspace_dir=workspace_dir,
+                        path=path,
+                        role=role,
+                    )
                 )
-            )
 
-        if self.workspace_runtime.file_exists(workspace_dir, "README.md"):
-            readme_content = self.workspace_runtime.read_file(workspace_dir, "README.md")
-            file_contexts.append(
-                CodeFileContext(
-                    path="README.md",
-                    role=CODE_FILE_ROLE_REFERENCE,
-                    content=readme_content,
-                    summary="Repository-level reference file.",
-                    relevant_snippets=[],
-                    symbols=[],
-                )
-            )
+        add_paths(target_files, CODE_FILE_ROLE_TARGET)
+        add_paths(related_files, CODE_FILE_ROLE_RELATED)
+        add_paths(reference_files, CODE_FILE_ROLE_REFERENCE)
+        add_paths(test_files, CODE_FILE_ROLE_TEST)
 
         working_set = CodeWorkingSet(
             repo_root=str(workspace_dir),
-            target_files=[f.path for f in file_contexts if f.role == CODE_FILE_ROLE_TARGET],
-            related_files=[],
-            reference_files=[f.path for f in file_contexts if f.role == CODE_FILE_ROLE_REFERENCE],
+            target_files=target_files,
+            related_files=related_files,
+            reference_files=reference_files,
+            test_files=test_files,
             files=file_contexts,
             repo_guidance=[
-                "Use only relative project paths inside the workspace.",
+                "Use only relative project paths inside the isolated workspace.",
                 "Prefer minimal and scoped file changes.",
-                "Do not expand task scope without explicit justification.",
+                "Use the explicit target/related/reference/test split from the resolved code context.",
+                "Do not expand task scope beyond the requested objective.",
+                "If the selected file lists are sparse, infer the smallest valid file surface from task intent rather than treating candidate_files as equivalent targets.",
             ],
         )
 
@@ -563,26 +610,32 @@ class LocalCodeExecutor(BaseCodeExecutor):
                 f"run={prepared_workspace.execution_run_id}."
             ),
             local_decisions=[
-                "Execution scope was limited to the inferred working set.",
+                "Execution scope was limited to the selected working set and explicit task intent.",
+                "Repository targeting was resolved from cumulative project memory plus task-related context.",
+                "Working set roles were materialized directly from the resolved code context.",
                 "Changes were applied only inside the isolated workspace.",
             ],
             claimed_completed_scope=(
-                "Resolved task context, working set, model-generated edit plan, and workspace change set were produced."
+                "Resolved code context, working set, model-generated edit plan, and workspace change set were produced."
                 if execution_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION
                 else None
             ),
             claimed_remaining_scope=None,
             encountered_uncertainties=context.unresolved_questions,
             notes_for_validator=[
-                "Validate that inferred target files match the intended task scope.",
-                "Validate that the observed workspace changes are sufficient.",
+                "Validate whether the selected context and produced changes actually satisfy the task.",
+                "Use the context gaps as caution signals, not as automatic failure reasons.",
+                "Check whether new-file creation was justified when repository targeting was sparse.",
             ],
         )
 
     def execute(self, task: Task, execution_run_id: int) -> CodeExecutorResult:
         try:
             prepared_workspace = self.prepare_workspace(task, execution_run_id)
-            context = self.resolve_context(task, prepared_workspace)
+            context = self.resolve_context(
+                task=task,
+                prepared_workspace=prepared_workspace,
+            )
             working_set = self.build_working_set(context, prepared_workspace)
             plan = self.build_edit_plan(task, context, working_set)
             changes = self.apply_changes(

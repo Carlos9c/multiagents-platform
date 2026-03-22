@@ -6,8 +6,6 @@ from app.models.artifact import Artifact
 from app.models.execution_run import ExecutionRun
 from app.models.project import Project
 from app.models.task import Task
-from app.services.artifacts import create_artifact
-from app.services.evaluation_client import call_evaluation_model
 from app.schemas.evaluation import (
     ArtifactDelta,
     ContentEvidence,
@@ -22,6 +20,13 @@ from app.schemas.evaluation import (
     TaskExecutionEvidence,
 )
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
+from app.schemas.project_memory import ProjectOperationalContext
+from app.services.artifacts import create_artifact
+from app.services.evaluation_client import call_evaluation_model
+from app.services.project_memory_service import (
+    build_project_operational_context,
+    persist_project_operational_context,
+)
 
 
 class EvaluationServiceError(Exception):
@@ -45,7 +50,10 @@ def _artifact_to_delta(artifact: Artifact) -> ArtifactDelta:
     )
 
 
-def _artifact_to_task_evidence(artifact: Artifact, excerpt_limit: int = 4000) -> TaskArtifactEvidence:
+def _artifact_to_task_evidence(
+    artifact: Artifact,
+    excerpt_limit: int = 4000,
+) -> TaskArtifactEvidence:
     content = artifact.content or ""
     full_content_included = len(content) <= excerpt_limit
     excerpt = content if full_content_included else content[:excerpt_limit] + "..."
@@ -70,6 +78,7 @@ def _batch_to_next_batch_context(batch: ExecutionBatch) -> NextBatchContext:
 
 
 def _build_current_project_state_summary(
+    project_operational_context: ProjectOperationalContext,
     executed_tasks: list[ExecutedTaskDelta],
     artifacts: list[ArtifactDelta],
     next_batch: NextBatchContext | None,
@@ -86,6 +95,7 @@ def _build_current_project_state_summary(
 
     return (
         "Checkpoint evaluation context summary:\n"
+        f"- Project operational memory: {project_operational_context.summary}\n"
         f"- Executed tasks since last checkpoint: {executed_titles}\n"
         f"- Artifacts produced since last checkpoint: {artifact_types}\n"
         f"- Next planned batch: {next_batch_name}\n"
@@ -164,6 +174,7 @@ def build_evaluation_input(
     executed_task_ids_since_last_checkpoint: list[int],
     artifact_ids_since_last_checkpoint: list[int],
     recovery_context: RecoveryContext | None = None,
+    persist_project_context_snapshot: bool = False,
 ) -> EvaluationInput:
     project = db.get(Project, project_id)
     if not project:
@@ -251,6 +262,18 @@ def build_evaluation_input(
         tasks=executed_task_objects,
     )
 
+    project_operational_context = build_project_operational_context(
+        db=db,
+        project_id=project_id,
+    )
+
+    if persist_project_context_snapshot:
+        persist_project_operational_context(
+            db=db,
+            project_context=project_operational_context,
+            created_by="evaluation_service",
+        )
+
     return EvaluationInput(
         project_id=project.id,
         project_name=project.name,
@@ -261,9 +284,11 @@ def build_evaluation_input(
         checkpoint_name=checkpoint.name,
         checkpoint_reason=checkpoint.reason,
         checkpoint_evaluation_goal=checkpoint.evaluation_goal,
+        project_operational_context=project_operational_context,
         executed_tasks_since_last_checkpoint=executed_tasks,
         artifacts_since_last_checkpoint=artifact_deltas,
         current_project_state_summary=_build_current_project_state_summary(
+            project_operational_context=project_operational_context,
             executed_tasks=executed_tasks,
             artifacts=artifact_deltas,
             next_batch=next_batch,
@@ -285,6 +310,7 @@ def evaluate_checkpoint(
     executed_task_ids_since_last_checkpoint: list[int],
     artifact_ids_since_last_checkpoint: list[int],
     recovery_context: RecoveryContext | None = None,
+    persist_project_context_snapshot: bool = False,
 ) -> EvaluationDecision:
     evaluation_input = build_evaluation_input(
         db=db,
@@ -294,6 +320,7 @@ def evaluate_checkpoint(
         executed_task_ids_since_last_checkpoint=executed_task_ids_since_last_checkpoint,
         artifact_ids_since_last_checkpoint=artifact_ids_since_last_checkpoint,
         recovery_context=recovery_context,
+        persist_project_context_snapshot=persist_project_context_snapshot,
     )
     return call_evaluation_model(evaluation_input)
 

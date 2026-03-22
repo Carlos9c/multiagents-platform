@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.schemas.project_memory import ProjectOperationalContext
+
 
 EvaluationDecisionType = Literal[
     "approve_continue",
@@ -143,6 +145,7 @@ class EvaluationInput(BaseModel):
     checkpoint_name: str
     checkpoint_reason: str
     checkpoint_evaluation_goal: str
+    project_operational_context: ProjectOperationalContext
     executed_tasks_since_last_checkpoint: list[ExecutedTaskDelta] = Field(default_factory=list)
     artifacts_since_last_checkpoint: list[ArtifactDelta] = Field(default_factory=list)
     current_project_state_summary: str

@@ -1,6 +1,6 @@
 from pydantic import ValidationError
 
-from app.schemas.code_execution import CodeExecutorInput, CodeWorkingSet, CodeFileEditPlan
+from app.schemas.code_execution import CodeExecutorInput, CodeFileEditPlan, CodeWorkingSet
 from app.schemas.code_generation import (
     CodeGenerationFilesResponse,
     CodeGenerationPlanResponse,
@@ -42,7 +42,7 @@ Reject if any of these apply:
 Self-check before finalizing:
 - if proceeding, the planned changes must be minimal, coherent, and directly tied to the task objective
 - if rejecting, explain the reason clearly and identify what is missing or unsafe
-"""
+""".strip()
 
 
 CODE_EXECUTOR_FILES_SYSTEM_PROMPT = """
@@ -63,7 +63,7 @@ Core rules:
 - Preserve coherence with the provided file context.
 - If a referenced file already has content, produce the updated full content carefully.
 - If information is missing, make the most conservative implementation choice consistent with the task.
-"""
+""".strip()
 
 
 def _build_working_set_text(working_set: CodeWorkingSet) -> str:
@@ -72,6 +72,7 @@ def _build_working_set_text(working_set: CodeWorkingSet) -> str:
     parts.append(f"target_files: {working_set.target_files}")
     parts.append(f"related_files: {working_set.related_files}")
     parts.append(f"reference_files: {working_set.reference_files}")
+    parts.append(f"test_files: {working_set.test_files}")
     parts.append("repo_guidance:")
     parts.extend([f"- {item}" for item in working_set.repo_guidance])
 
@@ -112,8 +113,14 @@ Resolved context:
 - relevant_decisions: {context.relevant_decisions}
 - candidate_modules: {context.candidate_modules}
 - candidate_files: {context.candidate_files}
+- primary_targets: {context.primary_targets}
+- related_files: {context.related_files}
+- reference_files: {context.reference_files}
+- related_test_files: {context.related_test_files}
 - relevant_symbols: {context.relevant_symbols}
 - unresolved_questions: {context.unresolved_questions}
+- selection_rationale: {context.selection_rationale}
+- selection_confidence: {context.selection_confidence}
 
 Working set:
 {_build_working_set_text(working_set)}
@@ -146,6 +153,14 @@ Task:
 - technical_constraints: {context.technical_constraints}
 - out_of_scope: {context.out_of_scope}
 - execution_goal: {context.execution_goal}
+
+Resolved context:
+- primary_targets: {context.primary_targets}
+- related_files: {context.related_files}
+- reference_files: {context.reference_files}
+- related_test_files: {context.related_test_files}
+- relevant_symbols: {context.relevant_symbols}
+- selection_rationale: {context.selection_rationale}
 
 Working set:
 {_build_working_set_text(working_set)}

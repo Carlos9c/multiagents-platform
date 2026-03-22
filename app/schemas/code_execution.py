@@ -14,11 +14,13 @@ VALID_CODE_EXECUTION_STATUSES = {
 CODE_FILE_ROLE_TARGET = "target"
 CODE_FILE_ROLE_RELATED = "related"
 CODE_FILE_ROLE_REFERENCE = "reference"
+CODE_FILE_ROLE_TEST = "test"
 
 VALID_CODE_FILE_ROLES = {
     CODE_FILE_ROLE_TARGET,
     CODE_FILE_ROLE_RELATED,
     CODE_FILE_ROLE_REFERENCE,
+    CODE_FILE_ROLE_TEST,
 }
 
 CODE_FILE_ACTION_CREATE = "create"
@@ -33,8 +35,13 @@ VALID_CODE_FILE_ACTIONS = {
 class CodeExecutorInput(BaseModel):
     """
     Resolved execution context for a code task.
-    This is not full repository context. It is the minimum structured
-    context needed to perform a scoped execution pass.
+
+    candidate_files is the broader candidate pool.
+    The real semantic grouping used by build_working_set is:
+    - primary_targets
+    - related_files
+    - reference_files
+    - related_test_files
     """
 
     task_id: int
@@ -53,15 +60,20 @@ class CodeExecutorInput(BaseModel):
     relevant_decisions: list[str] = Field(default_factory=list)
     candidate_modules: list[str] = Field(default_factory=list)
     candidate_files: list[str] = Field(default_factory=list)
+
+    primary_targets: list[str] = Field(default_factory=list)
+    related_files: list[str] = Field(default_factory=list)
+    reference_files: list[str] = Field(default_factory=list)
+    related_test_files: list[str] = Field(default_factory=list)
+
     relevant_symbols: list[str] = Field(default_factory=list)
     unresolved_questions: list[str] = Field(default_factory=list)
 
+    selection_rationale: str | None = None
+    selection_confidence: float | None = None
+
 
 class CodeFileContext(BaseModel):
-    """
-    File-level context used during execution.
-    """
-
     path: str
     role: str
     content: str | None = None
@@ -79,15 +91,12 @@ class CodeWorkingSet(BaseModel):
     target_files: list[str] = Field(default_factory=list)
     related_files: list[str] = Field(default_factory=list)
     reference_files: list[str] = Field(default_factory=list)
+    test_files: list[str] = Field(default_factory=list)
     files: list[CodeFileContext] = Field(default_factory=list)
     repo_guidance: list[str] = Field(default_factory=list)
 
 
 class PlannedFileChange(BaseModel):
-    """
-    Planned file operation before any workspace mutation.
-    """
-
     path: str
     action: str
     purpose: str
@@ -95,10 +104,6 @@ class PlannedFileChange(BaseModel):
 
 
 class CodeFileEditPlan(BaseModel):
-    """
-    Local edit plan for a code task.
-    """
-
     task_id: int
     summary: str
     planned_changes: list[PlannedFileChange] = Field(default_factory=list)
@@ -108,10 +113,6 @@ class CodeFileEditPlan(BaseModel):
 
 
 class WorkspaceChangeSet(BaseModel):
-    """
-    Observable local workspace changes produced by execution.
-    """
-
     created_files: list[str] = Field(default_factory=list)
     modified_files: list[str] = Field(default_factory=list)
     deleted_files: list[str] = Field(default_factory=list)
@@ -121,11 +122,6 @@ class WorkspaceChangeSet(BaseModel):
 
 
 class ExecutionJournal(BaseModel):
-    """
-    Non-verified execution diary.
-    This is operational context for continuity and validation.
-    """
-
     task_id: int
     summary: str
     local_decisions: list[str] = Field(default_factory=list)
@@ -136,14 +132,6 @@ class ExecutionJournal(BaseModel):
 
 
 class CodeExecutorResult(BaseModel):
-    """
-    Final structured output of the code executor, before validation.
-    Valid execution statuses:
-      - awaiting_validation
-      - failed
-      - rejected
-    """
-
     task_id: int
     execution_status: str
 

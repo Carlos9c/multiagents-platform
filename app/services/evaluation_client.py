@@ -34,7 +34,7 @@ Critical coordination rules:
 
 Evidence rules:
 - Do NOT rely only on execution summaries.
-- Use the provided task definitions, execution evidence, and artifact evidence to judge whether the work is actually sufficient.
+- Use the provided project operational context, task definitions, execution evidence, and artifact evidence to judge whether the work is actually sufficient.
 - Be alert to false positives where a task appears complete in summaries but the produced content does not satisfy its acceptance criteria or downstream needs.
 - When evidence is weak, inconsistent, or incomplete, prefer blocking continuation over assuming completion.
 
@@ -45,6 +45,17 @@ Critical reasoning rules:
 - A missing piece becomes more critical if the next batch depends on it.
 - Be strict about false progress and hidden gaps.
 - If work appears complete but does not safely support the next segment, do not approve continuation.
+
+Project memory rules:
+- Use the project_operational_context as cumulative memory of the project, not just the checkpoint window.
+- Cross-check recent checkpoint evidence against long-running project patterns:
+  - repeated gaps
+  - recurring failures
+  - validation learnings
+  - key decisions
+  - active workstreams
+  - historically referenced paths
+- Do not over-trust project memory if the checkpoint evidence clearly contradicts it.
 
 Impact classification rules:
 - critical:
@@ -86,6 +97,7 @@ def build_evaluation_user_prompt(
 Evaluate the current checkpoint and return a structured decision.
 
 You must account for:
+- the cumulative project operational context
 - the executed tasks since the last checkpoint
 - the artifacts created since the last checkpoint
 - the current project state summary
@@ -121,7 +133,7 @@ Important corrections:
 - continue_execution must be coherent with the decision
 - proposed_new_tasks must only be included when justified
 - do not duplicate gaps already covered by recovery decisions or recovery-created tasks
-- use the content evidence, not only summaries
+- use the project_operational_context and the content evidence, not only summaries
 - every proposed task must include a complete impact object
 - impact must reflect whether the next planned batch would be compromised
 - use critical impact when continuation is unsafe
