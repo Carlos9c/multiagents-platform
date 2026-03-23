@@ -23,7 +23,8 @@ from app.models.task import (
     TERMINAL_TASK_STATUSES,
     Task,
 )
-from app.schemas.evaluation import RecoveryContext
+
+from app.schemas.recovery import RecoveryContext
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.post_batch import PostBatchResult, PostBatchTaskRunSummary
 from app.services.artifacts import create_artifact

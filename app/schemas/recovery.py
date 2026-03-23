@@ -73,21 +73,6 @@ class RecoveryTaskCreate(BaseModel):
 
 
 class RecoveryDecision(BaseModel):
-    """
-    Single operational recovery contract.
-
-    This is the only recovery decision shape that should be used by:
-    - recovery_client
-    - recovery_service
-    - post_batch orchestration
-    - evaluation/recovery context bridging
-
-    Important:
-    - No refined-level recovery actions exist here.
-    - Recovery is expressed in terms of retry, reatomize, follow-up atomic work,
-      or manual review.
-    """
-
     source_task_id: int = Field(..., gt=0)
     source_run_id: int = Field(..., gt=0)
 
@@ -154,6 +139,8 @@ class RecoveryDecision(BaseModel):
                 raise ValueError("retry_same_task must be false when action='manual_review'.")
             if not self.requires_manual_review:
                 raise ValueError("requires_manual_review must be true when action='manual_review'.")
+            if not self.still_blocks_progress:
+                raise ValueError("action='manual_review' must keep still_blocks_progress=true.")
 
         return self
 
@@ -209,3 +196,9 @@ class RecoveryOpenIssue(BaseModel):
             self.recommended_action = self.recommended_action.strip() or None
 
         return self
+
+
+class RecoveryContext(BaseModel):
+    recovery_decisions: list[RecoveryDecisionSummary] = Field(default_factory=list)
+    open_issues: list[RecoveryOpenIssue] = Field(default_factory=list)
+    recovery_created_tasks: list[RecoveryCreatedTaskRecord] = Field(default_factory=list)

@@ -8,7 +8,7 @@ from app.services.llm.schema_utils import to_openai_strict_json_schema
 ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT = """
 You are a senior atomic task generation agent.
 
-Your job is to convert one project task into a set of atomic tasks that the CURRENT SYSTEM can actually execute.
+Your job is to convert one parent project task into a set of atomic tasks that the CURRENT SYSTEM can actually execute.
 Return ONLY JSON matching the provided schema.
 
 Primary principle:
@@ -127,17 +127,18 @@ def build_atomic_user_prompt(
     *,
     project_name: str,
     project_description: str,
-    refined_task_title: str,
-    refined_task_description: str,
-    refined_task_summary: str,
-    refined_task_objective: str,
-    refined_task_type: str,
-    refined_task_proposed_solution: str,
-    refined_task_implementation_steps: str,
-    refined_task_acceptance_criteria: str,
-    refined_task_tests_required: str,
-    refined_task_technical_constraints: str,
-    refined_task_out_of_scope: str,
+    parent_task_title: str,
+    parent_task_description: str,
+    parent_task_summary: str,
+    parent_task_objective: str,
+    parent_task_type: str,
+    parent_task_planning_level: str,
+    parent_task_proposed_solution: str,
+    parent_task_implementation_steps: str,
+    parent_task_acceptance_criteria: str,
+    parent_task_tests_required: str,
+    parent_task_technical_constraints: str,
+    parent_task_out_of_scope: str,
     available_executors: list[str],
 ) -> str:
     executors_text = "\n".join(f"- {executor}" for executor in available_executors)
@@ -148,17 +149,18 @@ Project name: {project_name}
 Project description: {project_description}
 
 Parent task to atomize:
-- title: {refined_task_title}
-- description: {refined_task_description}
-- summary: {refined_task_summary}
-- objective: {refined_task_objective}
-- task_type: {refined_task_type}
-- proposed_solution: {refined_task_proposed_solution}
-- implementation_steps: {refined_task_implementation_steps}
-- acceptance_criteria: {refined_task_acceptance_criteria}
-- tests_required: {refined_task_tests_required}
-- technical_constraints: {refined_task_technical_constraints}
-- out_of_scope: {refined_task_out_of_scope}
+- title: {parent_task_title}
+- description: {parent_task_description}
+- summary: {parent_task_summary}
+- objective: {parent_task_objective}
+- task_type: {parent_task_type}
+- planning_level: {parent_task_planning_level}
+- proposed_solution: {parent_task_proposed_solution}
+- implementation_steps: {parent_task_implementation_steps}
+- acceptance_criteria: {parent_task_acceptance_criteria}
+- tests_required: {parent_task_tests_required}
+- technical_constraints: {parent_task_technical_constraints}
+- out_of_scope: {parent_task_out_of_scope}
 
 Available executors:
 {executors_text}
@@ -205,7 +207,7 @@ Important:
 def build_atomic_retry_prompt(
     *,
     project_name: str,
-    refined_task_title: str,
+    parent_task_title: str,
     validation_error: str,
     available_executors: list[str],
 ) -> str:
@@ -214,7 +216,7 @@ def build_atomic_retry_prompt(
 
     return f"""
 Project name: {project_name}
-Parent task title: {refined_task_title}
+Parent task title: {parent_task_title}
 
 Your previous output was invalid.
 
@@ -247,17 +249,18 @@ def call_atomic_task_generator_model(
     *,
     project_name: str,
     project_description: str,
-    refined_task_title: str,
-    refined_task_description: str,
-    refined_task_summary: str,
-    refined_task_objective: str,
-    refined_task_type: str,
-    refined_task_proposed_solution: str,
-    refined_task_implementation_steps: str,
-    refined_task_acceptance_criteria: str,
-    refined_task_tests_required: str,
-    refined_task_technical_constraints: str,
-    refined_task_out_of_scope: str,
+    parent_task_title: str,
+    parent_task_description: str,
+    parent_task_summary: str,
+    parent_task_objective: str,
+    parent_task_type: str,
+    parent_task_planning_level: str,
+    parent_task_proposed_solution: str,
+    parent_task_implementation_steps: str,
+    parent_task_acceptance_criteria: str,
+    parent_task_tests_required: str,
+    parent_task_technical_constraints: str,
+    parent_task_out_of_scope: str,
     available_executors: list[str],
 ) -> AtomicTaskGenerationOutput:
     provider = get_llm_provider()
@@ -268,17 +271,18 @@ def call_atomic_task_generator_model(
     first_user_prompt = build_atomic_user_prompt(
         project_name=project_name,
         project_description=project_description,
-        refined_task_title=refined_task_title,
-        refined_task_description=refined_task_description,
-        refined_task_summary=refined_task_summary,
-        refined_task_objective=refined_task_objective,
-        refined_task_type=refined_task_type,
-        refined_task_proposed_solution=refined_task_proposed_solution,
-        refined_task_implementation_steps=refined_task_implementation_steps,
-        refined_task_acceptance_criteria=refined_task_acceptance_criteria,
-        refined_task_tests_required=refined_task_tests_required,
-        refined_task_technical_constraints=refined_task_technical_constraints,
-        refined_task_out_of_scope=refined_task_out_of_scope,
+        parent_task_title=parent_task_title,
+        parent_task_description=parent_task_description,
+        parent_task_summary=parent_task_summary,
+        parent_task_objective=parent_task_objective,
+        parent_task_type=parent_task_type,
+        parent_task_planning_level=parent_task_planning_level,
+        parent_task_proposed_solution=parent_task_proposed_solution,
+        parent_task_implementation_steps=parent_task_implementation_steps,
+        parent_task_acceptance_criteria=parent_task_acceptance_criteria,
+        parent_task_tests_required=parent_task_tests_required,
+        parent_task_technical_constraints=parent_task_technical_constraints,
+        parent_task_out_of_scope=parent_task_out_of_scope,
         available_executors=available_executors,
     )
 
@@ -294,7 +298,7 @@ def call_atomic_task_generator_model(
     except ValidationError as exc:
         retry_user_prompt = build_atomic_retry_prompt(
             project_name=project_name,
-            refined_task_title=refined_task_title,
+            parent_task_title=parent_task_title,
             validation_error=str(exc),
             available_executors=available_executors,
         )

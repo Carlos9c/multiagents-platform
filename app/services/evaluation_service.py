@@ -7,7 +7,8 @@ from app.models.artifact import Artifact
 from app.models.execution_run import ExecutionRun
 from app.models.project import Project
 from app.models.task import Task
-from app.schemas.evaluation import RecoveryContext, StageEvaluationOutput
+from app.schemas.evaluation import StageEvaluationOutput
+from app.schemas.recovery import RecoveryContext
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.project_memory import ProjectOperationalContext
 from app.services.artifacts import create_artifact

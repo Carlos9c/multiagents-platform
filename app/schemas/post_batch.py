@@ -4,7 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.schemas.evaluation import RecoveryContext, StageEvaluationOutput
+from app.schemas.evaluation import StageEvaluationOutput
+from app.schemas.recovery import RecoveryContext
 
 
 PostBatchStatus = Literal[

@@ -56,25 +56,8 @@ def _implementation_steps_count(implementation_steps: str) -> int:
 
 
 def _validate_atomic_task_quality(tasks: list[Task], available_executors: list[str]) -> None:
-    """
-    Intentionally minimal structural validation.
-
-    Semantic atomicity is primarily enforced by:
-    - the atomic prompt
-    - executor compatibility
-    - validator behavior
-    - recovery / re-atomization flows
-
-    This layer should enforce only stable structural guarantees.
-    """
     if not tasks:
         raise AtomicTaskGenerationError("Atomic generation produced no tasks.")
-
-    #if len(tasks) > MAX_ATOMIC_TASKS_PER_PARENT:
-    #    raise AtomicTaskGenerationError(
-    #        f"Atomic generation produced too many tasks ({len(tasks)}). "
-    #        f"Maximum allowed in this phase is {MAX_ATOMIC_TASKS_PER_PARENT}."
-    #    )
 
     seen_titles: set[str] = set()
 

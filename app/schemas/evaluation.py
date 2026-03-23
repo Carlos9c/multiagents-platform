@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+
 StageEvaluationDecision = Literal[
     "stage_completed",
     "stage_incomplete",
@@ -121,12 +122,6 @@ class RecoveryDecisionSummary(BaseModel):
         if any(task_id <= 0 for task_id in self.created_task_ids):
             raise ValueError("created_task_ids must contain only positive integers.")
         return self
-
-
-class RecoveryContext(BaseModel):
-    recovery_decisions: list[RecoveryDecisionSummary] = Field(default_factory=list)
-    open_issues: list[RecoveryIssue] = Field(default_factory=list)
-    recovery_created_tasks: list[RecoveryCreatedTask] = Field(default_factory=list)
 
 
 class StageEvaluationOutput(BaseModel):

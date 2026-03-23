@@ -80,7 +80,6 @@ def _build_created_task_from_recovery(
     *,
     project_id: int,
     parent_task_id: int,
-    source_task: Task,
     task_create,
     sequence_order: int,
 ) -> Task:
@@ -107,6 +106,47 @@ def _build_created_task_from_recovery(
         is_blocked=False,
         blocking_reason=None,
     )
+
+
+def _reopen_source_task_for_retry(
+    db: Session,
+    *,
+    source_task: Task,
+    decision: RecoveryDecision,
+) -> Task:
+    """
+    Make the original atomic task executable again.
+
+    Current retry policy:
+    - reuse the same task id
+    - move it back to pending
+    - clear blocking flags
+    - preserve historical runs/artifacts for auditability
+
+    This makes retry operational for the current sequencer, which only sequences
+    pending atomic tasks.
+
+    Important trade-off:
+    - the task will no longer appear as 'failed' after this point
+    - failure evidence remains available through the latest execution run and
+      validation artifacts
+    """
+    source_task.status = TASK_STATUS_PENDING
+    source_task.is_blocked = False
+    source_task.blocking_reason = None
+
+    # Preserve lineage and historical evidence. We deliberately do not mutate
+    # previous runs or artifacts here.
+    if decision.execution_guidance:
+        source_task.implementation_notes = (
+            (source_task.implementation_notes or "").strip() + "\n\n"
+            + f"Retry guidance: {decision.execution_guidance.strip()}"
+        ).strip()
+
+    db.add(source_task)
+    db.commit()
+    db.refresh(source_task)
+    return source_task
 
 
 def persist_recovery_decision(
@@ -175,17 +215,25 @@ def materialize_recovery_decision(
     decision: RecoveryDecision,
 ) -> list[Task]:
     """
-    Materializes recovery-created atomic tasks when the decision requires it.
+    Materializes recovery actions.
 
     Action behavior:
-    - retry: no new tasks created
-    - reatomize: create replacement-style atomic tasks under the same functional parent
-    - insert_followup: create additive atomic tasks under the same functional parent
-    - manual_review: no new tasks created
+    - retry:
+        reopens the same source task as pending so it becomes executable again
+    - reatomize:
+        creates replacement-style atomic tasks under the same functional parent
+    - insert_followup:
+        creates additive atomic tasks under the same functional parent
+    - manual_review:
+        creates no tasks
+
+    Return contract:
+    - retry/manual_review return []
+    - reatomize/insert_followup return the newly created tasks
 
     Important:
-    This function does not mutate the source task status directly. It only materializes
-    the next work implied by recovery.
+    This function is intentionally operational. It makes the next step real for the
+    sequencer instead of merely recording intent.
     """
     _, source_task = _get_source_entities_or_raise(db, decision=decision)
 
@@ -194,11 +242,28 @@ def materialize_recovery_decision(
             f"Source task {source_task.id} does not belong to project {project_id}."
         )
 
-    if decision.action in {"retry", "manual_review"}:
+    if decision.action == "manual_review":
         if decision.created_tasks:
             raise RecoveryServiceError(
-                f"Recovery action '{decision.action}' must not contain created tasks."
+                "Recovery action 'manual_review' must not contain created tasks."
             )
+        return []
+
+    if decision.action == "retry":
+        if decision.created_tasks:
+            raise RecoveryServiceError(
+                "Recovery action 'retry' must not contain created tasks."
+            )
+        if not decision.retry_same_task:
+            raise RecoveryServiceError(
+                "Recovery action 'retry' requires retry_same_task=true."
+            )
+
+        _reopen_source_task_for_retry(
+            db=db,
+            source_task=source_task,
+            decision=decision,
+        )
         return []
 
     if decision.action not in {"reatomize", "insert_followup"}:
@@ -211,7 +276,6 @@ def materialize_recovery_decision(
 
     parent_task_id = _infer_parent_task_id_for_created_tasks(source_task)
 
-    # Place recovery tasks after existing children of the same parent lineage.
     last_sequence_order = (
         db.query(Task.sequence_order)
         .filter(
@@ -230,7 +294,6 @@ def materialize_recovery_decision(
         task = _build_created_task_from_recovery(
             project_id=project_id,
             parent_task_id=parent_task_id,
-            source_task=source_task,
             task_create=task_create,
             sequence_order=start_sequence + index,
         )
