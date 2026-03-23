@@ -1,5 +1,4 @@
 import json
-import re
 
 from sqlalchemy.orm import Session
 
@@ -12,30 +11,13 @@ from app.services.atomic_task_generator_client import call_atomic_task_generator
 
 PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
 AVAILABLE_EXECUTORS = ["code_executor"]
+
 MAX_ATOMIC_TASKS_PER_REFINED = 8
+MAX_IMPLEMENTATION_STEPS_PER_ATOMIC = 20
 
-COMPOUND_TITLE_PATTERNS = [
-    r"\bdefinir y\b",
-    r"\bidentificar y\b",
-    r"\bdocumentar y\b",
-    r"\bredactar y\b",
-    r"\banalizar y\b",
-    r"\bcrear y\b",
-    r"\bextraer y\b",
-    r"\bintegrar y\b",
-    r"\bvalidar y\b",
-    r"\borganizar y\b",
-]
 
-BROAD_DESCRIPTION_PATTERNS = [
-    r"\bjunto con\b",
-    r"\basí como\b",
-    r"\by también\b",
-    r"\btanto .* como\b",
-]
-
-DOCUMENT_LIKE_TASK_TYPES = {"requirements", "documentation", "onboarding"}
-STRICTER_TASK_TYPES = {"implementation", "testing", "review"}
+class AtomicTaskGenerationError(ValueError):
+    """Raised when generated atomic tasks do not meet minimum structural requirements."""
 
 
 def _format_bullet_list(items: list[str]) -> str:
@@ -44,23 +26,15 @@ def _format_bullet_list(items: list[str]) -> str:
 
 def _validate_parent_task(project: Project, task: Task) -> None:
     if task.project_id != project.id:
-        raise ValueError("Task does not belong to the given project")
+        raise AtomicTaskGenerationError("Task does not belong to the given project")
 
     if task.planning_level != "refined":
-        raise ValueError("Only refined tasks can be converted to atomic tasks")
+        raise AtomicTaskGenerationError("Only refined tasks can be converted to atomic tasks")
 
     if task.executor_type != PENDING_ATOMIC_ASSIGNMENT_EXECUTOR:
-        raise ValueError("Refined task must still be pending atomic executor assignment")
-
-
-def _looks_compound_title(title: str) -> bool:
-    normalized = title.strip().lower()
-    return any(re.search(pattern, normalized) for pattern in COMPOUND_TITLE_PATTERNS)
-
-
-def _looks_broad_description(description: str) -> bool:
-    normalized = (description or "").strip().lower()
-    return any(re.search(pattern, normalized) for pattern in BROAD_DESCRIPTION_PATTERNS)
+        raise AtomicTaskGenerationError(
+            "Refined task must still be pending atomic executor assignment"
+        )
 
 
 def _implementation_steps_count(implementation_steps: str) -> int:
@@ -68,127 +42,65 @@ def _implementation_steps_count(implementation_steps: str) -> int:
     return sum(1 for line in lines if line.startswith("- "))
 
 
-def _normalized_title(title: str | None) -> str:
-    return (title or "").strip().lower()
-
-
-def _count_atomicity_risk_signals(task: Task) -> int:
-    risk_signals = 0
-    title = _normalized_title(task.title)
-    description = (task.description or "").strip().lower()
-
-    if _looks_compound_title(title):
-        risk_signals += 1
-
-    if _looks_broad_description(description):
-        risk_signals += 1
-
-    if "integrar" in title and "redact" in title:
-        risk_signals += 1
-
-    if "documentar" in title and "definir" in title:
-        risk_signals += 1
-
-    if "analizar" in title and "redact" in title:
-        risk_signals += 1
-
-    if "extraer" in title and "integrar" in title:
-        risk_signals += 1
-
-    return risk_signals
-
-
-def _validate_atomic_step_count(task: Task) -> None:
-    step_count = _implementation_steps_count(task.implementation_steps or "")
-    task_type = (task.task_type or "").strip().lower()
-    risk_signals = _count_atomicity_risk_signals(task)
-
-    # Para tareas más cercanas a ejecución o validación, mantenemos guardrails más estrictos.
-    if task_type in STRICTER_TASK_TYPES:
-        if step_count > 6:
-            raise ValueError(
-                f"Atomic task has too many implementation steps and may be too broad: {task.title}"
-            )
-        return
-
-    # Para tareas documentales/requirements no rechazamos solo por número de pasos.
-    # Rechazamos cuando hay exceso de pasos junto con señales semánticas de mezcla.
-    if task_type in DOCUMENT_LIKE_TASK_TYPES:
-        if step_count > 10 and risk_signals >= 1:
-            raise ValueError(
-                f"Atomic task is too broad for a document-like task: {task.title}"
-            )
-        if step_count > 8 and risk_signals >= 2:
-            raise ValueError(
-                f"Atomic task mixes too many concerns for a document-like task: {task.title}"
-            )
-        return
-
-    # Regla general para otros tipos: combinar tamaño y señales semánticas.
-    if step_count > 8 and risk_signals >= 1:
-        raise ValueError(
-            f"Atomic task appears too broad based on combined signals: {task.title}"
-        )
-    if step_count > 6 and risk_signals >= 2:
-        raise ValueError(
-            f"Atomic task appears too broad based on multiple atomicity risks: {task.title}"
-        )
-
-
 def _validate_atomic_task_quality(tasks: list[Task], available_executors: list[str]) -> None:
+    """
+    Intentionally minimal structural validation.
+
+    Atomicity semantics are delegated to:
+    - the model prompt
+    - the executor
+    - the validator
+    - recovery / re-atomization flows
+
+    This layer must not try to infer semantic non-atomicity from wording.
+    """
     if len(tasks) > MAX_ATOMIC_TASKS_PER_REFINED:
-        raise ValueError(
+        raise AtomicTaskGenerationError(
             f"Atomic generation produced too many tasks ({len(tasks)}). "
             f"Maximum allowed in this phase is {MAX_ATOMIC_TASKS_PER_REFINED}."
         )
 
     for task in tasks:
         if task.executor_type not in available_executors:
-            raise ValueError(f"Invalid executor_type in atomic task: {task.executor_type}")
+            raise AtomicTaskGenerationError(
+                f"Invalid executor_type in atomic task: {task.executor_type}"
+            )
 
-        if len((task.proposed_solution or "").strip()) < 30:
-            raise ValueError(f"proposed_solution too short in atomic task: {task.title}")
+        if len((task.title or "").strip()) < 8:
+            raise AtomicTaskGenerationError(
+                "Atomic task title is too short to be actionable."
+            )
+
+        if len((task.description or "").strip()) < 20:
+            raise AtomicTaskGenerationError(
+                f"description too short in atomic task: {task.title}"
+            )
+
+        if len((task.proposed_solution or "").strip()) < 20:
+            raise AtomicTaskGenerationError(
+                f"proposed_solution too short in atomic task: {task.title}"
+            )
 
         if len((task.implementation_steps or "").strip()) < 10:
-            raise ValueError(f"implementation_steps too short in atomic task: {task.title}")
+            raise AtomicTaskGenerationError(
+                f"implementation_steps too short in atomic task: {task.title}"
+            )
 
-        if len((task.tests_required or "").strip()) < 10:
-            raise ValueError(f"tests_required too short in atomic task: {task.title}")
+        #if len((task.tests_required or "").strip()) < 10:
+        #    raise AtomicTaskGenerationError(
+        #        f"tests_required too short in atomic task: {task.title}"
+        #    )
 
         if len((task.acceptance_criteria or "").strip()) < 20:
-            raise ValueError(f"acceptance_criteria too short in atomic task: {task.title}")
-
-        # Señales semánticas fuertes: estas siguen siendo motivo de rechazo directo.
-        normalized_title = _normalized_title(task.title)
-
-        if _looks_compound_title(task.title):
-            raise ValueError(
-                f"Atomic task title suggests multiple responsibilities: {task.title}"
+            raise AtomicTaskGenerationError(
+                f"acceptance_criteria too short in atomic task: {task.title}"
             )
 
-        if _looks_broad_description(task.description or ""):
-            raise ValueError(
-                f"Atomic task description suggests multiple combined actions: {task.title}"
+        step_count = _implementation_steps_count(task.implementation_steps or "")
+        if step_count > MAX_IMPLEMENTATION_STEPS_PER_ATOMIC:
+            raise AtomicTaskGenerationError(
+                f"Atomic task appears too large for one execution unit: {task.title}"
             )
-
-        if "integrar" in normalized_title and "redact" in normalized_title:
-            raise ValueError(
-                f"Atomic task title mixes content creation and integration: {task.title}"
-            )
-
-        if "documentar" in normalized_title and "definir" in normalized_title:
-            raise ValueError(
-                f"Atomic task title mixes definition and documentation: {task.title}"
-            )
-
-        if "analizar" in normalized_title and "redact" in normalized_title:
-            raise ValueError(
-                f"Atomic task title mixes analysis and writing: {task.title}"
-            )
-
-        # El número de pasos ya no se usa como regla universal,
-        # sino como validación contextual por tipo de tarea.
-        _validate_atomic_step_count(task)
 
 
 def generate_atomic_tasks(
@@ -199,11 +111,11 @@ def generate_atomic_tasks(
 ) -> dict:
     project = db.get(Project, project_id)
     if not project:
-        raise ValueError(f"Project {project_id} not found")
+        raise AtomicTaskGenerationError(f"Project {project_id} not found")
 
     parent_task = db.get(Task, task_id)
     if not parent_task:
-        raise ValueError(f"Task {task_id} not found")
+        raise AtomicTaskGenerationError(f"Task {task_id} not found")
 
     _validate_parent_task(project, parent_task)
 
@@ -286,6 +198,7 @@ def generate_atomic_tasks(
         created_tasks.append(task)
 
     db.flush()
+
     _validate_atomic_task_quality(created_tasks, AVAILABLE_EXECUTORS)
 
     artifact = Artifact(
@@ -296,12 +209,7 @@ def generate_atomic_tasks(
         created_by="atomic_task_generator_agent",
     )
     db.add(artifact)
-
     db.commit()
-
-    for task in created_tasks:
-        db.refresh(task)
-    db.refresh(artifact)
 
     return {
         "project_id": project.id,
