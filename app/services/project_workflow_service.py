@@ -35,6 +35,12 @@ class ProjectWorkflowServiceError(Exception):
     """Base exception for project workflow orchestration failures."""
 
 
+ATOMIC_PARENT_PLANNING_PRIORITY = [
+    PLANNING_LEVEL_HIGH_LEVEL,
+    PLANNING_LEVEL_REFINED,
+]
+
+
 def _get_project_or_raise(db: Session, project_id: int) -> Project:
     project = db.get(Project, project_id)
     if not project:
@@ -85,6 +91,22 @@ def _has_tasks_at_level(db: Session, project_id: int, planning_level: str) -> bo
     return task is not None
 
 
+def _get_tasks_at_level(
+    db: Session,
+    project_id: int,
+    planning_level: str,
+) -> list[Task]:
+    return (
+        db.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.planning_level == planning_level,
+        )
+        .order_by(Task.id.asc())
+        .all()
+    )
+
+
 def _get_pending_tasks_at_level(
     db: Session,
     project_id: int,
@@ -102,6 +124,48 @@ def _get_pending_tasks_at_level(
     )
 
 
+def _has_any_atomic_tasks(db: Session, project_id: int) -> bool:
+    return _has_tasks_at_level(db, project_id, PLANNING_LEVEL_ATOMIC)
+
+
+def _has_atomic_children(db: Session, parent_task_id: int) -> bool:
+    child = (
+        db.query(Task)
+        .filter(
+            Task.parent_task_id == parent_task_id,
+            Task.planning_level == PLANNING_LEVEL_ATOMIC,
+        )
+        .first()
+    )
+    return child is not None
+
+
+def _get_pending_atomic_generation_parents(
+    db: Session,
+    *,
+    project_id: int,
+    planning_level: str,
+) -> list[Task]:
+    """
+    Returns pending parent tasks that still need atomic children.
+
+    Important:
+    - we do NOT regenerate atomic tasks for parents that already have atomic children
+    - this keeps the workflow idempotent and safe across re-runs
+    """
+    candidate_tasks = _get_pending_tasks_at_level(
+        db=db,
+        project_id=project_id,
+        planning_level=planning_level,
+    )
+
+    return [
+        task
+        for task in candidate_tasks
+        if not _has_atomic_children(db, task.id)
+    ]
+
+
 def _run_planner_if_needed(db: Session, project_id: int) -> bool:
     if _has_tasks_at_level(db, project_id, PLANNING_LEVEL_HIGH_LEVEL):
         return True
@@ -110,7 +174,27 @@ def _run_planner_if_needed(db: Session, project_id: int) -> bool:
     return True
 
 
-def _run_technical_refinement_phase(db: Session, project_id: int) -> bool:
+def _run_optional_technical_refinement_phase(
+    db: Session,
+    project_id: int,
+    *,
+    enable_technical_refinement: bool,
+) -> bool:
+    """
+    Optional refinement policy.
+
+    Behavior:
+    - when disabled:
+      - workflow skips creating new refined tasks
+      - legacy refined tasks remain supported downstream
+      - we still report the phase as completed because it was intentionally bypassed
+    - when enabled:
+      - pending high-level tasks are refined
+      - legacy refined tasks remain valid
+    """
+    if not enable_technical_refinement:
+        return True
+
     pending_high_level_tasks = _get_pending_tasks_at_level(
         db=db,
         project_id=project_id,
@@ -118,7 +202,7 @@ def _run_technical_refinement_phase(db: Session, project_id: int) -> bool:
     )
 
     if not pending_high_level_tasks:
-        return _has_tasks_at_level(db, project_id, PLANNING_LEVEL_REFINED)
+        return True
 
     for task in pending_high_level_tasks:
         refine_high_level_task(
@@ -130,24 +214,69 @@ def _run_technical_refinement_phase(db: Session, project_id: int) -> bool:
     return True
 
 
-def _run_atomic_generation_phase(db: Session, project_id: int) -> bool:
-    pending_refined_tasks = _get_pending_tasks_at_level(
-        db=db,
-        project_id=project_id,
-        planning_level=PLANNING_LEVEL_REFINED,
-    )
+def _run_atomic_generation_phase(
+    db: Session,
+    project_id: int,
+    *,
+    enable_technical_refinement: bool,
+) -> bool:
+    """
+    Atomic generation policy with compatibility support.
 
-    if not pending_refined_tasks:
-        return _has_tasks_at_level(db, project_id, PLANNING_LEVEL_ATOMIC)
+    When technical refinement is disabled:
+    - first atomize pending high-level parents directly
+    - then consume any pending legacy refined parents
 
-    for task in pending_refined_tasks:
-        generate_atomic_tasks(
+    When technical refinement is enabled:
+    - first atomize refined parents created by the refiner
+    - then consume any remaining high-level parents that still need direct atomization
+      as a safety fallback
+    - legacy refined parents are also supported
+
+    The returned boolean means:
+    - atomic generation phase is satisfied for the current workflow run
+    - either because atomic tasks already exist, or because all eligible parents
+      were processed successfully
+    """
+    if enable_technical_refinement:
+        parent_levels_in_order = [
+            PLANNING_LEVEL_REFINED,
+            PLANNING_LEVEL_HIGH_LEVEL,
+        ]
+    else:
+        parent_levels_in_order = [
+            PLANNING_LEVEL_HIGH_LEVEL,
+            PLANNING_LEVEL_REFINED,
+        ]
+
+    processed_any_parent = False
+
+    for planning_level in parent_levels_in_order:
+        parents = _get_pending_atomic_generation_parents(
             db=db,
             project_id=project_id,
-            task_id=task.id,
+            planning_level=planning_level,
         )
 
-    return True
+        for task in parents:
+            generate_atomic_tasks(
+                db=db,
+                project_id=project_id,
+                task_id=task.id,
+            )
+            processed_any_parent = True
+
+    if processed_any_parent:
+        return True
+
+    if _has_any_atomic_tasks(db, project_id):
+        return True
+
+    for planning_level in parent_levels_in_order:
+        if _has_tasks_at_level(db, project_id, planning_level):
+            return True
+
+    return False
 
 
 def _execute_batch_tasks_synchronously(
@@ -300,13 +429,35 @@ def run_project_workflow(
     project_id: int,
     max_workflow_iterations: int = 5,
     max_finalization_iterations: int = 2,
+    enable_technical_refinement: bool = False,
 ) -> ProjectWorkflowResult:
+    """
+    End-to-end workflow orchestration.
+
+    Current recommended policy:
+    - planner -> atomic direct by default
+    - optional technical refinement can be enabled for large/complex projects
+    - legacy refined tasks remain supported regardless of the active policy
+    """
     _get_project_or_raise(db=db, project_id=project_id)
     _bootstrap_project_storage_for_execution(project_id=project_id)
 
     planning_completed = _run_planner_if_needed(db=db, project_id=project_id)
-    refinement_completed = _run_technical_refinement_phase(db=db, project_id=project_id)
-    atomic_generation_completed = _run_atomic_generation_phase(db=db, project_id=project_id)
+    refinement_completed = _run_optional_technical_refinement_phase(
+        db=db,
+        project_id=project_id,
+        enable_technical_refinement=enable_technical_refinement,
+    )
+    atomic_generation_completed = _run_atomic_generation_phase(
+        db=db,
+        project_id=project_id,
+        enable_technical_refinement=enable_technical_refinement,
+    )
+
+    if not atomic_generation_completed:
+        raise ProjectWorkflowServiceError(
+            "Workflow could not produce or detect atomic tasks after planning/decomposition."
+        )
 
     iterations: list[WorkflowIterationSummary] = []
     completed_batches: list[str] = []
@@ -330,6 +481,24 @@ def run_project_workflow(
 
         execution_plan_generated = True
         plan_version = plan.plan_version
+
+        if not plan.execution_batches:
+            final_status = "awaiting_manual_review"
+            manual_review_required = True
+            iterations.append(
+                WorkflowIterationSummary(
+                    iteration_number=iteration_number,
+                    plan_version=plan.plan_version,
+                    batch_ids_processed=[],
+                    reopened_finalization=False,
+                    manual_review_required=True,
+                    notes=(
+                        "Execution plan generation returned no batches. "
+                        "Manual review is required because decomposition or sequencing produced no executable work."
+                    ),
+                )
+            )
+            break
 
         iteration_summary, resulting_status, finalization_iteration_count = _run_execution_iteration(
             db=db,
@@ -380,10 +549,14 @@ def run_project_workflow(
     elif manual_review_required:
         notes = (
             "Project workflow stopped awaiting manual review. "
-            "This may be due to recovery/evaluation decisions or workflow iteration limits."
+            "This may be due to recovery/evaluation decisions, empty sequencing, or workflow iteration limits."
         )
     else:
-        notes = "Project workflow ended without explicit closure."
+        notes = (
+            "Project workflow ended without explicit closure. "
+            "Technical refinement was "
+            + ("enabled." if enable_technical_refinement else "bypassed.")
+        )
 
     return ProjectWorkflowResult(
         project_id=project_id,

@@ -19,7 +19,12 @@ from app.schemas.code_execution import (
     CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
     CODE_EXECUTION_STATUS_FAILED,
     CODE_EXECUTION_STATUS_REJECTED,
+    CodeExecutorInput,
     CodeExecutorResult,
+    CodeFileEditPlan,
+    CodeWorkingSet,
+    ExecutionJournal,
+    WorkspaceChangeSet,
 )
 from app.schemas.code_validation import (
     CODE_VALIDATION_DECISION_COMPLETED,
@@ -167,6 +172,97 @@ def _extract_artifacts_created(executor_result: CodeExecutorResult) -> str | Non
     return " | ".join(artifact_refs)
 
 
+def _split_blockers(blockers_found: str | None) -> list[str]:
+    if not blockers_found:
+        return []
+    return [item.strip() for item in blockers_found.split(";") if item.strip()]
+
+
+def _build_synthetic_executor_result(
+    *,
+    task: Task,
+    execution_status: str,
+    summary: str,
+    work_details: str | None = None,
+    remaining_scope: str | None = None,
+    blockers_found: str | None = None,
+    validation_notes: list[str] | None = None,
+    output_snapshot: str | None = None,
+) -> CodeExecutorResult:
+    return CodeExecutorResult(
+        task_id=task.id,
+        execution_status=execution_status,
+        input=CodeExecutorInput(
+            task_id=task.id,
+            project_id=task.project_id,
+            title=task.title,
+            description=task.description,
+            objective=task.objective,
+            acceptance_criteria=task.acceptance_criteria,
+            technical_constraints=task.technical_constraints,
+            out_of_scope=task.out_of_scope,
+            execution_goal=(
+                task.objective
+                or task.summary
+                or task.description
+                or f"Execute task {task.id}: {task.title}"
+            ),
+            repo_root="",
+            relevant_decisions=[],
+            candidate_modules=[],
+            candidate_files=[],
+            primary_targets=[],
+            related_files=[],
+            reference_files=[],
+            related_test_files=[],
+            relevant_symbols=[],
+            unresolved_questions=[],
+            selection_rationale=(
+                "Synthetic execution context created by task_execution_service "
+                "to persist terminal validation evidence after pre-validation failure."
+            ),
+            selection_confidence=0.0,
+        ),
+        working_set=CodeWorkingSet(
+            repo_root="",
+            target_files=[],
+            related_files=[],
+            reference_files=[],
+            test_files=[],
+            files=[],
+            repo_guidance=[],
+        ),
+        edit_plan=CodeFileEditPlan(
+            task_id=task.id,
+            summary=work_details or "No executable edit plan was completed before termination.",
+            planned_changes=[],
+            assumptions=[],
+            local_risks=[],
+            notes=[
+                "Synthetic edit plan generated after terminal executor failure/rejection.",
+            ],
+        ),
+        workspace_changes=WorkspaceChangeSet(
+            created_files=[],
+            modified_files=[],
+            deleted_files=[],
+            renamed_files=[],
+            diff_summary=None,
+            impacted_areas=[],
+        ),
+        journal=ExecutionJournal(
+            task_id=task.id,
+            summary=summary,
+            local_decisions=[],
+            claimed_completed_scope=None,
+            claimed_remaining_scope=remaining_scope,
+            encountered_uncertainties=_split_blockers(blockers_found),
+            notes_for_validator=validation_notes or [],
+        ),
+        output_snapshot=output_snapshot,
+    )
+
+
 def _validate_after_execution(
     db: Session,
     *,
@@ -210,6 +306,42 @@ def _validate_after_execution(
         message=message,
         final_task_status=validation_service_result.final_task_status,
         validation_decision=decision,
+    )
+
+
+def _finalize_prevalidation_terminal_outcome(
+    db: Session,
+    *,
+    task: Task,
+    run_id: int,
+    run_status: str,
+    executor_result: CodeExecutorResult,
+    message: str,
+) -> SyncTaskExecutionResult:
+    try:
+        validation_service_result = validate_code_task(
+            db=db,
+            task_id=task.id,
+            execution_run_id=run_id,
+            executor_result=executor_result,
+        )
+    except TaskValidationServiceError as exc:
+        mark_task_failed(db, task.id)
+        raise TaskExecutionServiceError(
+            "Execution reached a terminal state before validation, and the service "
+            f"could not persist the required validation artifact for task {task.id}: {str(exc)}"
+        ) from exc
+
+    refreshed_task = _get_task_or_raise(db, task.id)
+
+    return _build_sync_result(
+        task=refreshed_task,
+        run_id=run_id,
+        run_status=run_status,
+        output_snapshot=executor_result.output_snapshot,
+        message=message,
+        final_task_status=validation_service_result.final_task_status,
+        validation_decision=validation_service_result.validation_result.decision,
     )
 
 
@@ -260,6 +392,12 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             )
 
         if executor_result.execution_status == CODE_EXECUTION_STATUS_FAILED:
+            blockers_found = (
+                "; ".join(executor_result.journal.encountered_uncertainties)
+                if executor_result.journal.encountered_uncertainties
+                else None
+            )
+
             mark_execution_run_failed(
                 db=db,
                 run_id=run_id,
@@ -272,27 +410,27 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 artifacts_created=_extract_artifacts_created(executor_result),
                 completed_scope=executor_result.journal.claimed_completed_scope,
                 remaining_scope=executor_result.journal.claimed_remaining_scope,
-                blockers_found=(
-                    "; ".join(executor_result.journal.encountered_uncertainties)
-                    if executor_result.journal.encountered_uncertainties
-                    else None
-                ),
+                blockers_found=blockers_found,
                 validation_notes="; ".join(executor_result.journal.notes_for_validator),
             )
             mark_task_failed(db, task.id)
 
-            refreshed_task = _get_task_or_raise(db, task.id)
-            return _build_sync_result(
-                task=refreshed_task,
+            return _finalize_prevalidation_terminal_outcome(
+                db=db,
+                task=task,
                 run_id=run_id,
                 run_status=CODE_EXECUTION_STATUS_FAILED,
-                output_snapshot=executor_result.output_snapshot,
-                message="Execution failed before validation.",
-                final_task_status=refreshed_task.status,
-                validation_decision=None,
+                executor_result=executor_result,
+                message="Execution failed before normal validation, but a terminal validation artifact was persisted.",
             )
 
         if executor_result.execution_status == CODE_EXECUTION_STATUS_REJECTED:
+            blockers_found = (
+                "; ".join(executor_result.journal.encountered_uncertainties)
+                if executor_result.journal.encountered_uncertainties
+                else None
+            )
+
             mark_execution_run_rejected(
                 db=db,
                 run_id=run_id,
@@ -301,24 +439,18 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 recovery_action=RECOVERY_ACTION_REATOMIZE,
                 work_summary=executor_result.journal.summary,
                 work_details=executor_result.edit_plan.summary,
-                blockers_found=(
-                    "; ".join(executor_result.journal.encountered_uncertainties)
-                    if executor_result.journal.encountered_uncertainties
-                    else None
-                ),
+                blockers_found=blockers_found,
                 validation_notes="; ".join(executor_result.journal.notes_for_validator),
             )
             mark_task_failed(db, task.id)
 
-            refreshed_task = _get_task_or_raise(db, task.id)
-            return _build_sync_result(
-                task=refreshed_task,
+            return _finalize_prevalidation_terminal_outcome(
+                db=db,
+                task=task,
                 run_id=run_id,
                 run_status=CODE_EXECUTION_STATUS_REJECTED,
-                output_snapshot=executor_result.output_snapshot,
-                message="Execution was rejected before validation.",
-                final_task_status=refreshed_task.status,
-                validation_decision=None,
+                executor_result=executor_result,
+                message="Execution was rejected before normal validation, but a terminal validation artifact was persisted.",
             )
 
         raise TaskExecutionServiceError(
@@ -342,15 +474,27 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         )
         mark_task_failed(db, task.id)
 
-        refreshed_task = _get_task_or_raise(db, task.id)
-        return _build_sync_result(
-            task=refreshed_task,
+        synthetic_result = _build_synthetic_executor_result(
+            task=task,
+            execution_status=CODE_EXECUTION_STATUS_REJECTED,
+            summary=exc.message,
+            work_details="The executor deliberately rejected the task before execution.",
+            remaining_scope=exc.remaining_scope,
+            blockers_found=exc.blockers_found,
+            validation_notes=[
+                "Execution was rejected at the executor boundary.",
+                f"failure_code={exc.failure_code}",
+            ],
+            output_snapshot=None,
+        )
+
+        return _finalize_prevalidation_terminal_outcome(
+            db=db,
+            task=task,
             run_id=run_id,
             run_status=CODE_EXECUTION_STATUS_REJECTED,
-            output_snapshot=None,
-            message="Execution was rejected before validation.",
-            final_task_status=refreshed_task.status,
-            validation_decision=None,
+            executor_result=synthetic_result,
+            message="Execution was rejected before validation, and a synthetic terminal validation artifact was persisted.",
         )
 
     except CodeExecutorInternalError as exc:
@@ -365,15 +509,27 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         )
         mark_task_failed(db, task.id)
 
-        refreshed_task = _get_task_or_raise(db, task.id)
-        return _build_sync_result(
-            task=refreshed_task,
+        synthetic_result = _build_synthetic_executor_result(
+            task=task,
+            execution_status=CODE_EXECUTION_STATUS_FAILED,
+            summary=exc.message,
+            work_details="The code executor raised an internal error before producing a normal result.",
+            remaining_scope="Task execution stopped before a valid operational pass completed.",
+            blockers_found="Internal executor failure.",
+            validation_notes=[
+                "Internal execution failure.",
+                f"failure_code={exc.failure_code}",
+            ],
+            output_snapshot=None,
+        )
+
+        return _finalize_prevalidation_terminal_outcome(
+            db=db,
+            task=task,
             run_id=run_id,
             run_status=CODE_EXECUTION_STATUS_FAILED,
-            output_snapshot=None,
-            message="Execution failed before validation.",
-            final_task_status=refreshed_task.status,
-            validation_decision=None,
+            executor_result=synthetic_result,
+            message="Execution failed before validation, and a synthetic terminal validation artifact was persisted.",
         )
 
     except Exception as exc:
@@ -387,15 +543,27 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         )
         mark_task_failed(db, task.id)
 
-        refreshed_task = _get_task_or_raise(db, task.id)
-        return _build_sync_result(
-            task=refreshed_task,
+        synthetic_result = _build_synthetic_executor_result(
+            task=task,
+            execution_status=CODE_EXECUTION_STATUS_FAILED,
+            summary=str(exc),
+            work_details="task_execution_service caught an unexpected exception before normal validation.",
+            remaining_scope="Task execution stopped before a valid operational pass completed.",
+            blockers_found="Unexpected execution orchestration error.",
+            validation_notes=[
+                "Unexpected task execution service error.",
+                "failure_code=task_execution_service_error",
+            ],
+            output_snapshot=None,
+        )
+
+        return _finalize_prevalidation_terminal_outcome(
+            db=db,
+            task=task,
             run_id=run_id,
             run_status=CODE_EXECUTION_STATUS_FAILED,
-            output_snapshot=None,
-            message="Execution failed before validation.",
-            final_task_status=refreshed_task.status,
-            validation_decision=None,
+            executor_result=synthetic_result,
+            message="Execution failed before validation due to an unexpected service error, and a synthetic terminal validation artifact was persisted.",
         )
 
 

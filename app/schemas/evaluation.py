@@ -1,198 +1,230 @@
+from __future__ import annotations
+
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
-
-from app.schemas.project_memory import ProjectOperationalContext
+from pydantic import BaseModel, Field, model_validator
 
 
-EvaluationDecisionType = Literal[
-    "approve_continue",
-    "request_corrections",
-    "insert_new_tasks",
-    "resequence_remaining_tasks",
-    "replan_from_level",
+StageEvaluationDecision = Literal[
+    "stage_completed",
+    "stage_incomplete",
+    "manual_review_required",
+]
+
+ReplanLevel = Literal[
+    "atomic",
+    "high_level",
+]
+
+BatchOutcome = Literal[
+    "successful",
+    "partial",
+    "failed",
+    "blocked",
+]
+
+RecoveryStrategy = Literal[
+    "none",
+    "retry_batch",
+    "reatomize_failed_tasks",
+    "insert_followup_atomic_tasks",
+    "replan_from_high_level",
     "manual_review",
 ]
 
-EvaluationConfidence = Literal["low", "medium", "high"]
-ImpactLevel = Literal["critical", "moderate", "low"]
-SuggestedPosition = Literal[
-    "before_next_batch",
-    "inside_next_batch",
-    "after_next_checkpoint",
-    "future_backlog",
-]
-ReplanLevel = Literal["atomic", "refined", "high_level"]
+
+class EvaluatedBatchSummary(BaseModel):
+    batch_id: str = Field(..., min_length=1)
+    outcome: BatchOutcome
+    summary: str = Field(..., min_length=10)
+    key_findings: list[str] = Field(default_factory=list)
+    failed_task_ids: list[int] = Field(default_factory=list)
+    partial_task_ids: list[int] = Field(default_factory=list)
+    completed_task_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_batch_summary(self) -> "EvaluatedBatchSummary":
+        self.key_findings = [item.strip() for item in self.key_findings if item and item.strip()]
+
+        for collection_name, values in (
+            ("failed_task_ids", self.failed_task_ids),
+            ("partial_task_ids", self.partial_task_ids),
+            ("completed_task_ids", self.completed_task_ids),
+        ):
+            if any(task_id <= 0 for task_id in values):
+                raise ValueError(f"{collection_name} must contain only positive integers.")
+
+        return self
 
 
-class ExecutedTaskDelta(BaseModel):
-    task_id: int
-    title: str
-    task_status: str
-    last_run_status: str | None = None
-    work_summary: str | None = None
-    completed_scope: str | None = None
-    remaining_scope: str | None = None
-    blockers_found: str | None = None
-    validation_notes: str | None = None
+class EvaluationReplanInstruction(BaseModel):
+    """
+    Replanning contract aligned with the active workflow.
+
+    refined is intentionally unsupported.
+    """
+
+    required: bool
+    level: ReplanLevel | None = None
+    reason: str | None = None
+    target_task_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_instruction(self) -> "EvaluationReplanInstruction":
+        if self.reason is not None:
+            self.reason = self.reason.strip() or None
+
+        if any(task_id <= 0 for task_id in self.target_task_ids):
+            raise ValueError("target_task_ids must contain only positive integers.")
+
+        if self.required and self.level is None:
+            raise ValueError("level is required when replanning is required.")
+
+        if self.required and not self.reason:
+            raise ValueError("reason is required when replanning is required.")
+
+        return self
 
 
-class ArtifactDelta(BaseModel):
-    artifact_id: int
-    artifact_type: str
-    task_id: int | None = None
-    summary: str
+class RecoveryCreatedTask(BaseModel):
+    source_run_id: int = Field(..., gt=0)
+    source_task_id: int = Field(..., gt=0)
+    created_task_id: int = Field(..., gt=0)
+    title: str = Field(..., min_length=3)
+    planning_level: str = Field(..., min_length=3)
+    executor_type: str = Field(..., min_length=3)
 
 
-class NextBatchContext(BaseModel):
-    batch_id: str
-    name: str
-    goal: str
-    task_ids: list[int] = Field(default_factory=list)
-    entry_conditions: list[str] = Field(default_factory=list)
-    expected_outputs: list[str] = Field(default_factory=list)
-    risk_level: str
+class RecoveryIssue(BaseModel):
+    source_run_id: int = Field(..., gt=0)
+    source_task_id: int = Field(..., gt=0)
+    issue_type: str = Field(..., min_length=3)
+    summary: str = Field(..., min_length=10)
+    recommended_action: str | None = None
 
-    @field_validator("task_ids")
-    @classmethod
-    def validate_task_ids_not_empty(cls, value: list[int]) -> list[int]:
-        if not value:
-            raise ValueError("NextBatchContext.task_ids cannot be empty.")
-        return value
-
-
-class RemainingPlanSummary(BaseModel):
-    pending_batch_ids: list[str] = Field(default_factory=list)
-    pending_task_ids: list[int] = Field(default_factory=list)
-    blocked_task_ids: list[int] = Field(default_factory=list)
-    sequencing_rationale: str | None = None
+    @model_validator(mode="after")
+    def normalize_issue(self) -> "RecoveryIssue":
+        if self.recommended_action is not None:
+            self.recommended_action = self.recommended_action.strip() or None
+        return self
 
 
 class RecoveryDecisionSummary(BaseModel):
-    source_task_id: int
-    source_run_id: int | None = None
-    run_status: str
-    decision_type: str
-    reason: str
-    replacement_task_ids: list[int] = Field(default_factory=list)
-    still_blocks_progress: bool
-    covered_gap_summary: str
+    source_run_id: int = Field(..., gt=0)
+    source_task_id: int = Field(..., gt=0)
+    strategy: str = Field(..., min_length=3)
+    reason: str = Field(..., min_length=10)
+    created_task_ids: list[int] = Field(default_factory=list)
 
-
-class RecoveryOpenIssue(BaseModel):
-    task_id: int
-    issue_type: str
-    remaining_scope: str | None = None
-    blockers_found: str | None = None
-    why_it_still_matters: str
-
-
-class RecoveryCreatedTaskSummary(BaseModel):
-    task_id: int
-    title: str
-    objective: str | None = None
-    origin: str = "recovery_agent"
-    source_task_id: int
+    @model_validator(mode="after")
+    def validate_summary(self) -> "RecoveryDecisionSummary":
+        if any(task_id <= 0 for task_id in self.created_task_ids):
+            raise ValueError("created_task_ids must contain only positive integers.")
+        return self
 
 
 class RecoveryContext(BaseModel):
     recovery_decisions: list[RecoveryDecisionSummary] = Field(default_factory=list)
-    open_issues: list[RecoveryOpenIssue] = Field(default_factory=list)
-    recovery_created_tasks: list[RecoveryCreatedTaskSummary] = Field(default_factory=list)
+    open_issues: list[RecoveryIssue] = Field(default_factory=list)
+    recovery_created_tasks: list[RecoveryCreatedTask] = Field(default_factory=list)
 
 
-class TaskArtifactEvidence(BaseModel):
-    artifact_id: int
-    artifact_type: str
-    content_excerpt: str
-    full_content_included: bool = False
+class StageEvaluationOutput(BaseModel):
+    """
+    Final evaluator output consumed by post-batch / recovery orchestration.
+    """
 
+    decision: StageEvaluationDecision
+    decision_summary: str = Field(..., min_length=20)
 
-class TaskExecutionEvidence(BaseModel):
-    run_id: int | None = None
-    run_status: str | None = None
-    work_summary: str | None = None
-    work_details: str | None = None
-    completed_scope: str | None = None
-    remaining_scope: str | None = None
-    blockers_found: str | None = None
-    validation_notes: str | None = None
-    error_message: str | None = None
+    stage_goals_satisfied: bool
+    project_stage_closed: bool
 
+    recovery_strategy: RecoveryStrategy = "none"
+    recovery_reason: str | None = None
 
-class EvaluatedTaskEvidence(BaseModel):
-    task_id: int
-    title: str
-    description: str | None = None
-    objective: str | None = None
-    acceptance_criteria: str | None = None
-    tests_required: str | None = None
-    execution_evidence: TaskExecutionEvidence
-    artifact_evidence: list[TaskArtifactEvidence] = Field(default_factory=list)
+    replan: EvaluationReplanInstruction = Field(
+        default_factory=lambda: EvaluationReplanInstruction(required=False)
+    )
 
+    followup_atomic_tasks_required: bool = False
+    followup_atomic_tasks_reason: str | None = None
 
-class ContentEvidence(BaseModel):
-    evaluated_tasks: list[EvaluatedTaskEvidence] = Field(default_factory=list)
+    manual_review_required: bool = False
+    manual_review_reason: str | None = None
 
+    evaluated_batches: list[EvaluatedBatchSummary] = Field(default_factory=list)
+    key_risks: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
-class EvaluationInput(BaseModel):
-    project_id: int
-    project_name: str
-    project_goal: str
-    current_execution_objective: str
-    plan_version: int
-    checkpoint_id: str
-    checkpoint_name: str
-    checkpoint_reason: str
-    checkpoint_evaluation_goal: str
-    project_operational_context: ProjectOperationalContext
-    executed_tasks_since_last_checkpoint: list[ExecutedTaskDelta] = Field(default_factory=list)
-    artifacts_since_last_checkpoint: list[ArtifactDelta] = Field(default_factory=list)
-    current_project_state_summary: str
-    next_batch: NextBatchContext | None = None
-    remaining_plan: RemainingPlanSummary
-    recovery_context: RecoveryContext = Field(default_factory=RecoveryContext)
-    content_evidence: ContentEvidence = Field(default_factory=ContentEvidence)
+    @model_validator(mode="after")
+    def validate_output(self) -> "StageEvaluationOutput":
+        self.decision_summary = self.decision_summary.strip()
+        if not self.decision_summary:
+            raise ValueError("decision_summary cannot be empty.")
 
+        if self.recovery_reason is not None:
+            self.recovery_reason = self.recovery_reason.strip() or None
 
-class ProposedTaskImpact(BaseModel):
-    impact_level: ImpactLevel
-    impact_reason: str
-    blocks_continuation: bool
-    requires_resequencing: bool
-    suggested_position: SuggestedPosition
-    affected_task_ids: list[int] = Field(default_factory=list)
-    risk_if_postponed: str
+        if self.followup_atomic_tasks_reason is not None:
+            self.followup_atomic_tasks_reason = self.followup_atomic_tasks_reason.strip() or None
 
+        if self.manual_review_reason is not None:
+            self.manual_review_reason = self.manual_review_reason.strip() or None
 
-class ProposedTask(BaseModel):
-    title: str
-    description: str
-    objective: str | None = None
-    task_type: str = "implementation"
-    priority: str = "medium"
-    technical_constraints: str | None = None
-    out_of_scope: str | None = None
-    impact: ProposedTaskImpact
+        self.key_risks = [item.strip() for item in self.key_risks if item and item.strip()]
+        self.notes = [item.strip() for item in self.notes if item and item.strip()]
 
+        if self.decision == "stage_completed":
+            if not self.project_stage_closed:
+                raise ValueError("project_stage_closed must be true when decision is 'stage_completed'.")
+            if self.manual_review_required:
+                raise ValueError("stage_completed cannot require manual review.")
+            if self.recovery_strategy != "none":
+                raise ValueError("stage_completed must not request a recovery strategy other than 'none'.")
+            if self.replan.required:
+                raise ValueError("stage_completed must not request replanning.")
+            if self.followup_atomic_tasks_required:
+                raise ValueError("stage_completed must not request follow-up atomic tasks.")
 
-class EvaluationDecision(BaseModel):
-    checkpoint_id: str
-    decision_type: EvaluationDecisionType
-    continue_execution: bool
-    reason: str
-    confidence: EvaluationConfidence
-    project_state_summary: str
-    detected_gaps: list[str] = Field(default_factory=list)
-    proposed_new_tasks: list[ProposedTask] = Field(default_factory=list)
-    resequence_remaining_tasks: bool = False
-    updated_execution_guidance: str | None = None
-    replan_from_level: ReplanLevel | None = None
+        if self.decision == "manual_review_required" and not self.manual_review_required:
+            raise ValueError(
+                "decision='manual_review_required' requires manual_review_required=true."
+            )
 
-    @field_validator("replan_from_level")
-    @classmethod
-    def validate_replan_from_level(cls, value: str | None, info) -> str | None:
-        decision_type = info.data.get("decision_type")
-        if decision_type == "replan_from_level" and not value:
-            raise ValueError("replan_from_level is required when decision_type='replan_from_level'.")
-        return value
+        if self.manual_review_required and not self.manual_review_reason:
+            raise ValueError("manual_review_reason is required when manual_review_required is true.")
+
+        if self.followup_atomic_tasks_required and not self.followup_atomic_tasks_reason:
+            raise ValueError(
+                "followup_atomic_tasks_reason is required when followup_atomic_tasks_required is true."
+            )
+
+        if self.recovery_strategy != "none" and not self.recovery_reason:
+            raise ValueError("recovery_reason is required when recovery_strategy is not 'none'.")
+
+        if self.recovery_strategy == "insert_followup_atomic_tasks":
+            if not self.followup_atomic_tasks_required:
+                raise ValueError(
+                    "recovery_strategy='insert_followup_atomic_tasks' requires followup_atomic_tasks_required=true."
+                )
+
+        if self.recovery_strategy == "manual_review":
+            if not self.manual_review_required:
+                raise ValueError(
+                    "recovery_strategy='manual_review' requires manual_review_required=true."
+                )
+
+        if self.recovery_strategy == "replan_from_high_level":
+            if not self.replan.required or self.replan.level != "high_level":
+                raise ValueError(
+                    "recovery_strategy='replan_from_high_level' requires replan.required=true and replan.level='high_level'."
+                )
+
+        if self.recovery_strategy == "reatomize_failed_tasks":
+            if self.replan.required and self.replan.level == "high_level":
+                raise ValueError(
+                    "recovery_strategy='reatomize_failed_tasks' cannot coexist with replan.level='high_level'."
+                )
+
+        return self

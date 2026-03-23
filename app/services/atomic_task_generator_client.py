@@ -8,72 +8,119 @@ from app.services.llm.schema_utils import to_openai_strict_json_schema
 ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT = """
 You are a senior atomic task generation agent.
 
-Your job is to convert one refined project task into a set of atomic tasks.
+Your job is to convert one project task into a set of atomic tasks that the CURRENT SYSTEM can actually execute.
 Return ONLY JSON matching the provided schema.
 
-Core mission:
-- Transform one refined task into atomic tasks.
-- Atomic tasks must be the smallest useful execution units for the current system.
-- Each atomic task must be narrow, deterministic, directly executable, and assigned to exactly one executor.
+Primary principle:
+- Atomicity is not decided only by semantic neatness.
+- Atomicity must be decided by REAL executor capability.
+- A task is atomic only if exactly one currently available executor can complete it end to end with the capabilities it actually has.
 
-Primary rule:
-- Judge atomicity by one primary deliverable and one clear validation boundary.
-- Do NOT split tasks just because the title contains "and".
-- Do NOT split coherent requirements/specification/design/analysis/document tasks just because they mention several closely related aspects of the same deliverable.
-- Do NOT over-fragment.
+Current system reality:
+- The active executor is code_executor.
+- Do not reason about hypothetical future executors.
+- Do not optimize for a future multi-executor platform.
+- Optimize for the executor list that is explicitly provided in the prompt.
 
-Granularity rules:
-- Prefer coherent deliverable blocks.
-- Avoid overlap between atomic tasks.
-- Avoid duplicate scopes phrased differently.
-- A single atomic task is valid if it has one clear deliverable and one validation boundary.
-- Keep the number of atomic tasks compact.
+What code_executor CAN do:
+- read repository context already available inside the project workspace
+- inspect existing code files in the repository
+- decide which files are relevant
+- plan file edits
+- create or modify project files
+- update tests or test-related files
+- produce repository-based deliverables that can be validated from file changes and workspace evidence
+- write documentation files only when the documentation itself is a concrete repository deliverable
+
+What code_executor CANNOT be expected to do as the core of an atomic task:
+- perform manual human investigation
+- gather external real-world information
+- validate behavior through human observation outside its execution contract
+- perform business/product decisions that require stakeholder judgment
+- do open-ended research as the main deliverable
+- execute tasks whose main output is “analyze”, “investigate”, “assess”, or “validate manually” without a concrete repository artifact
+- execute tasks whose only meaningful result would come from running manual checks outside the repo
+- produce a task that depends primarily on unavailable tools, humans, or future executors
+
+Hard executor-oriented rule:
+- If the parent task mixes executable code work with non-executable research/manual work, do NOT keep them mixed in one atomic task.
+- Extract only the repository-executable slice.
+- Reformulate the task around a concrete repo/file deliverable whenever possible.
+
+Atomicity rules:
+- Each atomic task must have one primary deliverable.
+- Each atomic task must have one clear validation boundary.
+- Each atomic task must be directly executable by exactly one available executor.
+- Prefer compact, coherent tasks, but never at the cost of executor mismatch.
+- Avoid overlap, duplication, and artificial fragmentation.
 
 When to split:
-- Split only when there are clearly separate deliverables or clearly separate phases.
-- Typical split cases:
-  - analysis/recommendation + implementation
-  - documentation/specification + implementation
-  - implementation + deployment/infrastructure
-  - several independent feature slices implemented together
-  - substantial drafting + substantial final compilation of many sections
+- split when there are clearly separate deliverables
+- split when there are clearly separate validation boundaries
+- split when implementation and documentation are both substantial and separable
+- split when two feature slices can be completed independently
+- split when one part is executable by code_executor and another part is not
 
 When NOT to split:
-- one comparison/recommendation
-- one requirements/specification section
-- one contract block
-- one design decision plus its minimal structural definition
-- one coherent functional scope definition
-- one coherent data model + request/response specification for the same small feature
-- one coherent document section even if it mentions GET and POST for the same small API
-- one implementation slice that still has one clear validation boundary
+- one coherent implementation slice with one repository-level deliverable
+- one coherent repository document deliverable
+- one coherent API/code contract change with a single validation boundary
+- one small implementation plus its directly related tests if they belong to the same deliverable
 
-Executor rules:
-- Assign exactly one executor_type to each atomic task.
-- Use only executors from the provided list.
-- Never invent new executors.
+Forbidden task patterns for code_executor:
+- “investigate the real runtime behavior and document findings”
+- “run the system manually to understand how it works” as the main task
+- “collect and validate real operational information” as the main task
+- “analyze options and recommend approach” without producing a concrete repo artifact
+- “manually verify” as the central acceptance path
 
-Hard requirements:
-- proposed_solution must explain the immediate approach.
-- implementation_steps must be a list of short concrete steps.
-- tests_required must define how the atomic task should be verified.
-- acceptance_criteria must be a single string.
-- Do not include ids, dependencies, estimates, or extra metadata not present in the schema.
+Required output quality:
+- proposed_solution must explain the immediate executor-compatible approach
+- implementation_steps must be concrete and repository-oriented
+- tests_required must describe checks aligned with the deliverable
+- acceptance_criteria must be a single string
+- use only executor_type values from the provided executor list
+- never invent new executors
+- do not include ids, dependencies, estimates, or metadata outside the schema
 
-Critical instruction:
-- The downstream system has executor, validator, recovery, and re-atomization layers.
-- Do not be artificially conservative.
-- Prefer allowing a coherent atomic task to proceed rather than over-splitting it.
-- Only split when the semantic boundary is clearly real.
-
-Self-check before finalizing:
-- each task has one primary deliverable
-- each task has one validation boundary
-- there is minimal overlap between tasks
-- tasks are not over-fragmented
-- coherent non-implementation tasks may include several closely related sub-aspects inside one atomic deliverable
-- do not split only because of grammatical conjunctions
+Self-check before finalizing each atomic task:
+- Can the assigned executor really complete this task with its actual capabilities?
+- Is the main deliverable a concrete repository or file outcome?
+- Would post-execution validation be able to inspect repo/workspace evidence?
+- Is this task free from hidden manual/external work?
+- Is splitting truly necessary, or am I over-fragmenting?
 """.strip()
+
+
+def _build_executor_capabilities_text(available_executors: list[str]) -> str:
+    sections: list[str] = []
+
+    for executor in available_executors:
+        if executor == "code_executor":
+            sections.append(
+                "\n".join(
+                    [
+                        "- code_executor",
+                        "  - can inspect repository files and existing code structure",
+                        "  - can plan and apply file edits inside the project workspace",
+                        "  - can create/modify source code, tests, configs, and repository documentation files",
+                        "  - should receive tasks with concrete repo/file deliverables",
+                        "  - should NOT receive tasks whose core deliverable is manual investigation, external research, or human-only validation",
+                    ]
+                )
+            )
+        else:
+            sections.append(
+                "\n".join(
+                    [
+                        f"- {executor}",
+                        "  - no explicit capability profile was provided",
+                        "  - use it only if the prompt explicitly includes it in the available executor list",
+                    ]
+                )
+            )
+
+    return "\n".join(sections)
 
 
 def build_atomic_user_prompt(
@@ -94,12 +141,13 @@ def build_atomic_user_prompt(
     available_executors: list[str],
 ) -> str:
     executors_text = "\n".join(f"- {executor}" for executor in available_executors)
+    capability_text = _build_executor_capabilities_text(available_executors)
 
     return f"""
 Project name: {project_name}
 Project description: {project_description}
 
-Parent refined task:
+Parent task to atomize:
 - title: {refined_task_title}
 - description: {refined_task_description}
 - summary: {refined_task_summary}
@@ -115,25 +163,42 @@ Parent refined task:
 Available executors:
 {executors_text}
 
-Important:
+Executor capability profiles:
+{capability_text}
+
+Mandatory instructions:
 - Generate atomic tasks only.
-- Each atomic task must be directly executable by exactly one available executor.
+- Each atomic task must be executable by exactly one available executor.
 - Choose executor_type only from the available executor list.
-- Do not invent new executors.
-- Use one primary deliverable and one validation boundary as the atomicity criterion.
-- Do not split only because the task title has multiple verbs or conjunctions.
-- Do not split coherent non-implementation tasks because they include several closely related aspects of the same deliverable.
+- Never invent executors.
+- Judge atomicity using BOTH:
+  1) one primary deliverable and one validation boundary
+  2) real executor capability compatibility
+- Prefer the smallest number of tasks that remain truly executable.
 - Avoid overlap.
-- Keep the number of tasks compact.
-- Prefer letting a coherent atomic task proceed instead of over-splitting it.
 
-Split only when:
-- there are clearly separate deliverables
-- there are clearly separate phases
-- there is substantial implementation mixed with documentation/analysis/deployment
-- there are clearly independent features being implemented together
+For code_executor specifically:
+- Prefer tasks that end in a concrete repository deliverable.
+- Good deliverables include source files, test files, config files, or repository documentation files.
+- Bad deliverables include open-ended investigation, manual verification, and external information gathering.
+- Do not assign code_executor a task whose core output depends on observing runtime behavior manually.
+- Do not assign code_executor a task whose core output is “analyze and document findings” unless the analysis is directly tied to a concrete repository artifact that can be produced from repo context.
 
-If one coherent atomic task is enough, output one.
+Split when:
+- there are clearly separate repository deliverables
+- there are clearly separate validation boundaries
+- executable code work is mixed with manual/research work
+- two feature slices can be implemented independently
+
+Do NOT split when:
+- one coherent repository deliverable is enough
+- implementation and directly related tests are part of one validation boundary
+- the work is already a compact executor-compatible slice
+
+Important:
+- Rewrite the task around what the executor can actually finish.
+- If a portion of the parent task is not executable by the available executors, do not make that non-executable portion the core of an atomic task.
+- Output one task if one task is enough.
 """.strip()
 
 
@@ -145,15 +210,21 @@ def build_atomic_retry_prompt(
     available_executors: list[str],
 ) -> str:
     executors_text = ", ".join(available_executors)
+    capability_text = _build_executor_capabilities_text(available_executors)
 
     return f"""
 Project name: {project_name}
-Parent refined task title: {refined_task_title}
+Parent task title: {refined_task_title}
 
 Your previous output was invalid.
 
 Validation error:
 {validation_error}
+
+Available executors: {executors_text}
+
+Executor capability profiles:
+{capability_text}
 
 You must correct the output and return valid JSON matching the schema.
 
@@ -161,12 +232,14 @@ Important corrections:
 - output only atomic tasks
 - each atomic task must have exactly one executor_type
 - executor_type must be one of: {executors_text}
-- judge atomicity by one primary deliverable and one validation boundary
-- do not split only because of conjunctions
-- do not over-fragment coherent work
+- each atomic task must have one primary deliverable and one validation boundary
+- each atomic task must be compatible with the REAL capabilities of the assigned executor
+- do not invent future executors or hypothetical capabilities
+- for code_executor, require a concrete repository/file deliverable
+- do not make manual investigation, external research, or manual validation the core of a code_executor task
 - avoid overlap
-- split only when there are clearly separate deliverables or clearly separate phases
-- prefer coherent atomic tasks over artificially tiny fragments
+- do not over-fragment
+- split only when there are clearly separate deliverables, clearly separate validation boundaries, or executable and non-executable work are mixed
 """.strip()
 
 

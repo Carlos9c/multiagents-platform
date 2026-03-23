@@ -1,4 +1,5 @@
 import json
+from typing import Iterable
 
 from sqlalchemy.orm import Session
 
@@ -9,17 +10,17 @@ from app.models.task import (
     TASK_STATUS_PENDING,
     Task,
 )
-from app.schemas.evaluation import RecoveryContext
-from app.services.artifacts import create_artifact
-from app.services.recovery_client import (
-    RECOVERY_ACTION_INSERT_FOLLOWUP,
-    RECOVERY_ACTION_MANUAL_REVIEW,
-    RECOVERY_ACTION_REATOMIZE,
-    RECOVERY_ACTION_RETRY,
-    RecoveryClientError,
+from app.schemas.recovery import (
+    RecoveryContext,
+    RecoveryCreatedTaskRecord,
     RecoveryDecision,
-    evaluate_recovery_decision,
+    RecoveryDecisionSummary,
+    RecoveryOpenIssue,
 )
+from app.services.artifacts import create_artifact
+
+
+RECOVERY_DECISION_ARTIFACT_TYPE = "recovery_decision"
 
 
 class RecoveryServiceError(Exception):
@@ -44,143 +45,296 @@ def _get_task_or_raise(db: Session, task_id: int) -> Task:
     return task
 
 
-def generate_recovery_decision(
+def _get_source_entities_or_raise(
     db: Session,
-    run_id: int,
-    next_batch_summary: str | None = None,
-    remaining_plan_summary: str | None = None,
-    execution_context_summary: str | None = None,
-    validation_context_summary: str | None = None,
-) -> RecoveryDecision:
-    run = _get_run_or_raise(db, run_id)
-    task = _get_task_or_raise(db, run.task_id)
+    *,
+    decision: RecoveryDecision,
+) -> tuple[ExecutionRun, Task]:
+    run = _get_run_or_raise(db, decision.source_run_id)
+    task = _get_task_or_raise(db, decision.source_task_id)
 
-    if not execution_context_summary:
+    if run.task_id != task.id:
         raise RecoveryServiceError(
-            f"Recovery decision for run {run_id} requires execution_context_summary."
+            f"Recovery decision is inconsistent: run {run.id} belongs to task {run.task_id}, "
+            f"but decision.source_task_id={task.id}."
         )
 
-    if not validation_context_summary:
-        raise RecoveryServiceError(
-            f"Recovery decision for run {run_id} requires validation_context_summary."
-        )
+    return run, task
 
-    try:
-        return evaluate_recovery_decision(
-            task=task,
-            run=run,
-            next_batch_summary=next_batch_summary,
-            remaining_plan_summary=remaining_plan_summary,
-            execution_context_summary=execution_context_summary,
-            validation_context_summary=validation_context_summary,
-        )
-    except RecoveryClientError as exc:
-        raise RecoveryServiceError(
-            f"Recovery model failed for run {run_id}: {str(exc)}"
-        ) from exc
+
+def _infer_parent_task_id_for_created_tasks(source_task: Task) -> int:
+    """
+    Recovery-created tasks should remain attached to the same functional parent when possible.
+
+    Policy:
+    - if the source task already has a parent, attach recovery tasks to that parent
+    - otherwise attach them to the source task itself
+
+    This keeps recovery work grouped with the same decomposition lineage without
+    requiring refined-level semantics.
+    """
+    return source_task.parent_task_id or source_task.id
+
+
+def _build_created_task_from_recovery(
+    *,
+    project_id: int,
+    parent_task_id: int,
+    source_task: Task,
+    task_create,
+    sequence_order: int,
+) -> Task:
+    return Task(
+        project_id=project_id,
+        parent_task_id=parent_task_id,
+        title=task_create.title,
+        description=task_create.description,
+        summary=task_create.description,
+        objective=task_create.objective or task_create.description,
+        proposed_solution=task_create.implementation_notes,
+        implementation_notes=task_create.implementation_notes,
+        implementation_steps=None,
+        acceptance_criteria=task_create.acceptance_criteria,
+        tests_required=None,
+        technical_constraints=task_create.technical_constraints,
+        out_of_scope=task_create.out_of_scope,
+        priority=task_create.priority,
+        task_type=task_create.task_type,
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        executor_type=task_create.executor_type,
+        sequence_order=sequence_order,
+        status=TASK_STATUS_PENDING,
+        is_blocked=False,
+        blocking_reason=None,
+    )
 
 
 def persist_recovery_decision(
     db: Session,
+    *,
     project_id: int,
     decision: RecoveryDecision,
-    created_by: str = "recovery_service",
+    created_by: str = "recovery_agent",
 ) -> Artifact:
-    return create_artifact(
+    _get_source_entities_or_raise(db, decision=decision)
+
+    artifact = create_artifact(
         db=db,
         project_id=project_id,
-        task_id=None,
-        artifact_type="recovery_decision",
+        task_id=decision.source_task_id,
+        artifact_type=RECOVERY_DECISION_ARTIFACT_TYPE,
         content=_serialize_recovery_decision(decision),
         created_by=created_by,
     )
+    return artifact
+
+
+def generate_recovery_decision(
+    db: Session,
+    *,
+    run_id: int,
+    execution_context_summary: str,
+    validation_context_summary: str,
+    next_batch_summary: str | None = None,
+    remaining_plan_summary: str | None = None,
+):
+    """
+    Delegates recovery reasoning to the recovery client and returns a validated RecoveryDecision.
+
+    Import is intentionally local to avoid import cycles during schema/service migration.
+    """
+    run = _get_run_or_raise(db, run_id)
+    source_task = _get_task_or_raise(db, run.task_id)
+
+    from app.services.recovery_client import call_recovery_model
+
+    decision = call_recovery_model(
+        execution_context_summary=execution_context_summary,
+        validation_context_summary=validation_context_summary,
+        next_batch_summary=next_batch_summary,
+        remaining_plan_summary=remaining_plan_summary,
+    )
+
+    if decision.source_run_id != run.id:
+        raise RecoveryServiceError(
+            f"Recovery decision source_run_id mismatch: expected {run.id}, got {decision.source_run_id}."
+        )
+
+    if decision.source_task_id != source_task.id:
+        raise RecoveryServiceError(
+            f"Recovery decision source_task_id mismatch: expected {source_task.id}, got {decision.source_task_id}."
+        )
+
+    return decision
 
 
 def materialize_recovery_decision(
     db: Session,
+    *,
     project_id: int,
     decision: RecoveryDecision,
-    parent_task_id: int | None = None,
 ) -> list[Task]:
+    """
+    Materializes recovery-created atomic tasks when the decision requires it.
+
+    Action behavior:
+    - retry: no new tasks created
+    - reatomize: create replacement-style atomic tasks under the same functional parent
+    - insert_followup: create additive atomic tasks under the same functional parent
+    - manual_review: no new tasks created
+
+    Important:
+    This function does not mutate the source task status directly. It only materializes
+    the next work implied by recovery.
+    """
+    _, source_task = _get_source_entities_or_raise(db, decision=decision)
+
+    if source_task.project_id != project_id:
+        raise RecoveryServiceError(
+            f"Source task {source_task.id} does not belong to project {project_id}."
+        )
+
+    if decision.action in {"retry", "manual_review"}:
+        if decision.created_tasks:
+            raise RecoveryServiceError(
+                f"Recovery action '{decision.action}' must not contain created tasks."
+            )
+        return []
+
+    if decision.action not in {"reatomize", "insert_followup"}:
+        raise RecoveryServiceError(f"Unsupported recovery action '{decision.action}'.")
+
+    if not decision.created_tasks:
+        raise RecoveryServiceError(
+            f"Recovery action '{decision.action}' requires created_tasks."
+        )
+
+    parent_task_id = _infer_parent_task_id_for_created_tasks(source_task)
+
+    # Place recovery tasks after existing children of the same parent lineage.
+    last_sequence_order = (
+        db.query(Task.sequence_order)
+        .filter(
+            Task.project_id == project_id,
+            Task.parent_task_id == parent_task_id,
+            Task.planning_level == PLANNING_LEVEL_ATOMIC,
+        )
+        .order_by(Task.sequence_order.desc(), Task.id.desc())
+        .first()
+    )
+    start_sequence = (last_sequence_order[0] if last_sequence_order and last_sequence_order[0] else 0) + 1
+
     created_tasks: list[Task] = []
 
-    if decision.action == RECOVERY_ACTION_RETRY:
-        return created_tasks
+    for index, task_create in enumerate(decision.created_tasks, start=0):
+        task = _build_created_task_from_recovery(
+            project_id=project_id,
+            parent_task_id=parent_task_id,
+            source_task=source_task,
+            task_create=task_create,
+            sequence_order=start_sequence + index,
+        )
+        db.add(task)
+        created_tasks.append(task)
 
-    if decision.action == RECOVERY_ACTION_MANUAL_REVIEW:
-        return created_tasks
+    db.flush()
+    db.commit()
 
-    if decision.action in {RECOVERY_ACTION_REATOMIZE, RECOVERY_ACTION_INSERT_FOLLOWUP}:
-        for item in decision.created_tasks:
-            task = Task(
-                project_id=project_id,
-                parent_task_id=parent_task_id,
-                title=item.title,
-                description=item.description,
-                objective=item.objective,
-                implementation_notes=item.implementation_notes,
-                acceptance_criteria=item.acceptance_criteria,
-                technical_constraints=item.technical_constraints,
-                out_of_scope=item.out_of_scope,
-                priority=item.priority,
-                task_type=item.task_type,
-                planning_level=PLANNING_LEVEL_ATOMIC,
-                executor_type=item.executor_type,
-                status=TASK_STATUS_PENDING,
-            )
-            db.add(task)
-            created_tasks.append(task)
-
-        db.commit()
-
-        for task in created_tasks:
-            db.refresh(task)
-
-        return created_tasks
-
-    raise RecoveryServiceError(
-        f"Recovery decision action '{decision.action}' is not materializable."
-    )
+    return created_tasks
 
 
 def build_recovery_context_entry(
+    *,
     decision: RecoveryDecision,
     created_tasks: list[Task],
 ) -> RecoveryContext:
-    created_task_ids = [task.id for task in created_tasks]
+    created_task_records = [
+        RecoveryCreatedTaskRecord(
+            source_task_id=decision.source_task_id,
+            source_run_id=decision.source_run_id,
+            created_task_id=task.id,
+            title=task.title,
+            planning_level=task.planning_level,
+            executor_type=task.executor_type,
+        )
+        for task in created_tasks
+    ]
+
+    decision_summary = RecoveryDecisionSummary(
+        source_task_id=decision.source_task_id,
+        source_run_id=decision.source_run_id,
+        action=decision.action,
+        confidence=decision.confidence,
+        reason=decision.reason,
+        still_blocks_progress=decision.still_blocks_progress,
+        created_task_ids=[task.id for task in created_tasks],
+    )
+
+    open_issues: list[RecoveryOpenIssue] = []
+
+    if decision.requires_manual_review:
+        open_issues.append(
+            RecoveryOpenIssue(
+                source_task_id=decision.source_task_id,
+                source_run_id=decision.source_run_id,
+                issue_type="manual_review_required",
+                summary=decision.covered_gap_summary,
+                recommended_action=decision.reason,
+            )
+        )
+    elif decision.still_blocks_progress:
+        open_issues.append(
+            RecoveryOpenIssue(
+                source_task_id=decision.source_task_id,
+                source_run_id=decision.source_run_id,
+                issue_type=f"recovery_{decision.action}",
+                summary=decision.covered_gap_summary,
+                recommended_action=decision.execution_guidance or decision.reason,
+            )
+        )
 
     return RecoveryContext(
-        recovery_summary=decision.reason,
-        decisions_taken=[
-            f"action={decision.action}",
-            f"retry_same_task={decision.retry_same_task}",
-            f"requires_manual_review={decision.requires_manual_review}",
-        ],
-        inserted_tasks=created_task_ids,
-        unresolved_failures=[],
+        recovery_decisions=[decision_summary],
+        open_issues=open_issues,
+        recovery_created_tasks=created_task_records,
     )
 
 
-def merge_recovery_contexts(contexts: list[RecoveryContext]) -> RecoveryContext | None:
+def merge_recovery_contexts(
+    contexts: Iterable[RecoveryContext] | None,
+) -> RecoveryContext:
     if not contexts:
-        return None
+        return RecoveryContext()
 
-    recovery_summaries: list[str] = []
-    decisions_taken: list[str] = []
-    inserted_tasks: list[int] = []
-    unresolved_failures: list[str] = []
+    merged_decisions: list[RecoveryDecisionSummary] = []
+    merged_open_issues: list[RecoveryOpenIssue] = []
+    merged_created_tasks: list[RecoveryCreatedTaskRecord] = []
+
+    seen_decisions: set[tuple[int, int, str]] = set()
+    seen_issues: set[tuple[int, int, str, str]] = set()
+    seen_created_tasks: set[tuple[int, int, int]] = set()
 
     for context in contexts:
-        if context.recovery_summary:
-            recovery_summaries.append(context.recovery_summary)
+        for decision in context.recovery_decisions:
+            key = (decision.source_task_id, decision.source_run_id, decision.action)
+            if key not in seen_decisions:
+                seen_decisions.add(key)
+                merged_decisions.append(decision)
 
-        decisions_taken.extend(context.decisions_taken)
-        inserted_tasks.extend(context.inserted_tasks)
-        unresolved_failures.extend(context.unresolved_failures)
+        for issue in context.open_issues:
+            key = (issue.source_task_id, issue.source_run_id, issue.issue_type, issue.summary)
+            if key not in seen_issues:
+                seen_issues.add(key)
+                merged_open_issues.append(issue)
+
+        for created in context.recovery_created_tasks:
+            key = (created.source_task_id, created.source_run_id, created.created_task_id)
+            if key not in seen_created_tasks:
+                seen_created_tasks.add(key)
+                merged_created_tasks.append(created)
 
     return RecoveryContext(
-        recovery_summary=" | ".join(recovery_summaries) if recovery_summaries else None,
-        decisions_taken=decisions_taken,
-        inserted_tasks=inserted_tasks,
-        unresolved_failures=unresolved_failures,
+        recovery_decisions=merged_decisions,
+        open_issues=merged_open_issues,
+        recovery_created_tasks=merged_created_tasks,
     )

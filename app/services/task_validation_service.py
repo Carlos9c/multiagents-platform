@@ -45,6 +45,21 @@ from app.services.workspace_runtime import WorkspaceRuntimeError
 
 CODE_VALIDATION_RESULT_ARTIFACT_TYPE = "code_validation_result"
 
+NORMAL_VALIDATION_ALLOWED_EXECUTION_STATUSES = {
+    CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
+}
+
+TERMINAL_PREVALIDATION_EXECUTION_STATUSES = {
+    CODE_EXECUTION_STATUS_FAILED,
+    CODE_EXECUTION_STATUS_REJECTED,
+}
+
+SUPPORTED_VALIDATION_DECISIONS = {
+    CODE_VALIDATION_DECISION_COMPLETED,
+    CODE_VALIDATION_DECISION_PARTIAL,
+    CODE_VALIDATION_DECISION_FAILED,
+}
+
 
 class CodeValidatorError(Exception):
     """Base error for code validation."""
@@ -63,13 +78,6 @@ class TaskValidationServiceResult:
 
 
 class BaseCodeValidator(ABC):
-    """
-    Domain validator for code tasks.
-
-    It decides the final terminal validation outcome for the produced code result,
-    but does not persist task-state transitions itself.
-    """
-
     @abstractmethod
     def validate(
         self,
@@ -81,16 +89,6 @@ class BaseCodeValidator(ABC):
 
 
 class LocalCodeValidator(BaseCodeValidator):
-    """
-    Runtime-backed validator focused on fulfillment of the task request.
-
-    It gathers real workspace evidence, includes resolved execution context and
-    project operational memory, then asks a strict fulfillment validator to decide:
-      - completed
-      - partial
-      - failed
-    """
-
     def __init__(
         self,
         db: Session,
@@ -199,6 +197,8 @@ class LocalCodeValidator(BaseCodeValidator):
         decision: str,
         decision_reason: str,
         warning: str,
+        *,
+        terminal_mode: str,
     ) -> CodeValidationResult:
         evidence = CodeValidationEvidence(
             checked_files=[],
@@ -235,7 +235,10 @@ class LocalCodeValidator(BaseCodeValidator):
                 "resolved execution context",
             ],
             validation_notes=[
-                f"Validation short-circuited because executor status was '{executor_result.execution_status}'.",
+                (
+                    "Validation short-circuited because executor status was "
+                    f"'{executor_result.execution_status}' in terminal_mode='{terminal_mode}'."
+                ),
                 decision_reason,
             ],
             evidence=evidence,
@@ -373,29 +376,13 @@ class LocalCodeValidator(BaseCodeValidator):
                 f"Task {task.id} is not awaiting validation. Current status='{task.status}'."
             )
 
-        if executor_result.execution_status == CODE_EXECUTION_STATUS_REJECTED:
-            return self._build_short_circuit_result(
-                task=task,
-                executor_result=executor_result,
-                decision=CODE_VALIDATION_DECISION_FAILED,
-                decision_reason=(
-                    "The executor rejected the task before producing a result that could satisfy the requested resolution."
-                ),
-                warning="Executor rejected the task before a valid operational execution pass.",
+        if executor_result.execution_status in TERMINAL_PREVALIDATION_EXECUTION_STATUSES:
+            raise CodeValidatorError(
+                "Terminal executor statuses must use validate_terminal_result(), "
+                f"received '{executor_result.execution_status}'."
             )
 
-        if executor_result.execution_status == CODE_EXECUTION_STATUS_FAILED:
-            return self._build_short_circuit_result(
-                task=task,
-                executor_result=executor_result,
-                decision=CODE_VALIDATION_DECISION_FAILED,
-                decision_reason=(
-                    "The executor failed before producing a result that could satisfy the task."
-                ),
-                warning="Executor failed before a valid operational execution pass.",
-            )
-
-        if executor_result.execution_status != CODE_EXECUTION_STATUS_AWAITING_VALIDATION:
+        if executor_result.execution_status not in NORMAL_VALIDATION_ALLOWED_EXECUTION_STATUSES:
             raise CodeValidatorError(
                 f"Unsupported executor status '{executor_result.execution_status}' "
                 "received by code validator."
@@ -491,11 +478,7 @@ class LocalCodeValidator(BaseCodeValidator):
             )
             return validation_result
 
-        if fulfillment_decision.decision not in {
-            CODE_VALIDATION_DECISION_COMPLETED,
-            CODE_VALIDATION_DECISION_PARTIAL,
-            CODE_VALIDATION_DECISION_FAILED,
-        }:
+        if fulfillment_decision.decision not in SUPPORTED_VALIDATION_DECISIONS:
             raise CodeValidatorError(
                 f"Unsupported validation decision '{fulfillment_decision.decision}'."
             )
@@ -532,9 +515,47 @@ class LocalCodeValidator(BaseCodeValidator):
 
         return validation_result
 
+    def validate_terminal_result(
+        self,
+        task: Task,
+        execution_run_id: int,
+        executor_result: CodeExecutorResult,
+    ) -> CodeValidationResult:
+        del execution_run_id
 
-def _apply_validation_decision_to_task(
+        if executor_result.execution_status == CODE_EXECUTION_STATUS_REJECTED:
+            return self._build_short_circuit_result(
+                task=task,
+                executor_result=executor_result,
+                decision=CODE_VALIDATION_DECISION_FAILED,
+                decision_reason=(
+                    "The executor rejected the task before producing a result that could satisfy the requested resolution."
+                ),
+                warning="Executor rejected the task before a valid operational execution pass.",
+                terminal_mode="rejected_pre_validation",
+            )
+
+        if executor_result.execution_status == CODE_EXECUTION_STATUS_FAILED:
+            return self._build_short_circuit_result(
+                task=task,
+                executor_result=executor_result,
+                decision=CODE_VALIDATION_DECISION_FAILED,
+                decision_reason=(
+                    "The executor failed before producing a result that could satisfy the task."
+                ),
+                warning="Executor failed before a valid operational execution pass.",
+                terminal_mode="failed_pre_validation",
+            )
+
+        raise CodeValidatorError(
+            "validate_terminal_result() only accepts pre-validation terminal executor states. "
+            f"Received '{executor_result.execution_status}'."
+        )
+
+
+def apply_validation_decision_to_task(
     db: Session,
+    *,
     task_id: int,
     decision: str,
 ) -> str:
@@ -560,22 +581,33 @@ def _apply_validation_decision_to_task(
     return final_status
 
 
+def _get_task_or_raise(db: Session, task_id: int) -> Task:
+    task = db.get(Task, task_id)
+    if not task:
+        raise TaskValidationServiceError(f"Task {task_id} not found")
+    return task
+
+
 def validate_code_task(
     db: Session,
     *,
     task_id: int,
     execution_run_id: int,
     executor_result: CodeExecutorResult,
+    apply_final_status: bool = True,
 ) -> TaskValidationServiceResult:
-    task = db.get(Task, task_id)
-    if not task:
-        raise TaskValidationServiceError(f"Task {task_id} not found")
+    task = _get_task_or_raise(db, task_id)
+
+    if executor_result.execution_status not in NORMAL_VALIDATION_ALLOWED_EXECUTION_STATUSES:
+        raise TaskValidationServiceError(
+            "validate_code_task() only supports normal post-execution validation for "
+            f"statuses {sorted(NORMAL_VALIDATION_ALLOWED_EXECUTION_STATUSES)}. "
+            f"Received '{executor_result.execution_status}'."
+        )
 
     if task.status != TASK_STATUS_AWAITING_VALIDATION:
         mark_task_awaiting_validation(db, task_id)
-        task = db.get(Task, task_id)
-        if not task:
-            raise TaskValidationServiceError(f"Task {task_id} not found after status update")
+        task = _get_task_or_raise(db, task_id)
 
     validator = LocalCodeValidator(db=db)
 
@@ -590,11 +622,79 @@ def validate_code_task(
             f"Validation failed for task {task_id}: {str(exc)}"
         ) from exc
 
-    final_task_status = _apply_validation_decision_to_task(
-        db=db,
+    if apply_final_status:
+        final_task_status = apply_validation_decision_to_task(
+            db=db,
+            task_id=task_id,
+            decision=validation_result.decision,
+        )
+    else:
+        if validation_result.decision == CODE_VALIDATION_DECISION_COMPLETED:
+            final_task_status = TASK_STATUS_COMPLETED
+        elif validation_result.decision == CODE_VALIDATION_DECISION_PARTIAL:
+            final_task_status = TASK_STATUS_PARTIAL
+        elif validation_result.decision == CODE_VALIDATION_DECISION_FAILED:
+            final_task_status = TASK_STATUS_FAILED
+        else:
+            raise TaskValidationServiceError(
+                f"Unsupported validation decision '{validation_result.decision}'."
+            )
+
+    return TaskValidationServiceResult(
         task_id=task_id,
-        decision=validation_result.decision,
+        execution_run_id=execution_run_id,
+        validation_result=validation_result,
+        final_task_status=final_task_status,
     )
+
+
+def validate_terminal_code_task(
+    db: Session,
+    *,
+    task_id: int,
+    execution_run_id: int,
+    executor_result: CodeExecutorResult,
+    apply_final_status: bool = True,
+) -> TaskValidationServiceResult:
+    task = _get_task_or_raise(db, task_id)
+
+    if executor_result.execution_status not in TERMINAL_PREVALIDATION_EXECUTION_STATUSES:
+        raise TaskValidationServiceError(
+            "validate_terminal_code_task() only supports terminal pre-validation statuses "
+            f"{sorted(TERMINAL_PREVALIDATION_EXECUTION_STATUSES)}. "
+            f"Received '{executor_result.execution_status}'."
+        )
+
+    validator = LocalCodeValidator(db=db)
+
+    try:
+        validation_result = validator.validate_terminal_result(
+            task=task,
+            execution_run_id=execution_run_id,
+            executor_result=executor_result,
+        )
+    except CodeValidatorError as exc:
+        raise TaskValidationServiceError(
+            f"Terminal validation failed for task {task_id}: {str(exc)}"
+        ) from exc
+
+    if apply_final_status:
+        final_task_status = apply_validation_decision_to_task(
+            db=db,
+            task_id=task_id,
+            decision=validation_result.decision,
+        )
+    else:
+        if validation_result.decision == CODE_VALIDATION_DECISION_COMPLETED:
+            final_task_status = TASK_STATUS_COMPLETED
+        elif validation_result.decision == CODE_VALIDATION_DECISION_PARTIAL:
+            final_task_status = TASK_STATUS_PARTIAL
+        elif validation_result.decision == CODE_VALIDATION_DECISION_FAILED:
+            final_task_status = TASK_STATUS_FAILED
+        else:
+            raise TaskValidationServiceError(
+                f"Unsupported validation decision '{validation_result.decision}'."
+            )
 
     return TaskValidationServiceResult(
         task_id=task_id,

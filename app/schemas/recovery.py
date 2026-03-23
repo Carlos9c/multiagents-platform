@@ -1,136 +1,211 @@
+from __future__ import annotations
+
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 
 
-RecoveryDecisionType = Literal[
-    "retry_same_atomic",
-    "replace_atomic_task",
-    "re_atomize_from_parent",
-    "send_to_technical_refiner",
+RecoveryAction = Literal[
+    "retry",
+    "reatomize",
+    "insert_followup",
     "manual_review",
-    "mark_obsolete",
 ]
 
-RecoveryConfidence = Literal["low", "medium", "high"]
-ReplacementTaskStrategy = Literal[
-    "none",
-    "single_replacement",
-    "multiple_replacements",
+RecoveryConfidence = Literal[
+    "low",
+    "medium",
+    "high",
+]
+
+RecoveryExecutorType = Literal[
+    "code_executor",
+]
+
+RecoveryDecisionOrigin = Literal[
+    "executor_failure",
+    "validator_failure",
+    "post_batch_recovery",
+    "finalization_recovery",
 ]
 
 
-class RecoveryTaskContext(BaseModel):
-    task_id: int
-    title: str
-    description: str | None = None
-    summary: str | None = None
+class RecoveryTaskCreate(BaseModel):
+    title: str = Field(..., min_length=8)
+    description: str = Field(..., min_length=20)
     objective: str | None = None
-    task_type: str
-    priority: str
-    planning_level: str
-    executor_type: str
-    status: str
-    parent_task_id: int | None = None
-    parent_refined_title: str | None = None
-    parent_high_level_title: str | None = None
-    implementation_steps: str | None = None
+    implementation_notes: str | None = None
     acceptance_criteria: str | None = None
-    tests_required: str | None = None
     technical_constraints: str | None = None
     out_of_scope: str | None = None
+    task_type: str = Field(default="implementation", min_length=3)
+    priority: str = Field(default="medium", min_length=3)
+    executor_type: RecoveryExecutorType = "code_executor"
 
+    @model_validator(mode="after")
+    def normalize_fields(self) -> "RecoveryTaskCreate":
+        if self.objective is not None:
+            self.objective = self.objective.strip() or None
+        if self.implementation_notes is not None:
+            self.implementation_notes = self.implementation_notes.strip() or None
+        if self.acceptance_criteria is not None:
+            self.acceptance_criteria = self.acceptance_criteria.strip() or None
+        if self.technical_constraints is not None:
+            self.technical_constraints = self.technical_constraints.strip() or None
+        if self.out_of_scope is not None:
+            self.out_of_scope = self.out_of_scope.strip() or None
 
-class RecoveryExecutionRunContext(BaseModel):
-    run_id: int
-    attempt_number: int
-    status: str
-    input_snapshot: str | None = None
-    output_snapshot: str | None = None
-    error_message: str | None = None
-    failure_type: str | None = None
-    failure_code: str | None = None
-    recovery_action: str | None = None
-    work_summary: str | None = None
-    work_details: str | None = None
-    artifacts_created: str | None = None
-    completed_scope: str | None = None
-    remaining_scope: str | None = None
-    blockers_found: str | None = None
-    validation_notes: str | None = None
+        self.title = self.title.strip()
+        self.description = self.description.strip()
+        self.task_type = self.task_type.strip()
+        self.priority = self.priority.strip()
 
+        if not self.title:
+            raise ValueError("title cannot be empty.")
+        if not self.description:
+            raise ValueError("description cannot be empty.")
+        if not self.task_type:
+            raise ValueError("task_type cannot be empty.")
+        if not self.priority:
+            raise ValueError("priority cannot be empty.")
 
-class RecoveryArtifactSummary(BaseModel):
-    artifact_id: int
-    artifact_type: str
-    task_id: int | None = None
-    summary: str
-
-
-class RecoveryRecentRunSummary(BaseModel):
-    run_id: int
-    attempt_number: int
-    status: str
-    failure_type: str | None = None
-    failure_code: str | None = None
-    work_summary: str | None = None
-    completed_scope: str | None = None
-    remaining_scope: str | None = None
-    blockers_found: str | None = None
-
-
-class RecoveryProjectContext(BaseModel):
-    project_id: int
-    project_name: str
-    project_goal: str
-    current_execution_objective: str
-
-
-class RecoveryInput(BaseModel):
-    project_context: RecoveryProjectContext
-    task: RecoveryTaskContext
-    execution_run: RecoveryExecutionRunContext
-    recent_runs_for_task: list[RecoveryRecentRunSummary] = Field(default_factory=list)
-    relevant_artifacts: list[RecoveryArtifactSummary] = Field(default_factory=list)
-    next_batch_summary: str | None = None
-    remaining_plan_summary: str | None = None
-    coordination_rules_summary: str
-
-
-class RecoveryProposedTask(BaseModel):
-    title: str
-    description: str
-    objective: str | None = None
-    task_type: str = "implementation"
-    priority: str = "medium"
-    technical_constraints: str | None = None
-    out_of_scope: str | None = None
+        return self
 
 
 class RecoveryDecision(BaseModel):
-    source_task_id: int
-    source_run_id: int
-    decision_type: RecoveryDecisionType
-    confidence: RecoveryConfidence
-    reason: str
-    still_blocks_progress: bool
-    covered_gap_summary: str
-    replacement_task_strategy: ReplacementTaskStrategy = "none"
-    proposed_tasks: list[RecoveryProposedTask] = Field(default_factory=list)
-    should_mark_source_task_obsolete: bool = False
-    evaluation_guidance: str
-    execution_guidance: str
+    """
+    Single operational recovery contract.
 
-    @field_validator("proposed_tasks")
-    @classmethod
-    def validate_proposed_tasks_consistency(
-        cls,
-        value: list[RecoveryProposedTask],
-        info,
-    ) -> list[RecoveryProposedTask]:
-        strategy = info.data.get("replacement_task_strategy", "none")
-        if strategy == "none" and value:
-            raise ValueError("proposed_tasks must be empty when replacement_task_strategy='none'.")
-        if strategy != "none" and not value:
-            raise ValueError("proposed_tasks must not be empty when replacement_task_strategy is not 'none'.")
-        return value
+    This is the only recovery decision shape that should be used by:
+    - recovery_client
+    - recovery_service
+    - post_batch orchestration
+    - evaluation/recovery context bridging
+
+    Important:
+    - No refined-level recovery actions exist here.
+    - Recovery is expressed in terms of retry, reatomize, follow-up atomic work,
+      or manual review.
+    """
+
+    source_task_id: int = Field(..., gt=0)
+    source_run_id: int = Field(..., gt=0)
+
+    action: RecoveryAction
+    confidence: RecoveryConfidence
+
+    reason: str = Field(..., min_length=10)
+    covered_gap_summary: str = Field(..., min_length=10)
+
+    retry_same_task: bool = False
+    requires_manual_review: bool = False
+    still_blocks_progress: bool = True
+
+    created_tasks: list[RecoveryTaskCreate] = Field(default_factory=list)
+
+    evaluation_guidance: str | None = None
+    execution_guidance: str | None = None
+
+    decision_origin: RecoveryDecisionOrigin = "post_batch_recovery"
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "RecoveryDecision":
+        self.reason = self.reason.strip()
+        self.covered_gap_summary = self.covered_gap_summary.strip()
+
+        if not self.reason:
+            raise ValueError("reason cannot be empty.")
+        if not self.covered_gap_summary:
+            raise ValueError("covered_gap_summary cannot be empty.")
+
+        if self.evaluation_guidance is not None:
+            self.evaluation_guidance = self.evaluation_guidance.strip() or None
+        if self.execution_guidance is not None:
+            self.execution_guidance = self.execution_guidance.strip() or None
+
+        if self.action == "retry":
+            if self.created_tasks:
+                raise ValueError("created_tasks must be empty when action='retry'.")
+            if not self.retry_same_task:
+                raise ValueError("retry_same_task must be true when action='retry'.")
+            if self.requires_manual_review:
+                raise ValueError("action='retry' cannot require manual review.")
+
+        elif self.action == "reatomize":
+            if not self.created_tasks:
+                raise ValueError("created_tasks must not be empty when action='reatomize'.")
+            if self.retry_same_task:
+                raise ValueError("retry_same_task must be false when action='reatomize'.")
+            if self.requires_manual_review:
+                raise ValueError("action='reatomize' cannot require manual review.")
+
+        elif self.action == "insert_followup":
+            if not self.created_tasks:
+                raise ValueError("created_tasks must not be empty when action='insert_followup'.")
+            if self.retry_same_task:
+                raise ValueError("retry_same_task must be false when action='insert_followup'.")
+            if self.requires_manual_review:
+                raise ValueError("action='insert_followup' cannot require manual review.")
+
+        elif self.action == "manual_review":
+            if self.created_tasks:
+                raise ValueError("created_tasks must be empty when action='manual_review'.")
+            if self.retry_same_task:
+                raise ValueError("retry_same_task must be false when action='manual_review'.")
+            if not self.requires_manual_review:
+                raise ValueError("requires_manual_review must be true when action='manual_review'.")
+
+        return self
+
+
+class RecoveryCreatedTaskRecord(BaseModel):
+    source_task_id: int = Field(..., gt=0)
+    source_run_id: int = Field(..., gt=0)
+    created_task_id: int = Field(..., gt=0)
+    title: str = Field(..., min_length=3)
+    planning_level: str = Field(..., min_length=3)
+    executor_type: str = Field(..., min_length=3)
+
+
+class RecoveryDecisionSummary(BaseModel):
+    source_task_id: int = Field(..., gt=0)
+    source_run_id: int = Field(..., gt=0)
+    action: RecoveryAction
+    confidence: RecoveryConfidence
+    reason: str = Field(..., min_length=10)
+    still_blocks_progress: bool
+    created_task_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_summary(self) -> "RecoveryDecisionSummary":
+        self.reason = self.reason.strip()
+        if not self.reason:
+            raise ValueError("reason cannot be empty.")
+
+        if any(task_id <= 0 for task_id in self.created_task_ids):
+            raise ValueError("created_task_ids must contain only positive integers.")
+
+        return self
+
+
+class RecoveryOpenIssue(BaseModel):
+    source_task_id: int = Field(..., gt=0)
+    source_run_id: int = Field(..., gt=0)
+    issue_type: str = Field(..., min_length=3)
+    summary: str = Field(..., min_length=10)
+    recommended_action: str | None = None
+
+    @model_validator(mode="after")
+    def normalize_issue(self) -> "RecoveryOpenIssue":
+        self.issue_type = self.issue_type.strip()
+        self.summary = self.summary.strip()
+
+        if not self.issue_type:
+            raise ValueError("issue_type cannot be empty.")
+        if not self.summary:
+            raise ValueError("summary cannot be empty.")
+
+        if self.recommended_action is not None:
+            self.recommended_action = self.recommended_action.strip() or None
+
+        return self

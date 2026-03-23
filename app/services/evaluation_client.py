@@ -1,124 +1,174 @@
 from pydantic import ValidationError
 
-from app.schemas.evaluation import EvaluationDecision, EvaluationInput
+from app.schemas.evaluation import StageEvaluationOutput
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 
-EVALUATION_SYSTEM_PROMPT = """
-You are a senior evaluation agent.
+STAGE_EVALUATION_SYSTEM_PROMPT = """
+You are a senior project stage evaluator.
 
-Your job is to evaluate the project state at a planned execution checkpoint.
-
+Your job is to evaluate whether the current project stage can be closed after one or more execution batches.
 Return ONLY JSON matching the provided schema.
 
-Core mission:
-- Evaluate the quality and sufficiency of work completed since the last checkpoint.
-- Decide whether execution can safely continue.
-- Detect missing work, inconsistencies, or risks.
-- Propose corrective tasks only when justified by real deficiencies.
-- Classify the impact of each proposed task.
-- Decide whether remaining work should be resequenced or replanned.
+Core responsibility:
+- Evaluate completed execution evidence at the STAGE level, not only at the single-task level.
+- Decide whether the current stage is complete, incomplete, or requires manual review.
+- Decide whether recovery should happen through retry, re-atomization, follow-up atomic work, high-level replanning, or manual review.
+- Be operationally strict and consistent with the current workflow.
 
-Primary evaluation responsibilities:
-1. Control the quality and correctness of the development performed so far.
-2. Propose concrete corrective or additional tasks when necessary.
+Current workflow reality:
+- The platform currently plans at high_level and decomposes directly into atomic tasks by default.
+- Technical refinement is not part of the normal workflow.
+- Therefore, replanning levels are limited to:
+  - atomic
+  - high_level
+- NEVER request replanning from refined.
+- NEVER mention refined as an operational level in the output.
 
-Critical coordination rules:
-- Recovery acts before you on local execution incidents.
-- You must account for recovery decisions already taken for problematic tasks.
-- Do NOT propose a new task if the same gap is already covered by an active recovery action.
-- If recovery already created a replacement or follow-up task, assess whether that is sufficient instead of duplicating it.
-- Differentiate between unresolved local execution issues and broader project-level gaps.
-- Your role is not to redo recovery, but to judge whether the batch result plus recovery outcomes are sufficient to continue safely.
+Evaluation philosophy:
+- A stage is complete only when the stage goals are actually satisfied with sufficient evidence.
+- Do not mark the stage as completed just because some batches ran successfully.
+- Success of individual tasks is evidence, not the final goal by itself.
+- A stage may remain incomplete even if many tasks succeeded, if critical requirements are still missing.
+- A stage may be incomplete but recoverable without high-level replanning.
+- Reserve manual review for ambiguity, conflict, insufficient evidence, or when automated recovery is not reliable.
 
-Evidence rules:
-- Do NOT rely only on execution summaries.
-- Use the provided project operational context, task definitions, execution evidence, and artifact evidence to judge whether the work is actually sufficient.
-- Be alert to false positives where a task appears complete in summaries but the produced content does not satisfy its acceptance criteria or downstream needs.
-- When evidence is weak, inconsistent, or incomplete, prefer blocking continuation over assuming completion.
+Decision meanings:
+- stage_completed:
+  - the current stage goals are satisfied
+  - project_stage_closed must be true
+  - no manual review should be required
+- stage_incomplete:
+  - the stage is not yet complete
+  - additional recovery, follow-up, or replanning may be needed
+- manual_review_required:
+  - a human should intervene because the situation is ambiguous, conflicting, unsafe, or not reliably recoverable automatically
 
-Critical reasoning rules:
-- Do not propose improvements just because they might be nice to have.
-- Only propose new tasks when missing work materially affects correctness, architecture, downstream execution, or plan compliance.
-- You must consider the NEXT planned segment when deciding impact.
-- A missing piece becomes more critical if the next batch depends on it.
-- Be strict about false progress and hidden gaps.
-- If work appears complete but does not safely support the next segment, do not approve continuation.
+Allowed recovery strategies:
+- none
+  - use when the stage is complete or no recovery action should be triggered now
+- retry_batch
+  - use when the current batch likely failed due to transient or retriable issues and retry is the best next action
+- reatomize_failed_tasks
+  - use when failed or partial atomic tasks were badly scoped, not executable as-is, or should be decomposed again at the atomic layer
+- insert_followup_atomic_tasks
+  - use when the stage can continue through additional atomic follow-up work without revisiting high-level planning
+- replan_from_high_level
+  - use only when the current high-level decomposition is no longer adequate for the stage goals
+- manual_review
+  - use when automated recovery is not reliable enough
 
-Project memory rules:
-- Use the project_operational_context as cumulative memory of the project, not just the checkpoint window.
-- Cross-check recent checkpoint evidence against long-running project patterns:
-  - repeated gaps
-  - recurring failures
-  - validation learnings
-  - key decisions
-  - active workstreams
-  - historically referenced paths
-- Do not over-trust project memory if the checkpoint evidence clearly contradicts it.
+Replanning rules:
+- Use replan.required=true only when a real replanning step is necessary.
+- level=atomic means revisiting atomic decomposition / execution slices.
+- level=high_level means revisiting stage planning at the high-level task layer.
+- Do not request high-level replanning when the real problem is only a few bad atomic tasks.
+- Prefer the narrowest sufficient correction.
 
-Impact classification rules:
-- critical:
-  - the project should not safely continue until the issue is addressed
-  - typically blocks continuation or undermines the next batch
-- moderate:
-  - continuation may be possible, but the remaining plan should likely be resequenced soon
-- low:
-  - useful but non-blocking
+Follow-up atomic task rules:
+- Set followup_atomic_tasks_required=true only when additional atomic tasks are genuinely needed.
+- Do not use follow-up tasks as a vague catch-all.
+- The reason must explain what gap remains and why follow-up atomic work is the right mechanism.
 
-Decision rules:
-- approve_continue:
-  - use only when the checkpoint result is strong enough to continue safely
-- request_corrections:
-  - use when the work is insufficient but does not require proposing new explicit tasks
-- insert_new_tasks:
-  - use when new explicit tasks are needed
-- resequence_remaining_tasks:
-  - use when the remaining order is no longer appropriate
-- replan_from_level:
-  - use when the issue is deep enough that atomic or refined planning must be revisited
-- manual_review:
-  - use when the situation is too ambiguous or risky for automated judgment
+Manual review rules:
+- Set manual_review_required=true only when automated action is not trustworthy enough.
+- If manual_review_required=true, include a concrete manual_review_reason.
+- Do not combine stage_completed with manual_review_required=true.
 
-Output rules:
-- Return ONLY valid JSON.
-- Do not include markdown.
-- Do not include commentary outside the schema.
-- If you propose new tasks, each one must include a complete impact assessment.
-- continue_execution must align with the decision.
-- If decision_type is replan_from_level, replan_from_level must be provided.
+Consistency rules:
+- The output must be internally consistent.
+- Do not request replan_from_high_level unless replan.required=true and replan.level=high_level.
+- Do not use reatomize_failed_tasks together with high_level replanning.
+- Do not request insert_followup_atomic_tasks unless followup_atomic_tasks_required=true.
+- Do not request manual_review recovery unless manual_review_required=true.
+- Do not close the stage if critical unmet requirements remain.
+
+Evidence usage rules:
+- Base the decision on stage goals, batch outcomes, failed/partial/completed tasks, and recovery implications.
+- Consider whether missing work is local and recoverable, or structural and planning-related.
+- Distinguish between:
+  - transient execution issues
+  - bad atomic decomposition
+  - missing follow-up implementation
+  - flawed high-level stage planning
+  - unclear/unsafe state requiring human review
+
+Output quality rules:
+- decision_summary must clearly explain the stage-level conclusion
+- evaluated_batches must summarize the meaningful outcomes of the processed batches
+- key_risks should identify the main unresolved risks
+- notes may include operational observations useful for downstream orchestration
+- Do not include text outside the schema
 """.strip()
 
 
-def build_evaluation_user_prompt(
-    evaluation_input: EvaluationInput,
+def build_stage_evaluation_user_prompt(
+    *,
+    project_name: str,
+    project_description: str,
+    stage_goal: str,
+    stage_scope_summary: str,
+    processed_batch_summary: str,
+    task_state_summary: str,
+    recovery_context_summary: str,
+    additional_context: str,
 ) -> str:
     return f"""
-Evaluate the current checkpoint and return a structured decision.
+Project name: {project_name}
+Project description: {project_description}
 
-You must account for:
-- the cumulative project operational context
-- the executed tasks since the last checkpoint
-- the artifacts created since the last checkpoint
-- the current project state summary
-- the next planned batch
-- the remaining plan after this checkpoint
-- the recovery decisions already taken for problematic tasks
-- any issues that remain open after recovery
-- any new tasks already created by recovery
-- the content evidence for the tasks executed in this checkpoint window
+Stage goal:
+{stage_goal}
 
-Evaluation input:
-{evaluation_input.model_dump_json(indent=2)}
+Stage scope summary:
+{stage_scope_summary}
+
+Processed batch summary:
+{processed_batch_summary}
+
+Task state summary:
+{task_state_summary}
+
+Recovery context summary:
+{recovery_context_summary}
+
+Additional context:
+{additional_context}
+
+Operational instructions:
+- evaluate the CURRENT STAGE, not only the last task or last batch
+- determine whether the stage can be closed now
+- if the stage is incomplete, choose the narrowest reliable next recovery mechanism
+- prefer atomic-level correction when the issue is local
+- escalate to high-level replanning only when the current high-level plan is no longer adequate
+- do not use refined as a planning or replanning level
+- do not assume technical refinement exists in the active workflow
+- do not request manual review unless automated recovery is genuinely unreliable
+
+Decision reminders:
+- stage_completed requires project_stage_closed=true
+- stage_completed must not require manual review
+- if recovery_strategy is replan_from_high_level, then replan.required must be true and replan.level must be high_level
+- if recovery_strategy is insert_followup_atomic_tasks, then followup_atomic_tasks_required must be true
+- if recovery_strategy is manual_review, then manual_review_required must be true
+- if recovery_strategy is reatomize_failed_tasks, keep replanning at the atomic layer rather than high_level
+
+What to optimize for:
+- operational correctness
+- minimal sufficient correction
+- stage-level truthfulness
+- internally consistent output
 """.strip()
 
 
-def build_evaluation_retry_prompt(
-    evaluation_input: EvaluationInput,
+def build_stage_evaluation_retry_prompt(
+    *,
+    project_name: str,
     validation_error: str,
 ) -> str:
     return f"""
-Evaluate the current checkpoint and return a structured decision.
+Project name: {project_name}
 
 Your previous output was invalid.
 
@@ -127,54 +177,66 @@ Validation error:
 
 You must correct the output and return valid JSON matching the schema.
 
-Important corrections:
-- output only valid JSON
-- decision_type must be one of the allowed values
-- continue_execution must be coherent with the decision
-- proposed_new_tasks must only be included when justified
-- do not duplicate gaps already covered by recovery decisions or recovery-created tasks
-- use the project_operational_context and the content evidence, not only summaries
-- every proposed task must include a complete impact object
-- impact must reflect whether the next planned batch would be compromised
-- use critical impact when continuation is unsafe
-- use moderate impact when resequencing is likely needed
-- use low impact only for non-blocking additions
-- if decision_type is replan_from_level, include replan_from_level
-- avoid vague advice and return operationally useful decisions
-
-Evaluation input:
-{evaluation_input.model_dump_json(indent=2)}
+Critical corrections:
+- do not use refined as a replan level
+- only valid replan levels are atomic and high_level
+- keep decision, project_stage_closed, manual_review_required, recovery_strategy, and replan fully consistent
+- do not set stage_completed unless the stage is truly closed
+- do not request replan_from_high_level unless replan.required=true and replan.level=high_level
+- do not request insert_followup_atomic_tasks unless followup_atomic_tasks_required=true
+- do not request manual_review unless manual_review_required=true
+- prefer the narrowest sufficient recovery action
+- return only JSON matching the schema
 """.strip()
 
 
-def call_evaluation_model(
-    evaluation_input: EvaluationInput,
-) -> EvaluationDecision:
+def call_stage_evaluation_model(
+    *,
+    project_name: str,
+    project_description: str,
+    stage_goal: str,
+    stage_scope_summary: str,
+    processed_batch_summary: str,
+    task_state_summary: str,
+    recovery_context_summary: str,
+    additional_context: str = "",
+) -> StageEvaluationOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(EvaluationDecision.model_json_schema())
+    strict_schema = to_openai_strict_json_schema(
+        StageEvaluationOutput.model_json_schema()
+    )
 
-    first_user_prompt = build_evaluation_user_prompt(evaluation_input)
+    first_user_prompt = build_stage_evaluation_user_prompt(
+        project_name=project_name,
+        project_description=project_description,
+        stage_goal=stage_goal,
+        stage_scope_summary=stage_scope_summary,
+        processed_batch_summary=processed_batch_summary,
+        task_state_summary=task_state_summary,
+        recovery_context_summary=recovery_context_summary,
+        additional_context=additional_context,
+    )
 
     raw = provider.generate_structured(
-        system_prompt=EVALUATION_SYSTEM_PROMPT,
+        system_prompt=STAGE_EVALUATION_SYSTEM_PROMPT,
         user_prompt=first_user_prompt,
-        schema_name="evaluation_decision",
+        schema_name="stage_evaluation_output",
         json_schema=strict_schema,
     )
 
     try:
-        return EvaluationDecision.model_validate(raw)
+        return StageEvaluationOutput.model_validate(raw)
     except ValidationError as exc:
-        retry_user_prompt = build_evaluation_retry_prompt(
-            evaluation_input=evaluation_input,
+        retry_user_prompt = build_stage_evaluation_retry_prompt(
+            project_name=project_name,
             validation_error=str(exc),
         )
 
         raw_retry = provider.generate_structured(
-            system_prompt=EVALUATION_SYSTEM_PROMPT,
+            system_prompt=STAGE_EVALUATION_SYSTEM_PROMPT,
             user_prompt=retry_user_prompt,
-            schema_name="evaluation_decision",
+            schema_name="stage_evaluation_output",
             json_schema=strict_schema,
         )
 
-        return EvaluationDecision.model_validate(raw_retry)
+        return StageEvaluationOutput.model_validate(raw_retry)

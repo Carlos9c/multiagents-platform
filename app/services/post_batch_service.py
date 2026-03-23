@@ -1,4 +1,6 @@
 import json
+from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -51,6 +53,17 @@ CODE_VALIDATION_RESULT_ARTIFACT_TYPE = "code_validation_result"
 
 class PostBatchServiceError(Exception):
     """Base exception for post-batch orchestration errors."""
+
+
+@dataclass
+class NormalizedEvaluationOutcome:
+    continue_execution: bool
+    requires_replanning: bool
+    requires_resequencing: bool
+    requires_manual_review: bool
+    is_stage_closed: bool
+    reopened_finalization: bool
+    notes: str
 
 
 def _serialize_post_batch_result(result: PostBatchResult) -> str:
@@ -284,15 +297,185 @@ def _is_final_batch(plan: ExecutionPlan, batch_id: str) -> bool:
     return plan.execution_batches[-1].batch_id == batch_id
 
 
-def _requires_plan_change_from_evaluation(evaluation_decision) -> bool:
-    return (
-        evaluation_decision.decision_type in {
-            "insert_new_tasks",
-            "resequence_remaining_tasks",
-            "replan_from_level",
-        }
-        or evaluation_decision.resequence_remaining_tasks
+def _read_attr(obj: Any, name: str, default: Any = None) -> Any:
+    return getattr(obj, name, default)
+
+
+def _normalize_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _normalize_string(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    value = str(value).strip()
+    return value or default
+
+
+def _is_new_stage_evaluation_output(evaluation_decision: Any) -> bool:
+    return hasattr(evaluation_decision, "decision") and hasattr(evaluation_decision, "project_stage_closed")
+
+
+def _normalize_legacy_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
+    decision_type = _normalize_string(_read_attr(evaluation_decision, "decision_type"))
+    continue_execution = _normalize_bool(_read_attr(evaluation_decision, "continue_execution"), default=False)
+
+    requires_replanning = decision_type == "replan_from_level"
+    requires_resequencing = (
+        decision_type in {"insert_new_tasks", "resequence_remaining_tasks", "replan_from_level"}
+        or _normalize_bool(_read_attr(evaluation_decision, "resequence_remaining_tasks"), default=False)
     )
+    requires_manual_review = decision_type == "manual_review"
+    is_stage_closed = decision_type == "approve_continue" and not continue_execution
+
+    if decision_type == "approve_continue":
+        notes = "Legacy evaluator approved continuation or closure."
+    elif decision_type == "request_corrections":
+        notes = "Legacy evaluator requested corrections before continuing."
+    elif decision_type == "insert_new_tasks":
+        notes = "Legacy evaluator requested insertion of new tasks."
+    elif decision_type == "resequence_remaining_tasks":
+        notes = "Legacy evaluator requested resequencing of remaining tasks."
+    elif decision_type == "replan_from_level":
+        notes = "Legacy evaluator requested replanning from a prior level."
+    elif decision_type == "manual_review":
+        notes = "Legacy evaluator requested manual review."
+    else:
+        notes = "Legacy evaluator produced an unrecognized decision type."
+
+    return NormalizedEvaluationOutcome(
+        continue_execution=continue_execution,
+        requires_replanning=requires_replanning,
+        requires_resequencing=requires_resequencing,
+        requires_manual_review=requires_manual_review,
+        is_stage_closed=is_stage_closed,
+        reopened_finalization=requires_resequencing or requires_replanning,
+        notes=notes,
+    )
+
+
+def _normalize_new_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
+    decision = _normalize_string(_read_attr(evaluation_decision, "decision"))
+    project_stage_closed = _normalize_bool(_read_attr(evaluation_decision, "project_stage_closed"), default=False)
+    manual_review_required = _normalize_bool(_read_attr(evaluation_decision, "manual_review_required"), default=False)
+    recovery_strategy = _normalize_string(_read_attr(evaluation_decision, "recovery_strategy"), default="none")
+    decision_summary = _normalize_string(_read_attr(evaluation_decision, "decision_summary"))
+    replan = _read_attr(evaluation_decision, "replan")
+    followup_atomic_tasks_required = _normalize_bool(
+        _read_attr(evaluation_decision, "followup_atomic_tasks_required"),
+        default=False,
+    )
+
+    replan_required = False
+    replan_level = None
+    if replan is not None:
+        replan_required = _normalize_bool(_read_attr(replan, "required"), default=False)
+        replan_level = _normalize_string(_read_attr(replan, "level"))
+
+    if decision == "stage_completed":
+        continue_execution = False
+        requires_replanning = False
+        requires_resequencing = False
+        reopened_finalization = False
+        notes = decision_summary or "Stage evaluator closed the current stage."
+        return NormalizedEvaluationOutcome(
+            continue_execution=continue_execution,
+            requires_replanning=requires_replanning,
+            requires_resequencing=requires_resequencing,
+            requires_manual_review=False,
+            is_stage_closed=project_stage_closed,
+            reopened_finalization=reopened_finalization,
+            notes=notes,
+        )
+
+    if decision == "manual_review_required" or manual_review_required or recovery_strategy == "manual_review":
+        return NormalizedEvaluationOutcome(
+            continue_execution=False,
+            requires_replanning=False,
+            requires_resequencing=False,
+            requires_manual_review=True,
+            is_stage_closed=False,
+            reopened_finalization=False,
+            notes=decision_summary or "Stage evaluator requires manual review.",
+        )
+
+    if recovery_strategy == "none":
+        return NormalizedEvaluationOutcome(
+            continue_execution=False,
+            requires_replanning=False,
+            requires_resequencing=False,
+            requires_manual_review=False,
+            is_stage_closed=project_stage_closed,
+            reopened_finalization=False,
+            notes=decision_summary or "Stage evaluator returned no automatic recovery action.",
+        )
+
+    if recovery_strategy == "retry_batch":
+        return NormalizedEvaluationOutcome(
+            continue_execution=False,
+            requires_replanning=False,
+            requires_resequencing=False,
+            requires_manual_review=False,
+            is_stage_closed=False,
+            reopened_finalization=False,
+            notes=decision_summary or "Stage evaluator requested batch retry.",
+        )
+
+    if recovery_strategy == "reatomize_failed_tasks":
+        return NormalizedEvaluationOutcome(
+            continue_execution=False,
+            requires_replanning=True,
+            requires_resequencing=True,
+            requires_manual_review=False,
+            is_stage_closed=False,
+            reopened_finalization=True,
+            notes=decision_summary or "Stage evaluator requested re-atomization of failed tasks.",
+        )
+
+    if recovery_strategy == "insert_followup_atomic_tasks" or followup_atomic_tasks_required:
+        return NormalizedEvaluationOutcome(
+            continue_execution=False,
+            requires_replanning=False,
+            requires_resequencing=True,
+            requires_manual_review=False,
+            is_stage_closed=False,
+            reopened_finalization=True,
+            notes=decision_summary or "Stage evaluator requested follow-up atomic tasks.",
+        )
+
+    if recovery_strategy == "replan_from_high_level":
+        if not replan_required or replan_level != "high_level":
+            raise PostBatchServiceError(
+                "Evaluator output is inconsistent: recovery_strategy='replan_from_high_level' "
+                "requires replan.required=true and replan.level='high_level'."
+            )
+        return NormalizedEvaluationOutcome(
+            continue_execution=False,
+            requires_replanning=True,
+            requires_resequencing=True,
+            requires_manual_review=False,
+            is_stage_closed=False,
+            reopened_finalization=True,
+            notes=decision_summary or "Stage evaluator requested high-level replanning.",
+        )
+
+    raise PostBatchServiceError(
+        f"Unsupported recovery_strategy '{recovery_strategy}' returned by stage evaluator."
+    )
+
+
+def _normalize_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
+    if evaluation_decision is None:
+        raise PostBatchServiceError("Post-batch evaluation returned no decision object.")
+
+    if _is_new_stage_evaluation_output(evaluation_decision):
+        return _normalize_new_evaluation_outcome(evaluation_decision)
+
+    return _normalize_legacy_evaluation_outcome(evaluation_decision)
 
 
 def process_batch_after_execution(
@@ -439,17 +622,26 @@ def process_batch_after_execution(
         decision=evaluation_decision,
     )
 
-    requires_replanning = evaluation_decision.decision_type == "replan_from_level"
-    requires_resequencing = _requires_plan_change_from_evaluation(evaluation_decision)
+    normalized = _normalize_evaluation_outcome(evaluation_decision)
+
+    requires_replanning = normalized.requires_replanning
+    requires_resequencing = normalized.requires_resequencing
+    requires_manual_review = normalized.requires_manual_review
+    continue_execution = normalized.continue_execution
 
     finalization_guard_triggered = False
-    requires_manual_review = evaluation_decision.decision_type == "manual_review"
-    continue_execution = evaluation_decision.continue_execution
     status = "completed_with_evaluation" if continue_execution else "checkpoint_blocked"
-    notes = "Post-batch processing completed with explicit checkpoint evaluation."
+    notes = normalized.notes or "Post-batch processing completed with explicit checkpoint evaluation."
 
     if is_final_batch:
-        if _requires_plan_change_from_evaluation(evaluation_decision):
+        if normalized.is_stage_closed:
+            continue_execution = False
+            status = "project_stage_closed"
+            notes = (
+                normalized.notes
+                or "The evaluator considered the final batch sufficient to close this project stage."
+            )
+        elif normalized.reopened_finalization or requires_replanning or requires_resequencing:
             next_finalization_iteration_count = finalization_iteration_count + 1
 
             if next_finalization_iteration_count > max_finalization_iterations:
@@ -468,15 +660,14 @@ def process_batch_after_execution(
                 continue_execution = False
                 status = "finalization_reopened"
                 notes = (
-                    "The evaluator reopened finalization. A new final iteration must be sequenced, "
+                    normalized.notes
+                    or "The evaluator reopened finalization. A new final iteration must be sequenced, "
                     "and the resulting plan must again end with an explicit final checkpoint."
                 )
         else:
             continue_execution = False
-            status = "project_stage_closed"
-            notes = (
-                "The evaluator considered the final batch sufficient to close this project stage."
-            )
+            status = "checkpoint_blocked"
+            notes = normalized.notes or "Final batch evaluated but stage was not closed."
 
     result = PostBatchResult(
         project_id=project_id,
