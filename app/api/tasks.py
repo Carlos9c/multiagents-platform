@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.services.task_execution_service import (
     TaskExecutionServiceError,
-    start_task_execution_async,
+    execute_task_sync,
 )
 
 router = APIRouter(
@@ -19,13 +19,16 @@ def execute_task(
     db: Session = Depends(get_db),
 ):
     try:
-        result = start_task_execution_async(db=db, task_id=task_id)
+        result = execute_task_sync(db=db, task_id=task_id)
         return {
             "message": result.message,
             "task_id": result.task_id,
             "execution_run_id": result.execution_run_id,
-            "celery_task_id": result.celery_task_id,
+            "run_status": result.run_status,
             "executor_type": result.executor_type,
+            "output_snapshot": result.output_snapshot,
+            "final_task_status": result.final_task_status,
+            "validation_decision": result.validation_decision,
         }
     except TaskExecutionServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

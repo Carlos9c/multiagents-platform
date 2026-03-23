@@ -10,4 +10,4 @@ router = APIRouter(prefix="/execution-runs", tags=["execution-runs"])
 
 @router.get("", response_model=list[ExecutionRunRead])
 def list_execution_runs(db: Session = Depends(get_db)):
-    return db.query(ExecutionRun).all()
+    return db.query(ExecutionRun).order_by(ExecutionRun.id.asc()).all()

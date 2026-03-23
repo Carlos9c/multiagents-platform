@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.models.task import TASK_STATUS_AWAITING_VALIDATION, Task
+from app.models.task import (
+    TASK_STATUS_AWAITING_VALIDATION,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PARTIAL,
+    Task,
+)
 from app.schemas.code_execution import (
     CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
     CODE_EXECUTION_STATUS_FAILED,
@@ -27,6 +34,12 @@ from app.services.code_validation_client import (
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_memory_service import build_project_operational_context
 from app.services.project_storage import CODE_DOMAIN, ProjectStorageService
+from app.services.tasks import (
+    mark_task_awaiting_validation,
+    mark_task_completed,
+    mark_task_failed,
+    mark_task_partial,
+)
 from app.services.workspace_runtime import WorkspaceRuntimeError
 
 
@@ -35,6 +48,18 @@ CODE_VALIDATION_RESULT_ARTIFACT_TYPE = "code_validation_result"
 
 class CodeValidatorError(Exception):
     """Base error for code validation."""
+
+
+class TaskValidationServiceError(Exception):
+    """Base error for task validation service orchestration."""
+
+
+@dataclass
+class TaskValidationServiceResult:
+    task_id: int
+    execution_run_id: int
+    validation_result: CodeValidationResult
+    final_task_status: str
 
 
 class BaseCodeValidator(ABC):
@@ -506,3 +531,74 @@ class LocalCodeValidator(BaseCodeValidator):
         )
 
         return validation_result
+
+
+def _apply_validation_decision_to_task(
+    db: Session,
+    task_id: int,
+    decision: str,
+) -> str:
+    if decision == CODE_VALIDATION_DECISION_COMPLETED:
+        updated_task = mark_task_completed(db, task_id)
+        final_status = TASK_STATUS_COMPLETED
+    elif decision == CODE_VALIDATION_DECISION_PARTIAL:
+        updated_task = mark_task_partial(db, task_id)
+        final_status = TASK_STATUS_PARTIAL
+    elif decision == CODE_VALIDATION_DECISION_FAILED:
+        updated_task = mark_task_failed(db, task_id)
+        final_status = TASK_STATUS_FAILED
+    else:
+        raise TaskValidationServiceError(
+            f"Unsupported validation decision '{decision}'."
+        )
+
+    if updated_task is None:
+        raise TaskValidationServiceError(
+            f"Task {task_id} could not be updated after validation."
+        )
+
+    return final_status
+
+
+def validate_code_task(
+    db: Session,
+    *,
+    task_id: int,
+    execution_run_id: int,
+    executor_result: CodeExecutorResult,
+) -> TaskValidationServiceResult:
+    task = db.get(Task, task_id)
+    if not task:
+        raise TaskValidationServiceError(f"Task {task_id} not found")
+
+    if task.status != TASK_STATUS_AWAITING_VALIDATION:
+        mark_task_awaiting_validation(db, task_id)
+        task = db.get(Task, task_id)
+        if not task:
+            raise TaskValidationServiceError(f"Task {task_id} not found after status update")
+
+    validator = LocalCodeValidator(db=db)
+
+    try:
+        validation_result = validator.validate(
+            task=task,
+            execution_run_id=execution_run_id,
+            executor_result=executor_result,
+        )
+    except CodeValidatorError as exc:
+        raise TaskValidationServiceError(
+            f"Validation failed for task {task_id}: {str(exc)}"
+        ) from exc
+
+    final_task_status = _apply_validation_decision_to_task(
+        db=db,
+        task_id=task_id,
+        decision=validation_result.decision,
+    )
+
+    return TaskValidationServiceResult(
+        task_id=task_id,
+        execution_run_id=execution_run_id,
+        validation_result=validation_result,
+        final_task_status=final_task_status,
+    )

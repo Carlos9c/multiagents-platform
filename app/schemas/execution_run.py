@@ -1,92 +1,97 @@
-from sqlalchemy import ForeignKey, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pydantic import BaseModel, field_validator
 
-from app.db.base import Base
-
-
-EXECUTION_RUN_STATUS_PENDING = "pending"
-EXECUTION_RUN_STATUS_RUNNING = "running"
-EXECUTION_RUN_STATUS_SUCCEEDED = "succeeded"
-EXECUTION_RUN_STATUS_FAILED = "failed"
-EXECUTION_RUN_STATUS_REJECTED = "rejected"
-
-VALID_EXECUTION_RUN_STATUSES = {
-    EXECUTION_RUN_STATUS_PENDING,
-    EXECUTION_RUN_STATUS_RUNNING,
-    EXECUTION_RUN_STATUS_SUCCEEDED,
-    EXECUTION_RUN_STATUS_FAILED,
-    EXECUTION_RUN_STATUS_REJECTED,
-}
-
-FAILURE_TYPE_TRANSIENT = "transient"
-FAILURE_TYPE_VALIDATION = "validation"
-FAILURE_TYPE_EXECUTOR_REJECTED = "executor_rejected"
-FAILURE_TYPE_INTERNAL = "internal"
-FAILURE_TYPE_UNKNOWN = "unknown"
-
-VALID_FAILURE_TYPES = {
-    FAILURE_TYPE_TRANSIENT,
-    FAILURE_TYPE_VALIDATION,
+from app.models.execution_run import (
     FAILURE_TYPE_EXECUTOR_REJECTED,
     FAILURE_TYPE_INTERNAL,
+    FAILURE_TYPE_TRANSIENT,
     FAILURE_TYPE_UNKNOWN,
-}
-
-RECOVERY_ACTION_NONE = "none"
-RECOVERY_ACTION_RETRY_SAME_TASK = "retry_same_task"
-RECOVERY_ACTION_REATOMIZE = "reatomize"
-RECOVERY_ACTION_MANUAL_REVIEW = "manual_review"
-
-VALID_RECOVERY_ACTIONS = {
-    RECOVERY_ACTION_NONE,
-    RECOVERY_ACTION_RETRY_SAME_TASK,
-    RECOVERY_ACTION_REATOMIZE,
+    FAILURE_TYPE_VALIDATION,
     RECOVERY_ACTION_MANUAL_REVIEW,
-}
+    RECOVERY_ACTION_NONE,
+    RECOVERY_ACTION_REATOMIZE,
+    RECOVERY_ACTION_RETRY_SAME_TASK,
+    VALID_EXECUTION_RUN_STATUSES,
+    VALID_FAILURE_TYPES,
+    VALID_RECOVERY_ACTIONS,
+)
 
 
-class ExecutionRun(Base):
-    __tablename__ = "execution_runs"
+class ExecutionRunBase(BaseModel):
+    task_id: int
+    parent_run_id: int | None = None
+    agent_name: str
+    attempt_number: int = 1
+    status: str = "pending"
+    input_snapshot: str | None = None
+    output_snapshot: str | None = None
+    error_message: str | None = None
+    failure_type: str | None = None
+    failure_code: str | None = None
+    recovery_action: str | None = None
+    work_summary: str | None = None
+    work_details: str | None = None
+    artifacts_created: str | None = None
+    completed_scope: str | None = None
+    remaining_scope: str | None = None
+    blockers_found: str | None = None
+    validation_notes: str | None = None
 
-    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        if value not in VALID_EXECUTION_RUN_STATUSES:
+            raise ValueError(
+                f"Invalid status '{value}'. "
+                f"Allowed values: {sorted(VALID_EXECUTION_RUN_STATUSES)}"
+            )
+        return value
 
-    task_id: Mapped[int] = mapped_column(
-        ForeignKey("tasks.id"),
-        nullable=False,
-        index=True,
-    )
+    @field_validator("failure_type")
+    @classmethod
+    def validate_failure_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if value not in VALID_FAILURE_TYPES:
+            raise ValueError(
+                f"Invalid failure_type '{value}'. "
+                f"Allowed values: {sorted(VALID_FAILURE_TYPES)}"
+            )
+        return value
 
-    parent_run_id: Mapped[int | None] = mapped_column(
-        ForeignKey("execution_runs.id"),
-        nullable=True,
-        index=True,
-    )
+    @field_validator("recovery_action")
+    @classmethod
+    def validate_recovery_action(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if value not in VALID_RECOVERY_ACTIONS:
+            raise ValueError(
+                f"Invalid recovery_action '{value}'. "
+                f"Allowed values: {sorted(VALID_RECOVERY_ACTIONS)}"
+            )
+        return value
 
-    agent_name: Mapped[str] = mapped_column(String(100), nullable=False)
 
-    attempt_number: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=1,
-    )
+class ExecutionRunCreate(ExecutionRunBase):
+    pass
 
-    status: Mapped[str] = mapped_column(
-        String(50),
-        nullable=False,
-        default=EXECUTION_RUN_STATUS_PENDING,
-    )
 
-    input_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
-    output_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+class ExecutionRunRead(ExecutionRunBase):
+    id: int
 
-    failure_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    recovery_action: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    model_config = {"from_attributes": True}
 
-    task = relationship("Task", backref="execution_runs")
-    parent_run = relationship(
-        "ExecutionRun",
-        remote_side=[id],
-        backref="child_runs",
-    )
+
+__all__ = [
+    "ExecutionRunBase",
+    "ExecutionRunCreate",
+    "ExecutionRunRead",
+    "FAILURE_TYPE_TRANSIENT",
+    "FAILURE_TYPE_VALIDATION",
+    "FAILURE_TYPE_EXECUTOR_REJECTED",
+    "FAILURE_TYPE_INTERNAL",
+    "FAILURE_TYPE_UNKNOWN",
+    "RECOVERY_ACTION_NONE",
+    "RECOVERY_ACTION_RETRY_SAME_TASK",
+    "RECOVERY_ACTION_REATOMIZE",
+    "RECOVERY_ACTION_MANUAL_REVIEW",
+]
