@@ -44,11 +44,16 @@ from app.services.execution_runs import (
     mark_execution_run_started,
     mark_execution_run_succeeded,
 )
+from app.services.local_workspace_runtime import LocalWorkspaceRuntime
+from app.services.project_storage import ProjectStorageService
 from app.services.task_validation_service import (
     TaskValidationServiceError,
+    apply_validation_decision_to_task,
     validate_code_task,
+    validate_terminal_code_task,
 )
 from app.services.tasks import (
+    mark_task_awaiting_validation,
     mark_task_failed,
     mark_task_running,
 )
@@ -263,6 +268,39 @@ def _build_synthetic_executor_result(
     )
 
 
+def _promote_validated_workspace_to_source(
+    db: Session,
+    *,
+    task: Task,
+    run_id: int,
+) -> None:
+    """
+    Promote the isolated execution workspace into canonical project source.
+
+    This is intentionally executed only after:
+    - execution finished
+    - validation produced decision='completed'
+
+    And before:
+    - the final task status is persisted as completed
+
+    This keeps success semantics honest:
+    a task is not completed in the DB until its validated output has become source.
+    """
+    try:
+        storage_service = ProjectStorageService()
+        workspace_runtime = LocalWorkspaceRuntime(storage_service=storage_service)
+        workspace_runtime.promote_workspace_to_source(
+            project_id=task.project_id,
+            execution_run_id=run_id,
+        )
+    except Exception as exc:
+        mark_task_failed(db, task.id)
+        raise TaskExecutionServiceError(
+            f"Task {task.id} passed validation but its workspace could not be promoted to source: {str(exc)}"
+        ) from exc
+
+
 def _validate_after_execution(
     db: Session,
     *,
@@ -276,6 +314,7 @@ def _validate_after_execution(
             task_id=task.id,
             execution_run_id=run_id,
             executor_result=executor_result,
+            apply_final_status=False,
         )
     except TaskValidationServiceError as exc:
         mark_task_failed(db, task.id)
@@ -286,10 +325,35 @@ def _validate_after_execution(
     decision = validation_service_result.validation_result.decision
 
     if decision == CODE_VALIDATION_DECISION_COMPLETED:
-        message = "Execution and validation completed successfully."
+        mark_task_awaiting_validation(db, task.id)
+        refreshed_task_for_promotion = _get_task_or_raise(db, task.id)
+        _promote_validated_workspace_to_source(
+            db=db,
+            task=refreshed_task_for_promotion,
+            run_id=run_id,
+        )
+        final_task_status = apply_validation_decision_to_task(
+            db=db,
+            task_id=task.id,
+            decision=decision,
+        )
+        message = (
+            "Execution and validation completed successfully, and the validated workspace "
+            "was promoted to source before closing the task."
+        )
     elif decision == CODE_VALIDATION_DECISION_PARTIAL:
+        final_task_status = apply_validation_decision_to_task(
+            db=db,
+            task_id=task.id,
+            decision=decision,
+        )
         message = "Execution finished and validation concluded the task is partial."
     elif decision == CODE_VALIDATION_DECISION_FAILED:
+        final_task_status = apply_validation_decision_to_task(
+            db=db,
+            task_id=task.id,
+            decision=decision,
+        )
         message = "Execution finished but validation concluded the task failed."
     else:
         raise TaskExecutionServiceError(
@@ -304,7 +368,7 @@ def _validate_after_execution(
         run_status=CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
         output_snapshot=executor_result.output_snapshot,
         message=message,
-        final_task_status=validation_service_result.final_task_status,
+        final_task_status=final_task_status,
         validation_decision=decision,
     )
 
@@ -319,11 +383,12 @@ def _finalize_prevalidation_terminal_outcome(
     message: str,
 ) -> SyncTaskExecutionResult:
     try:
-        validation_service_result = validate_code_task(
+        validation_service_result = validate_terminal_code_task(
             db=db,
             task_id=task.id,
             execution_run_id=run_id,
             executor_result=executor_result,
+            apply_final_status=True,
         )
     except TaskValidationServiceError as exc:
         mark_task_failed(db, task.id)
