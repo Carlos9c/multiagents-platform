@@ -5,7 +5,6 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
-
 StageEvaluationDecision = Literal[
     "stage_completed",
     "stage_incomplete",
@@ -26,7 +25,6 @@ BatchOutcome = Literal[
 
 RecoveryStrategy = Literal[
     "none",
-    "retry_batch",
     "reatomize_failed_tasks",
     "insert_followup_atomic_tasks",
     "replan_from_high_level",
@@ -59,12 +57,6 @@ class EvaluatedBatchSummary(BaseModel):
 
 
 class EvaluationReplanInstruction(BaseModel):
-    """
-    Replanning contract aligned with the active workflow.
-
-    refined is intentionally unsupported.
-    """
-
     required: bool
     level: ReplanLevel | None = None
     reason: str | None = None
@@ -125,10 +117,6 @@ class RecoveryDecisionSummary(BaseModel):
 
 
 class StageEvaluationOutput(BaseModel):
-    """
-    Final evaluator output consumed by post-batch / recovery orchestration.
-    """
-
     decision: StageEvaluationDecision
     decision_summary: str = Field(..., min_length=20)
 

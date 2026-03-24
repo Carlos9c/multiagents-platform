@@ -23,10 +23,9 @@ from app.models.task import (
     TERMINAL_TASK_STATUSES,
     Task,
 )
-
-from app.schemas.recovery import RecoveryContext
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.post_batch import PostBatchResult, PostBatchTaskRunSummary
+from app.schemas.recovery import RecoveryContext
 from app.services.artifacts import create_artifact
 from app.services.evaluation_service import evaluate_checkpoint, persist_evaluation_decision
 from app.services.recovery_service import (
@@ -378,19 +377,14 @@ def _normalize_new_evaluation_outcome(evaluation_decision: Any) -> NormalizedEva
         replan_level = _normalize_string(_read_attr(replan, "level"))
 
     if decision == "stage_completed":
-        continue_execution = False
-        requires_replanning = False
-        requires_resequencing = False
-        reopened_finalization = False
-        notes = decision_summary or "Stage evaluator closed the current stage."
         return NormalizedEvaluationOutcome(
-            continue_execution=continue_execution,
-            requires_replanning=requires_replanning,
-            requires_resequencing=requires_resequencing,
+            continue_execution=False,
+            requires_replanning=False,
+            requires_resequencing=False,
             requires_manual_review=False,
             is_stage_closed=project_stage_closed,
-            reopened_finalization=reopened_finalization,
-            notes=notes,
+            reopened_finalization=False,
+            notes=decision_summary or "Stage evaluator closed the current stage.",
         )
 
     if decision == "manual_review_required" or manual_review_required or recovery_strategy == "manual_review":
@@ -405,25 +399,18 @@ def _normalize_new_evaluation_outcome(evaluation_decision: Any) -> NormalizedEva
         )
 
     if recovery_strategy == "none":
+        # Important:
+        # none + not closed should generally mean the stage can continue or at least is not blocked
+        # by evaluator semantics alone. We keep continue_execution true here to avoid artificial
+        # checkpoint_blocked outcomes when evaluator simply does not request recovery.
         return NormalizedEvaluationOutcome(
-            continue_execution=False,
+            continue_execution=not project_stage_closed,
             requires_replanning=False,
             requires_resequencing=False,
             requires_manual_review=False,
             is_stage_closed=project_stage_closed,
             reopened_finalization=False,
             notes=decision_summary or "Stage evaluator returned no automatic recovery action.",
-        )
-
-    if recovery_strategy == "retry_batch":
-        return NormalizedEvaluationOutcome(
-            continue_execution=False,
-            requires_replanning=False,
-            requires_resequencing=False,
-            requires_manual_review=False,
-            is_stage_closed=False,
-            reopened_finalization=False,
-            notes=decision_summary or "Stage evaluator requested batch retry.",
         )
 
     if recovery_strategy == "reatomize_failed_tasks":
@@ -477,6 +464,34 @@ def _normalize_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluat
         return _normalize_new_evaluation_outcome(evaluation_decision)
 
     return _normalize_legacy_evaluation_outcome(evaluation_decision)
+
+
+def _degrade_illegal_stage_closure_for_non_final_batch(
+    *,
+    normalized: NormalizedEvaluationOutcome,
+    is_final_batch: bool,
+) -> NormalizedEvaluationOutcome:
+    """
+    Only the final batch of the current plan may close the stage automatically.
+
+    If evaluator closes the stage early on a non-final batch, we degrade that decision into
+    a safe continuation outcome instead of letting PostBatchResult become internally inconsistent.
+    """
+    if is_final_batch or not normalized.is_stage_closed:
+        return normalized
+
+    return NormalizedEvaluationOutcome(
+        continue_execution=True,
+        requires_replanning=False,
+        requires_resequencing=False,
+        requires_manual_review=False,
+        is_stage_closed=False,
+        reopened_finalization=False,
+        notes=(
+            "Evaluator proposed closing the stage at a non-final batch. "
+            "Stage closure was deferred because only the final batch can close the stage in the current workflow."
+        ),
+    )
 
 
 def process_batch_after_execution(
@@ -624,6 +639,10 @@ def process_batch_after_execution(
     )
 
     normalized = _normalize_evaluation_outcome(evaluation_decision)
+    normalized = _degrade_illegal_stage_closure_for_non_final_batch(
+        normalized=normalized,
+        is_final_batch=is_final_batch,
+    )
 
     requires_replanning = normalized.requires_replanning
     requires_resequencing = normalized.requires_resequencing
@@ -631,7 +650,12 @@ def process_batch_after_execution(
     continue_execution = normalized.continue_execution
 
     finalization_guard_triggered = False
-    status = "completed_with_evaluation" if continue_execution else "checkpoint_blocked"
+
+    if continue_execution:
+        status = "completed_with_evaluation"
+    else:
+        status = "checkpoint_blocked"
+
     notes = normalized.notes or "Post-batch processing completed with explicit checkpoint evaluation."
 
     if is_final_batch:
@@ -666,8 +690,10 @@ def process_batch_after_execution(
                     "and the resulting plan must again end with an explicit final checkpoint."
                 )
         else:
-            continue_execution = False
-            status = "checkpoint_blocked"
+            if continue_execution:
+                status = "completed_with_evaluation"
+            else:
+                status = "checkpoint_blocked"
             notes = normalized.notes or "Final batch evaluated but stage was not closed."
 
     result = PostBatchResult(

@@ -14,7 +14,7 @@ Return ONLY JSON matching the provided schema.
 Core responsibility:
 - Evaluate completed execution evidence at the STAGE level, not only at the single-task level.
 - Decide whether the current stage is complete, incomplete, or requires manual review.
-- Decide whether recovery should happen through retry, re-atomization, follow-up atomic work, high-level replanning, or manual review.
+- Decide whether recovery should happen through re-atomization, follow-up atomic work, high-level replanning, or manual review.
 - Be operationally strict and consistent with the current workflow.
 
 Current workflow reality:
@@ -25,6 +25,7 @@ Current workflow reality:
   - high_level
 - NEVER request replanning from refined.
 - NEVER mention refined as an operational level in the output.
+- Do not use retry_batch. It is not part of the active contract.
 
 Evaluation philosophy:
 - A stage is complete only when the stage goals are actually satisfied with sufficient evidence.
@@ -33,6 +34,12 @@ Evaluation philosophy:
 - A stage may remain incomplete even if many tasks succeeded, if critical requirements are still missing.
 - A stage may be incomplete but recoverable without high-level replanning.
 - Reserve manual review for ambiguity, conflict, insufficient evidence, or when automated recovery is not reliable.
+
+Special rule for context-selection failures:
+- A code-context-selection failure, missing useful existing context, or model confusion about repository paths does NOT by itself imply manual review.
+- If recovery already produced a narrow automatic path that preserves the original task intent, prefer that automatic path.
+- Prefer reatomize_failed_tasks or insert_followup_atomic_tasks over manual_review when the issue is local and recoverable.
+- Prefer replan_from_high_level only when the high-level stage plan is genuinely inadequate, not when one local task failed to resolve context.
 
 Decision meanings:
 - stage_completed:
@@ -48,8 +55,6 @@ Decision meanings:
 Allowed recovery strategies:
 - none
   - use when the stage is complete or no recovery action should be triggered now
-- retry_batch
-  - use when the current batch likely failed due to transient or retriable issues and retry is the best next action
 - reatomize_failed_tasks
   - use when failed or partial atomic tasks were badly scoped, not executable as-is, or should be decomposed again at the atomic layer
 - insert_followup_atomic_tasks
@@ -88,11 +93,11 @@ Evidence usage rules:
 - Base the decision on stage goals, batch outcomes, failed/partial/completed tasks, and recovery implications.
 - Consider whether missing work is local and recoverable, or structural and planning-related.
 - Distinguish between:
-  - transient execution issues
   - bad atomic decomposition
   - missing follow-up implementation
   - flawed high-level stage planning
   - unclear/unsafe state requiring human review
+  - local recoverable context-resolution failure
 
 Output quality rules:
 - decision_summary must clearly explain the stage-level conclusion
@@ -145,6 +150,7 @@ Operational instructions:
 - do not use refined as a planning or replanning level
 - do not assume technical refinement exists in the active workflow
 - do not request manual review unless automated recovery is genuinely unreliable
+- do not use retry_batch
 
 Decision reminders:
 - stage_completed requires project_stage_closed=true
@@ -153,6 +159,7 @@ Decision reminders:
 - if recovery_strategy is insert_followup_atomic_tasks, then followup_atomic_tasks_required must be true
 - if recovery_strategy is manual_review, then manual_review_required must be true
 - if recovery_strategy is reatomize_failed_tasks, keep replanning at the atomic layer rather than high_level
+- a local context-selection failure should not escalate to manual review or high-level replanning unless repeated evidence clearly justifies it
 
 What to optimize for:
 - operational correctness
@@ -180,12 +187,14 @@ You must correct the output and return valid JSON matching the schema.
 Critical corrections:
 - do not use refined as a replan level
 - only valid replan levels are atomic and high_level
+- do not use retry_batch
 - keep decision, project_stage_closed, manual_review_required, recovery_strategy, and replan fully consistent
 - do not set stage_completed unless the stage is truly closed
 - do not request replan_from_high_level unless replan.required=true and replan.level=high_level
 - do not request insert_followup_atomic_tasks unless followup_atomic_tasks_required=true
 - do not request manual_review unless manual_review_required=true
 - prefer the narrowest sufficient recovery action
+- do not escalate a local recoverable context-selection failure to manual review unless the evidence clearly requires it
 - return only JSON matching the schema
 """.strip()
 

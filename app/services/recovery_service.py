@@ -63,16 +63,6 @@ def _get_source_entities_or_raise(
 
 
 def _infer_parent_task_id_for_created_tasks(source_task: Task) -> int:
-    """
-    Recovery-created tasks should remain attached to the same functional parent when possible.
-
-    Policy:
-    - if the source task already has a parent, attach recovery tasks to that parent
-    - otherwise attach them to the source task itself
-
-    This keeps recovery work grouped with the same decomposition lineage without
-    requiring refined-level semantics.
-    """
     return source_task.parent_task_id or source_task.id
 
 
@@ -114,29 +104,10 @@ def _reopen_source_task_for_retry(
     source_task: Task,
     decision: RecoveryDecision,
 ) -> Task:
-    """
-    Make the original atomic task executable again.
-
-    Current retry policy:
-    - reuse the same task id
-    - move it back to pending
-    - clear blocking flags
-    - preserve historical runs/artifacts for auditability
-
-    This makes retry operational for the current sequencer, which only sequences
-    pending atomic tasks.
-
-    Important trade-off:
-    - the task will no longer appear as 'failed' after this point
-    - failure evidence remains available through the latest execution run and
-      validation artifacts
-    """
     source_task.status = TASK_STATUS_PENDING
     source_task.is_blocked = False
     source_task.blocking_reason = None
 
-    # Preserve lineage and historical evidence. We deliberately do not mutate
-    # previous runs or artifacts here.
     if decision.execution_guidance:
         source_task.implementation_notes = (
             (source_task.implementation_notes or "").strip() + "\n\n"
@@ -147,6 +118,35 @@ def _reopen_source_task_for_retry(
     db.commit()
     db.refresh(source_task)
     return source_task
+
+
+def _build_source_task_summary(
+    *,
+    source_task: Task,
+    source_run: ExecutionRun,
+) -> str:
+    payload = {
+        "source_task": {
+            "task_id": source_task.id,
+            "title": source_task.title,
+            "description": source_task.description,
+            "summary": source_task.summary,
+            "objective": source_task.objective,
+            "task_type": source_task.task_type,
+            "planning_level": source_task.planning_level,
+            "acceptance_criteria": source_task.acceptance_criteria,
+            "technical_constraints": source_task.technical_constraints,
+            "out_of_scope": source_task.out_of_scope,
+            "parent_task_id": source_task.parent_task_id,
+        },
+        "source_run": {
+            "run_id": source_run.id,
+            "status": source_run.status,
+            "failure_type": source_run.failure_type,
+            "failure_code": source_run.failure_code,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def persist_recovery_decision(
@@ -178,17 +178,18 @@ def generate_recovery_decision(
     next_batch_summary: str | None = None,
     remaining_plan_summary: str | None = None,
 ):
-    """
-    Delegates recovery reasoning to the recovery client and returns a validated RecoveryDecision.
-
-    Import is intentionally local to avoid import cycles during schema/service migration.
-    """
     run = _get_run_or_raise(db, run_id)
     source_task = _get_task_or_raise(db, run.task_id)
 
     from app.services.recovery_client import call_recovery_model
 
+    source_task_summary = _build_source_task_summary(
+        source_task=source_task,
+        source_run=run,
+    )
+
     decision = call_recovery_model(
+        source_task_summary=source_task_summary,
         execution_context_summary=execution_context_summary,
         validation_context_summary=validation_context_summary,
         next_batch_summary=next_batch_summary,
@@ -214,27 +215,6 @@ def materialize_recovery_decision(
     project_id: int,
     decision: RecoveryDecision,
 ) -> list[Task]:
-    """
-    Materializes recovery actions.
-
-    Action behavior:
-    - retry:
-        reopens the same source task as pending so it becomes executable again
-    - reatomize:
-        creates replacement-style atomic tasks under the same functional parent
-    - insert_followup:
-        creates additive atomic tasks under the same functional parent
-    - manual_review:
-        creates no tasks
-
-    Return contract:
-    - retry/manual_review return []
-    - reatomize/insert_followup return the newly created tasks
-
-    Important:
-    This function is intentionally operational. It makes the next step real for the
-    sequencer instead of merely recording intent.
-    """
     _, source_task = _get_source_entities_or_raise(db, decision=decision)
 
     if source_task.project_id != project_id:

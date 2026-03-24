@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -24,6 +23,7 @@ from app.schemas.code_context_selection import (
     RelatedTaskContext,
     RepositoryFileDescriptor,
     RepositoryIndexSnapshot,
+    SelectedCodeFile,
 )
 from app.services.artifacts import create_artifact
 from app.services.code_context_selector_client import (
@@ -91,18 +91,14 @@ class CodeContextSelector:
         )
 
         try:
-            selection = select_code_context_with_model(selection_input)
+            raw_selection = select_code_context_with_model(selection_input)
         except CodeContextSelectorClientError as exc:
             raise CodeContextSelectorInternalError(
                 f"Failed to select code context with model: {str(exc)}"
             ) from exc
 
         selection = self._normalize_selection(
-            selection=selection,
-            selection_input=selection_input,
-        )
-        self._validate_selection(
-            selection=selection,
+            selection=raw_selection,
             selection_input=selection_input,
         )
 
@@ -381,17 +377,20 @@ class CodeContextSelector:
         constraints: CodeContextSelectionConstraints,
     ) -> list[CandidatePathSignal]:
         pool: dict[str, CandidatePathSignal] = {}
+        existing_repo_paths = {item.path for item in repository_index.files}
 
         def add(path: str, score: float, reason: str, source_type: str) -> None:
-            if path not in {item.path for item in repository_index.files}:
+            normalized_path = self._normalize_repo_path(path)
+            if not normalized_path or normalized_path not in existing_repo_paths:
                 return
-            if path not in pool:
-                pool[path] = CandidatePathSignal(path=path, score=0.0)
-            pool[path].score += score
-            if reason not in pool[path].reasons:
-                pool[path].reasons.append(reason)
-            if source_type not in pool[path].source_types:
-                pool[path].source_types.append(source_type)
+
+            if normalized_path not in pool:
+                pool[normalized_path] = CandidatePathSignal(path=normalized_path, score=0.0)
+            pool[normalized_path].score += score
+            if reason not in pool[normalized_path].reasons:
+                pool[normalized_path].reasons.append(reason)
+            if source_type not in pool[normalized_path].source_types:
+                pool[normalized_path].source_types.append(source_type)
 
         explicit_task_paths = self._extract_task_paths(task)
         for path in explicit_task_paths:
@@ -413,6 +412,8 @@ class CodeContextSelector:
 
         current_tokens = self._task_tokens(task)
         for path_signal in project_operational_context.referenced_paths:
+            if path_signal.path not in existing_repo_paths:
+                continue
             path_tokens = self._text_tokens(path_signal.path.replace("/", " ").replace(".", " "))
             overlap = current_tokens.intersection(path_tokens)
             if overlap:
@@ -425,9 +426,10 @@ class CodeContextSelector:
 
         for related_task in related_tasks:
             for path in related_task.referenced_paths:
+                if path not in existing_repo_paths:
+                    continue
                 add(path, 3.0, f"referenced by related task {related_task.task_id}", "related_task")
 
-        repo_files_by_path = {item.path: item for item in repository_index.files}
         for descriptor in repository_index.files:
             path_tokens = self._text_tokens(descriptor.path.replace("/", " ").replace(".", " "))
             symbol_tokens = {item.lower() for item in descriptor.symbols}
@@ -459,14 +461,23 @@ class CodeContextSelector:
         if not related_tasks:
             gaps.append("No strongly related historical tasks were found for this task.")
 
-        if not self._extract_task_paths(task):
-            gaps.append("Task metadata does not mention explicit repository paths.")
+        explicit_task_paths = self._extract_task_paths(task)
+        if explicit_task_paths and not any(
+            path in {item.path for item in repository_index.files}
+            for path in explicit_task_paths
+        ):
+            gaps.append(
+                "Task mentions repository paths, but none of them currently exist in the repository index."
+            )
+
+        if not explicit_task_paths:
+            gaps.append("Task metadata does not mention explicit existing repository paths.")
 
         if not candidate_paths and repository_index.total_files > 0:
-            gaps.append("No strong candidate paths were recovered from project memory and repository index.")
+            gaps.append("No strong existing candidate paths were recovered from project memory and repository index.")
 
         if repository_index.total_files == 0:
-            gaps.append("Repository snapshot is empty; the task may need to create new files from scratch.")
+            gaps.append("Repository snapshot is empty; no existing code context is available.")
 
         return gaps
 
@@ -475,19 +486,82 @@ class CodeContextSelector:
         selection: CodeContextSelectionResult,
         selection_input: CodeContextSelectionInput,
     ) -> CodeContextSelectionResult:
+        existing_repo_paths = {item.path for item in selection_input.repository_index.files}
+
         selection.task_id = selection_input.task_id
         selection.project_id = selection_input.project_id
 
-        merged_gaps: list[str] = []
-        for item in selection_input.context_gaps + selection.context_gaps:
-            if item not in merged_gaps:
-                merged_gaps.append(item)
-        selection.context_gaps = merged_gaps[:20]
+        filtered_primary, dropped_primary = self._filter_existing_selected_files(
+            selection.primary_targets,
+            existing_repo_paths,
+        )
+        filtered_related, dropped_related = self._filter_existing_selected_files(
+            selection.related_files,
+            existing_repo_paths,
+        )
+        filtered_reference, dropped_reference = self._filter_existing_selected_files(
+            selection.reference_files,
+            existing_repo_paths,
+        )
+        filtered_tests, dropped_tests = self._filter_existing_selected_files(
+            selection.related_test_files,
+            existing_repo_paths,
+        )
 
-        if not selection.candidate_file_pool:
-            selection.candidate_file_pool = [
-                item.path for item in selection_input.candidate_paths[:10]
+        selection.primary_targets = filtered_primary[: selection_input.constraints.max_primary_targets]
+        selection.related_files = filtered_related[: selection_input.constraints.max_related_files]
+        selection.reference_files = filtered_reference[: selection_input.constraints.max_reference_files]
+        selection.related_test_files = filtered_tests[: selection_input.constraints.max_related_test_files]
+
+        dropped_paths = self._dedupe_paths(
+            dropped_primary + dropped_related + dropped_reference + dropped_tests
+        )
+        if dropped_paths:
+            selection.context_gaps = list(selection.context_gaps) + [
+                "Model proposed non-existing repository paths that were discarded: "
+                + ", ".join(dropped_paths[:10])
             ]
+            selection.evidence_summary.caution_signals = list(selection.evidence_summary.caution_signals) + [
+                "Some model-selected paths were not present in the repository index and were ignored."
+            ]
+
+        primary_target_paths = [item.path for item in selection.primary_targets]
+
+        normalized_pool = [
+            path
+            for path in self._dedupe_paths(selection.candidate_file_pool)
+            if path in existing_repo_paths
+        ]
+        dropped_pool = [
+            path
+            for path in self._dedupe_paths(selection.candidate_file_pool)
+            if path not in existing_repo_paths
+        ]
+        if dropped_pool:
+            selection.context_gaps = list(selection.context_gaps) + [
+                "Model proposed non-existing candidate file pool paths that were discarded: "
+                + ", ".join(dropped_pool[:10])
+            ]
+
+        fallback_pool = [
+            item.path for item in selection_input.candidate_paths
+            if item.path in existing_repo_paths
+        ]
+
+        if not normalized_pool:
+            normalized_pool = fallback_pool[:10]
+
+        selection.candidate_file_pool = self._dedupe_paths(
+            primary_target_paths + normalized_pool
+        )[: max(selection_input.constraints.max_total_files, 1)]
+
+        if not selection.primary_targets:
+            fallback_primary = self._build_primary_fallback(selection_input)
+            selection.primary_targets = fallback_primary[: selection_input.constraints.max_primary_targets]
+            if fallback_primary:
+                selection.context_gaps = list(selection.context_gaps) + [
+                    "Primary targets were reconstructed from existing candidate paths because the model did not return a valid existing primary selection."
+                ]
 
         if not selection.candidate_modules:
             inferred_modules: list[str] = []
@@ -497,6 +571,26 @@ class CodeContextSelector:
                     inferred_modules.append(module_name)
             selection.candidate_modules = inferred_modules[:12]
 
+        merged_gaps: list[str] = []
+        for item in selection_input.context_gaps + selection.context_gaps:
+            normalized = item.strip() if item else ""
+            if normalized and normalized not in merged_gaps:
+                merged_gaps.append(normalized)
+        selection.context_gaps = merged_gaps[:20]
+
+        strengths = [
+            item.strip()
+            for item in selection.evidence_summary.strengths
+            if item and item.strip()
+        ]
+        caution_signals = [
+            item.strip()
+            for item in selection.evidence_summary.caution_signals
+            if item and item.strip()
+        ]
+        selection.evidence_summary.strengths = strengths[:12]
+        selection.evidence_summary.caution_signals = caution_signals[:12]
+
         selection.context_sources_used = CodeContextSourcesUsed(
             used_project_memory=True,
             related_task_ids=[item.task_id for item in selection_input.related_tasks],
@@ -504,16 +598,7 @@ class CodeContextSelector:
             repository_paths_considered=selection_input.repository_index.total_files,
         )
 
-        return selection
-
-    def _validate_selection(
-        self,
-        selection: CodeContextSelectionResult,
-        selection_input: CodeContextSelectionInput,
-    ) -> None:
-        allowed_paths = {item.path for item in selection_input.repository_index.files}
-
-        all_paths = set(selection.candidate_file_pool)
+        total_unique_paths = set(selection.candidate_file_pool)
         for collection in (
             selection.primary_targets,
             selection.related_files,
@@ -521,18 +606,40 @@ class CodeContextSelector:
             selection.related_test_files,
         ):
             for item in collection:
-                all_paths.add(item.path)
+                total_unique_paths.add(item.path)
 
-        unknown = [path for path in all_paths if path not in allowed_paths]
-        if unknown:
-            raise CodeContextSelectorInternalError(
-                f"Model selected unknown repository paths: {unknown}"
-            )
+        if len(total_unique_paths) > selection_input.constraints.max_total_files:
+            ordered_paths = self._dedupe_paths(
+                [item.path for item in selection.primary_targets]
+                + [item.path for item in selection.related_files]
+                + [item.path for item in selection.reference_files]
+                + [item.path for item in selection.related_test_files]
+                + selection.candidate_file_pool
+            )[: selection_input.constraints.max_total_files]
+            selection.candidate_file_pool = ordered_paths
 
-        if len(all_paths) > selection_input.constraints.max_total_files:
-            raise CodeContextSelectorInternalError(
-                "Model selected more files than the allowed context limit."
+        if selection.repository_index.total_files if hasattr(selection, "repository_index") else False:
+            pass
+
+        return selection
+
+    def _build_primary_fallback(
+        self,
+        selection_input: CodeContextSelectionInput,
+    ) -> list[SelectedCodeFile]:
+        fallback: list[SelectedCodeFile] = []
+        for signal in selection_input.candidate_paths[: selection_input.constraints.max_primary_targets]:
+            fallback.append(
+                SelectedCodeFile(
+                    path=signal.path,
+                    role="target",
+                    why_selected="Recovered from existing candidate path signals because no valid existing primary target was selected.",
+                    selection_score=min(1.0, max(0.1, signal.score / 5.0)),
+                    expected_usage="Inspect as primary existing context for this task.",
+                    derived_from=signal.source_types[:6],
+                )
             )
+        return fallback
 
     @staticmethod
     def _artifact_summary(artifact: Artifact) -> str:
@@ -591,7 +698,7 @@ class CodeContextSelector:
         paths: list[str] = []
         for text in texts:
             paths.extend(self._extract_paths_from_text(text))
-        return list(dict.fromkeys(paths))
+        return self._dedupe_paths(paths)
 
     def _paths_for_task_memory(self, task_id: int, project_operational_context) -> set[str]:
         found: set[str] = set()
@@ -642,3 +749,70 @@ class CodeContextSelector:
         if not preview:
             return f"{path} is currently empty or has no short textual preview."
         return preview
+
+    @staticmethod
+    def _normalize_repo_path(path: str | None) -> str | None:
+        if not path:
+            return None
+
+        normalized = path.strip().replace("\\", "/")
+        normalized = re.sub(r"/{2,}", "/", normalized)
+
+        if not normalized:
+            return None
+        if normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized:
+            return None
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        if not normalized or normalized == ".":
+            return None
+
+        return normalized
+
+    @staticmethod
+    def _dedupe_paths(paths: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+
+        for path in paths:
+            normalized = CodeContextSelector._normalize_repo_path(path)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+
+        return result
+
+    @staticmethod
+    def _dedupe_selected_files(files: list[SelectedCodeFile]) -> list[SelectedCodeFile]:
+        deduped: list[SelectedCodeFile] = []
+        seen: set[tuple[str, str]] = set()
+
+        for item in files:
+            normalized_path = CodeContextSelector._normalize_repo_path(item.path)
+            if not normalized_path:
+                continue
+            key = (normalized_path, item.role)
+            if key in seen:
+                continue
+            seen.add(key)
+            item.path = normalized_path
+            deduped.append(item)
+
+        return deduped
+
+    @staticmethod
+    def _filter_existing_selected_files(
+        files: list[SelectedCodeFile],
+        existing_repo_paths: set[str],
+    ) -> tuple[list[SelectedCodeFile], list[str]]:
+        filtered: list[SelectedCodeFile] = []
+        dropped: list[str] = []
+
+        for item in CodeContextSelector._dedupe_selected_files(files):
+            if item.path in existing_repo_paths:
+                filtered.append(item)
+            else:
+                dropped.append(item.path)
+
+        return filtered, dropped

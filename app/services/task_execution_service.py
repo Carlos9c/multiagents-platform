@@ -45,7 +45,7 @@ from app.services.execution_runs import (
     mark_execution_run_succeeded,
 )
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
-from app.services.project_storage import ProjectStorageService
+from app.services.project_storage import CODE_DOMAIN, ProjectStorageService
 from app.services.task_validation_service import (
     TaskValidationServiceError,
     apply_validation_decision_to_task,
@@ -53,7 +53,6 @@ from app.services.task_validation_service import (
     validate_terminal_code_task,
 )
 from app.services.tasks import (
-    mark_task_awaiting_validation,
     mark_task_failed,
     mark_task_running,
 )
@@ -283,9 +282,6 @@ def _promote_validated_workspace_to_source(
 
     And before:
     - the final task status is persisted as completed
-
-    This keeps success semantics honest:
-    a task is not completed in the DB until its validated output has become source.
     """
     try:
         storage_service = ProjectStorageService()
@@ -293,6 +289,7 @@ def _promote_validated_workspace_to_source(
         workspace_runtime.promote_workspace_to_source(
             project_id=task.project_id,
             execution_run_id=run_id,
+            domain_name=CODE_DOMAIN,
         )
     except Exception as exc:
         mark_task_failed(db, task.id)
@@ -325,7 +322,6 @@ def _validate_after_execution(
     decision = validation_service_result.validation_result.decision
 
     if decision == CODE_VALIDATION_DECISION_COMPLETED:
-        mark_task_awaiting_validation(db, task.id)
         refreshed_task_for_promotion = _get_task_or_raise(db, task.id)
         _promote_validated_workspace_to_source(
             db=db,

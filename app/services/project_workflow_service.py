@@ -35,12 +35,6 @@ class ProjectWorkflowServiceError(Exception):
     """Base exception for project workflow orchestration failures."""
 
 
-ATOMIC_PARENT_PLANNING_PRIORITY = [
-    PLANNING_LEVEL_HIGH_LEVEL,
-    PLANNING_LEVEL_REFINED,
-]
-
-
 def _get_project_or_raise(db: Session, project_id: int) -> Project:
     project = db.get(Project, project_id)
     if not project:
@@ -49,18 +43,6 @@ def _get_project_or_raise(db: Session, project_id: int) -> Project:
 
 
 def _bootstrap_project_storage_for_execution(project_id: int) -> None:
-    """
-    Ensures the local project storage structure exists before the workflow
-    enters any execution-capable phase.
-
-    Current pragmatic decision:
-    - bootstrap universal project storage
-    - bootstrap code domain storage
-    - write/update a storage manifest
-
-    This is done at workflow start so storage failures happen early and
-    predictably, instead of appearing mid-execution.
-    """
     try:
         storage_service = ProjectStorageService()
         storage_service.ensure_project_storage(project_id)
@@ -146,13 +128,6 @@ def _get_pending_atomic_generation_parents(
     project_id: int,
     planning_level: str,
 ) -> list[Task]:
-    """
-    Returns pending parent tasks that still need atomic children.
-
-    Important:
-    - we do NOT regenerate atomic tasks for parents that already have atomic children
-    - this keeps the workflow idempotent and safe across re-runs
-    """
     candidate_tasks = _get_pending_tasks_at_level(
         db=db,
         project_id=project_id,
@@ -180,18 +155,6 @@ def _run_optional_technical_refinement_phase(
     *,
     enable_technical_refinement: bool,
 ) -> bool:
-    """
-    Optional refinement policy.
-
-    Behavior:
-    - when disabled:
-      - workflow skips creating new refined tasks
-      - legacy refined tasks remain supported downstream
-      - we still report the phase as completed because it was intentionally bypassed
-    - when enabled:
-      - pending high-level tasks are refined
-      - legacy refined tasks remain valid
-    """
     if not enable_technical_refinement:
         return True
 
@@ -220,24 +183,6 @@ def _run_atomic_generation_phase(
     *,
     enable_technical_refinement: bool,
 ) -> bool:
-    """
-    Atomic generation policy with compatibility support.
-
-    When technical refinement is disabled:
-    - first atomize pending high-level parents directly
-    - then consume any pending legacy refined parents
-
-    When technical refinement is enabled:
-    - first atomize refined parents created by the refiner
-    - then consume any remaining high-level parents that still need direct atomization
-      as a safety fallback
-    - legacy refined parents are also supported
-
-    The returned boolean means:
-    - atomic generation phase is satisfied for the current workflow run
-    - either because atomic tasks already exist, or because all eligible parents
-      were processed successfully
-    """
     if enable_technical_refinement:
         parent_levels_in_order = [
             PLANNING_LEVEL_REFINED,
@@ -283,18 +228,6 @@ def _execute_batch_tasks_synchronously(
     db: Session,
     batch_task_ids: list[int],
 ) -> None:
-    """
-    Executes each task in the batch synchronously.
-
-    Important semantic contract:
-    execute_task_sync(...) performs the full local task pipeline:
-    - execution
-    - validation
-    - final task-state consolidation
-
-    Therefore, when this function returns successfully for a task, that task
-    must already be in a terminal state suitable for post-batch processing.
-    """
     for task_id in batch_task_ids:
         try:
             result = execute_task_sync(db=db, task_id=task_id)
@@ -318,10 +251,6 @@ def _process_batch_after_terminal_tasks(
     current_finalization_iteration_count: int,
     max_finalization_iterations: int,
 ):
-    """
-    Runs post-batch processing only after the batch tasks have completed
-    execution+validation and are in terminal task states.
-    """
     try:
         return process_batch_after_execution(
             db=db,
@@ -347,7 +276,6 @@ def _run_execution_iteration(
     iteration_number: int,
 ) -> tuple[WorkflowIterationSummary, str, int]:
     processed_batch_ids: list[str] = []
-    blocked = False
     reopened_finalization = False
     manual_review_required = False
     resulting_status = "execution_in_progress"
@@ -373,38 +301,35 @@ def _run_execution_iteration(
 
         if post_batch_result.requires_manual_review or post_batch_result.finalization_guard_triggered:
             manual_review_required = True
-            blocked = True
             resulting_status = "awaiting_manual_review"
-            break
-
-        if post_batch_result.status == "finalization_reopened":
-            reopened_finalization = True
-            blocked = True
-            resulting_status = "execution_in_progress"
-            break
-
-        if post_batch_result.requires_replanning:
-            blocked = True
-            resulting_status = "awaiting_manual_review"
-            manual_review_required = True
-            break
-
-        if post_batch_result.requires_resequencing:
-            blocked = True
-            reopened_finalization = True
-            resulting_status = "execution_in_progress"
             break
 
         if post_batch_result.status == "project_stage_closed":
             resulting_status = "stage_closed"
-            blocked = False
             break
 
-        if not post_batch_result.continue_execution:
-            blocked = True
-            resulting_status = "awaiting_manual_review"
-            manual_review_required = True
+        if post_batch_result.status == "finalization_reopened":
+            reopened_finalization = True
+            resulting_status = "execution_in_progress"
             break
+
+        # Important:
+        # replanning/resequencing should not automatically become manual review.
+        # If post-batch asks for automatic structural correction, allow a new iteration.
+        if post_batch_result.requires_replanning or post_batch_result.requires_resequencing:
+            reopened_finalization = True
+            resulting_status = "execution_in_progress"
+            break
+
+        # If evaluator explicitly allows continuing, move to next batch in same iteration.
+        if post_batch_result.continue_execution:
+            continue
+
+        # If execution cannot continue, but no automatic action was requested and no
+        # stage closure happened, this is a true manual-review situation.
+        manual_review_required = True
+        resulting_status = "awaiting_manual_review"
+        break
 
     iteration_summary = WorkflowIterationSummary(
         iteration_number=iteration_number,
@@ -415,8 +340,10 @@ def _run_execution_iteration(
         notes=(
             "Iteration ended because the stage was closed."
             if resulting_status == "stage_closed"
-            else "Iteration ended because a new sequence or manual review is required."
-            if blocked
+            else "Iteration ended because an automatic resequencing/replanning step is required."
+            if reopened_finalization
+            else "Iteration ended because manual review is required."
+            if manual_review_required
             else "Iteration completed."
         ),
     )
@@ -431,14 +358,6 @@ def run_project_workflow(
     max_finalization_iterations: int = 2,
     enable_technical_refinement: bool = False,
 ) -> ProjectWorkflowResult:
-    """
-    End-to-end workflow orchestration.
-
-    Current recommended policy:
-    - planner -> atomic direct by default
-    - optional technical refinement can be enabled for large/complex projects
-    - legacy refined tasks remain supported regardless of the active policy
-    """
     _get_project_or_raise(db=db, project_id=project_id)
     _bootstrap_project_storage_for_execution(project_id=project_id)
 
@@ -549,7 +468,8 @@ def run_project_workflow(
     elif manual_review_required:
         notes = (
             "Project workflow stopped awaiting manual review. "
-            "This may be due to recovery/evaluation decisions, empty sequencing, or workflow iteration limits."
+            "This may be due to evaluator decisions that explicitly require human intervention, "
+            "empty sequencing, unrecoverable blocking states, or workflow iteration limits."
         )
     else:
         notes = (
