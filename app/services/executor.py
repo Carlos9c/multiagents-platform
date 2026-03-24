@@ -1,17 +1,25 @@
+import re
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.execution_engine import (
+    ExecutionEngineError,
+    ExecutionEngineRejectedError,
+    get_execution_engine,
+)
+from app.execution_engine.contracts import (
+    EXECUTION_DECISION_COMPLETED,
+    EXECUTION_DECISION_FAILED,
+    EXECUTION_DECISION_PARTIAL,
+    EXECUTION_DECISION_REJECTED,
+)
+from app.execution_engine.request_adapter import build_execution_request
+from app.models.task import Task
 from app.schemas.code_execution import (
     CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
     CODE_EXECUTION_STATUS_FAILED,
     CODE_EXECUTION_STATUS_REJECTED,
-)
-from app.models.task import Task
-from app.services.code_executor import (
-    CodeExecutorInternalError,
-    CodeExecutorRejectedError,
-    LocalCodeExecutor,
 )
 
 
@@ -64,13 +72,21 @@ class ExecutorResult:
     validation_notes: str
 
 
+def _extract_artifact_id(artifact_refs: list[str]) -> int | None:
+    for item in reversed(artifact_refs):
+        match = re.search(r"artifact_id=(\d+)", item)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def execute_atomic_task(
     db: Session,
     task: Task,
     execution_run_id: int,
 ) -> ExecutorResult:
     """
-    Compatibility facade over the code executor.
+    Compatibility facade over the execution engine.
 
     Valid outcomes:
       - awaiting_validation
@@ -78,77 +94,127 @@ def execute_atomic_task(
       - failed
     """
     try:
-        executor = LocalCodeExecutor(db=db)
-        result = executor.execute(task=task, execution_run_id=execution_run_id)
-
-        persisted_artifact_ids = [
-            note.split("artifact_id=")[-1].strip(".")
-            for note in result.journal.notes_for_validator
-            if "artifact_id=" in note
-        ]
-        artifact_id = int(persisted_artifact_ids[-1]) if persisted_artifact_ids else None
-
-        return ExecutorResult(
-            status=CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
-            artifact_type="code_executor_result",
-            output_snapshot=result.output_snapshot or "code_executor_result_created",
-            artifact_id=artifact_id,
-            work_summary=result.journal.summary,
-            work_details=result.edit_plan.summary,
-            artifacts_created=(
-                f"code_executor_result:{artifact_id}" if artifact_id is not None else None
-            ),
-            completed_scope=result.journal.claimed_completed_scope,
-            remaining_scope=result.journal.claimed_remaining_scope,
-            blockers_found=(
-                "; ".join(result.journal.encountered_uncertainties)
-                if result.journal.encountered_uncertainties
-                else None
-            ),
-            validation_notes="; ".join(result.journal.notes_for_validator),
+        request = build_execution_request(
+            db=db,
+            task=task,
+            execution_run_id=execution_run_id,
         )
+        engine = get_execution_engine(db)
+        result = engine.execute(request)
 
-    except CodeExecutorRejectedError as exc:
-        return ExecutorResult(
-            status=CODE_EXECUTION_STATUS_REJECTED,
-            artifact_type=None,
-            output_snapshot="code_executor_rejected",
-            artifact_id=None,
-            work_summary=exc.message,
-            work_details="The executor deliberately rejected the task before execution.",
-            artifacts_created=None,
-            completed_scope=None,
-            remaining_scope=exc.remaining_scope,
-            blockers_found=exc.blockers_found,
-            validation_notes=(
-                "Execution was rejected at the executor boundary. "
-                "The task needs redefinition, richer context, or reassignment."
-            ),
-        )
+        artifact_id = _extract_artifact_id(result.evidence.artifacts_created)
 
-    except CodeExecutorInternalError as exc:
+        if result.decision in {
+            EXECUTION_DECISION_PARTIAL,
+            EXECUTION_DECISION_COMPLETED,
+        }:
+            return ExecutorResult(
+                status=CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
+                artifact_type="execution_engine_result",
+                output_snapshot=result.output_snapshot or "execution_engine_result_created",
+                artifact_id=artifact_id,
+                work_summary=result.summary,
+                work_details=result.details or result.summary,
+                artifacts_created=(
+                    f"execution_engine_result:{artifact_id}" if artifact_id is not None else None
+                ),
+                completed_scope=result.completed_scope,
+                remaining_scope=result.remaining_scope,
+                blockers_found=(
+                    "; ".join(result.blockers_found) if result.blockers_found else None
+                ),
+                validation_notes="; ".join(result.validation_notes),
+            )
+
+        if result.decision == EXECUTION_DECISION_REJECTED:
+            return ExecutorResult(
+                status=CODE_EXECUTION_STATUS_REJECTED,
+                artifact_type=None,
+                output_snapshot=result.output_snapshot or "execution_engine_rejected",
+                artifact_id=None,
+                work_summary=result.summary,
+                work_details=result.details or "The execution engine deliberately rejected the task.",
+                artifacts_created=None,
+                completed_scope=result.completed_scope,
+                remaining_scope=result.remaining_scope,
+                blockers_found=(
+                    "; ".join(result.blockers_found) if result.blockers_found else None
+                ),
+                validation_notes="; ".join(result.validation_notes),
+            )
+
+        if result.decision == EXECUTION_DECISION_FAILED:
+            return ExecutorResult(
+                status=CODE_EXECUTION_STATUS_FAILED,
+                artifact_type=None,
+                output_snapshot=result.output_snapshot or "execution_engine_failed",
+                artifact_id=None,
+                work_summary=result.summary,
+                work_details=result.details or "The execution engine attempted execution and failed.",
+                artifacts_created=None,
+                completed_scope=result.completed_scope,
+                remaining_scope=result.remaining_scope,
+                blockers_found=(
+                    "; ".join(result.blockers_found) if result.blockers_found else None
+                ),
+                validation_notes="; ".join(result.validation_notes),
+            )
+
         return ExecutorResult(
             status=CODE_EXECUTION_STATUS_FAILED,
             artifact_type=None,
-            output_snapshot="code_executor_failed",
+            output_snapshot="execution_engine_failed",
             artifact_id=None,
-            work_summary=exc.message,
-            work_details="The executor attempted execution and failed internally.",
+            work_summary=f"Unsupported execution engine decision: {result.decision}",
+            work_details="The compatibility facade received an unsupported engine decision.",
             artifacts_created=None,
             completed_scope=None,
             remaining_scope=None,
             blockers_found=None,
-            validation_notes=f"Internal execution failure. failure_code={exc.failure_code}",
+            validation_notes="Unsupported execution engine decision.",
+        )
+
+    except ExecutionEngineRejectedError as exc:
+        return ExecutorResult(
+            status=CODE_EXECUTION_STATUS_REJECTED,
+            artifact_type=None,
+            output_snapshot="execution_engine_rejected",
+            artifact_id=None,
+            work_summary=exc.message,
+            work_details="The execution engine deliberately rejected the task before execution.",
+            artifacts_created=None,
+            completed_scope=None,
+            remaining_scope=exc.remaining_scope,
+            blockers_found="; ".join(exc.blockers_found) if exc.blockers_found else None,
+            validation_notes="; ".join(
+                exc.validation_notes
+                or ["Execution was rejected at the execution engine boundary."]
+            ),
+        )
+
+    except ExecutionEngineError as exc:
+        return ExecutorResult(
+            status=CODE_EXECUTION_STATUS_FAILED,
+            artifact_type=None,
+            output_snapshot="execution_engine_failed",
+            artifact_id=None,
+            work_summary=str(exc),
+            work_details="The execution engine failed internally.",
+            artifacts_created=None,
+            completed_scope=None,
+            remaining_scope=None,
+            blockers_found=None,
+            validation_notes="Internal execution engine failure.",
         )
 
     except Exception as exc:
         return ExecutorResult(
             status=CODE_EXECUTION_STATUS_FAILED,
             artifact_type=None,
-            output_snapshot="code_executor_failed",
+            output_snapshot="execution_engine_failed",
             artifact_id=None,
             work_summary=f"Executor failed unexpectedly: {str(exc)}",
-            work_details="Unexpected executor failure outside the expected code executor flow.",
+            work_details="Unexpected executor failure outside the expected execution engine flow.",
             artifacts_created=None,
             completed_scope=None,
             remaining_scope=None,

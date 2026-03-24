@@ -1,7 +1,25 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app.execution_engine import (
+    ExecutionEngineError,
+    ExecutionEngineRejectedError,
+    get_execution_engine,
+)
+from app.execution_engine.contracts import (
+    CHANGE_TYPE_CREATED,
+    CHANGE_TYPE_DELETED,
+    CHANGE_TYPE_MODIFIED,
+    EXECUTION_DECISION_COMPLETED,
+    EXECUTION_DECISION_FAILED,
+    EXECUTION_DECISION_PARTIAL,
+    EXECUTION_DECISION_REJECTED,
+    ExecutionRequest,
+    ExecutionResult,
+)
+from app.execution_engine.request_adapter import build_execution_request
 from app.models.execution_run import (
     FAILURE_TYPE_INTERNAL,
     RECOVERY_ACTION_MANUAL_REVIEW,
@@ -30,11 +48,6 @@ from app.schemas.code_validation import (
     CODE_VALIDATION_DECISION_COMPLETED,
     CODE_VALIDATION_DECISION_FAILED,
     CODE_VALIDATION_DECISION_PARTIAL,
-)
-from app.services.code_executor import (
-    CodeExecutorInternalError,
-    CodeExecutorRejectedError,
-    LocalCodeExecutor,
 )
 from app.services.execution_runs import (
     create_execution_run,
@@ -271,6 +284,125 @@ def _build_synthetic_executor_result(
     )
 
 
+def _map_engine_decision_to_execution_status(decision: str) -> str:
+    if decision in {EXECUTION_DECISION_PARTIAL, EXECUTION_DECISION_COMPLETED}:
+        # El engine termina su resolución operativa, pero el cierre real sigue perteneciendo al validator.
+        return CODE_EXECUTION_STATUS_AWAITING_VALIDATION
+    if decision == EXECUTION_DECISION_FAILED:
+        return CODE_EXECUTION_STATUS_FAILED
+    if decision == EXECUTION_DECISION_REJECTED:
+        return CODE_EXECUTION_STATUS_REJECTED
+
+    raise TaskExecutionServiceError(
+        f"Unsupported execution engine decision '{decision}'."
+    )
+
+
+def _build_executor_result_from_engine_result(
+    *,
+    task: Task,
+    request: ExecutionRequest,
+    result: ExecutionResult,
+) -> CodeExecutorResult:
+    created_files = [
+        item.path
+        for item in result.evidence.changed_files
+        if item.change_type == CHANGE_TYPE_CREATED
+    ]
+    modified_files = [
+        item.path
+        for item in result.evidence.changed_files
+        if item.change_type == CHANGE_TYPE_MODIFIED
+    ]
+    deleted_files = [
+        item.path
+        for item in result.evidence.changed_files
+        if item.change_type == CHANGE_TYPE_DELETED
+    ]
+
+    impacted_areas = sorted(
+        {
+            Path(path).parts[0] if Path(path).parts else path
+            for path in created_files + modified_files + deleted_files
+        }
+    )
+
+    validator_notes = list(result.validation_notes)
+    validator_notes.append(f"execution_engine_decision={result.decision}")
+    validator_notes.extend(result.evidence.artifacts_created)
+
+    return CodeExecutorResult(
+        task_id=task.id,
+        execution_status=_map_engine_decision_to_execution_status(result.decision),
+        input=CodeExecutorInput(
+            task_id=task.id,
+            project_id=task.project_id,
+            title=request.task_title,
+            description=request.task_description,
+            objective=request.objective,
+            acceptance_criteria=request.acceptance_criteria,
+            technical_constraints=request.technical_constraints,
+            out_of_scope=request.out_of_scope,
+            execution_goal=(
+                request.objective
+                or request.task_summary
+                or request.task_description
+                or f"Execute task {task.id}: {task.title}"
+            ),
+            repo_root=request.context.workspace_path,
+            relevant_decisions=request.context.key_decisions,
+            candidate_modules=[],
+            candidate_files=request.context.relevant_files,
+            primary_targets=request.allowed_paths,
+            related_files=request.context.relevant_files,
+            reference_files=[],
+            related_test_files=[],
+            relevant_symbols=[],
+            unresolved_questions=[],
+            selection_rationale=(
+                "Execution request adapted from execution_engine boundary "
+                "into legacy validator-compatible executor result."
+            ),
+            selection_confidence=1.0,
+        ),
+        working_set=CodeWorkingSet(
+            repo_root=request.context.workspace_path,
+            target_files=request.allowed_paths,
+            related_files=request.context.relevant_files,
+            reference_files=[],
+            test_files=[],
+            files=[],
+            repo_guidance=[],
+        ),
+        edit_plan=CodeFileEditPlan(
+            task_id=task.id,
+            summary=result.details or result.summary,
+            planned_changes=[],
+            assumptions=[],
+            local_risks=[],
+            notes=list(result.evidence.notes),
+        ),
+        workspace_changes=WorkspaceChangeSet(
+            created_files=created_files,
+            modified_files=modified_files,
+            deleted_files=deleted_files,
+            renamed_files=[],
+            diff_summary=None,
+            impacted_areas=impacted_areas,
+        ),
+        journal=ExecutionJournal(
+            task_id=task.id,
+            summary=result.summary,
+            local_decisions=[],
+            claimed_completed_scope=result.completed_scope,
+            claimed_remaining_scope=result.remaining_scope,
+            encountered_uncertainties=list(result.blockers_found),
+            notes_for_validator=validator_notes,
+        ),
+        output_snapshot=result.output_snapshot,
+    )
+
+
 def _promote_validated_workspace_to_source(
     db: Session,
     *,
@@ -451,15 +583,23 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         mark_execution_run_started(db, run_id)
         mark_task_running(db, task.id)
 
-        executor = LocalCodeExecutor(db=db)
-        executor_result = executor.execute(
+        execution_request = build_execution_request(
+            db=db,
             task=task,
             execution_run_id=run_id,
+        )
+        execution_engine = get_execution_engine(db)
+        engine_result = execution_engine.execute(execution_request)
+
+        executor_result = _build_executor_result_from_engine_result(
+            task=task,
+            request=execution_request,
+            result=engine_result,
         )
 
         if executor_result.execution_status not in VALID_EXECUTOR_FINAL_STATUSES:
             raise TaskExecutionServiceError(
-                f"Unsupported executor result status '{executor_result.execution_status}' returned by executor. "
+                f"Unsupported executor result status '{executor_result.execution_status}' returned by execution engine. "
                 f"Allowed statuses: {sorted(VALID_EXECUTOR_FINAL_STATUSES)}"
             )
 
@@ -492,9 +632,9 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             mark_execution_run_failed(
                 db=db,
                 run_id=run_id,
-                error_message=executor_result.journal.summary or "Executor reported a failed execution.",
+                error_message=executor_result.journal.summary or "Execution engine reported a failed execution.",
                 failure_type=FAILURE_TYPE_INTERNAL,
-                failure_code="executor_failed",
+                failure_code="execution_engine_failed",
                 recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
                 work_summary=executor_result.journal.summary,
                 work_details=executor_result.edit_plan.summary,
@@ -525,8 +665,8 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             mark_execution_run_rejected(
                 db=db,
                 run_id=run_id,
-                error_message=executor_result.journal.summary or "Executor rejected the task.",
-                failure_code="executor_rejected",
+                error_message=executor_result.journal.summary or "Execution engine rejected the task.",
+                failure_code="execution_engine_rejected",
                 recovery_action=RECOVERY_ACTION_REATOMIZE,
                 work_summary=executor_result.journal.summary,
                 work_details=executor_result.edit_plan.summary,
@@ -551,7 +691,9 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
     except TaskExecutionServiceError:
         raise
 
-    except CodeExecutorRejectedError as exc:
+    except ExecutionEngineRejectedError as exc:
+        blockers_found = "; ".join(exc.blockers_found) if exc.blockers_found else None
+
         mark_execution_run_rejected(
             db=db,
             run_id=run_id,
@@ -559,9 +701,11 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             failure_code=exc.failure_code,
             recovery_action=RECOVERY_ACTION_REATOMIZE,
             work_summary=exc.message,
-            work_details="The executor deliberately rejected the task before execution.",
-            blockers_found=exc.blockers_found,
-            validation_notes="Execution was rejected at the executor boundary.",
+            work_details="The execution engine deliberately rejected the task before execution.",
+            blockers_found=blockers_found,
+            validation_notes="; ".join(
+                exc.validation_notes or ["Execution was rejected at the execution engine boundary."]
+            ),
         )
         mark_task_failed(db, task.id)
 
@@ -569,11 +713,12 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             task=task,
             execution_status=CODE_EXECUTION_STATUS_REJECTED,
             summary=exc.message,
-            work_details="The executor deliberately rejected the task before execution.",
+            work_details="The execution engine deliberately rejected the task before execution.",
             remaining_scope=exc.remaining_scope,
-            blockers_found=exc.blockers_found,
-            validation_notes=[
-                "Execution was rejected at the executor boundary.",
+            blockers_found=blockers_found,
+            validation_notes=list(exc.validation_notes)
+            + [
+                "Execution was rejected at the execution engine boundary.",
                 f"failure_code={exc.failure_code}",
             ],
             output_snapshot=None,
@@ -588,28 +733,28 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             message="Execution was rejected before validation, and a synthetic terminal validation artifact was persisted.",
         )
 
-    except CodeExecutorInternalError as exc:
+    except ExecutionEngineError as exc:
         mark_execution_run_failed(
             db=db,
             run_id=run_id,
-            error_message=exc.message,
+            error_message=str(exc),
             failure_type=FAILURE_TYPE_INTERNAL,
-            failure_code=exc.failure_code,
+            failure_code="execution_engine_error",
             recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
-            validation_notes="Internal execution failure.",
+            validation_notes="Execution engine internal failure.",
         )
         mark_task_failed(db, task.id)
 
         synthetic_result = _build_synthetic_executor_result(
             task=task,
             execution_status=CODE_EXECUTION_STATUS_FAILED,
-            summary=exc.message,
-            work_details="The code executor raised an internal error before producing a normal result.",
+            summary=str(exc),
+            work_details="The execution engine raised an internal error before producing a normal result.",
             remaining_scope="Task execution stopped before a valid operational pass completed.",
-            blockers_found="Internal executor failure.",
+            blockers_found="Internal execution engine failure.",
             validation_notes=[
-                "Internal execution failure.",
-                f"failure_code={exc.failure_code}",
+                "Execution engine internal failure.",
+                "failure_code=execution_engine_error",
             ],
             output_snapshot=None,
         )
