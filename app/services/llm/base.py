@@ -11,4 +11,12 @@ class LLMProvider(ABC):
         schema_name: str,
         json_schema: dict[str, Any],
     ) -> dict[str, Any]:
+        """
+        Execute one structured LLM call and return the parsed JSON object.
+
+        Notes:
+        - Implementations should raise on transport/provider failures.
+        - Implementations should raise on empty or invalid structured responses.
+        - Callers are responsible for any semantic/schema-level retry policy.
+        """
         raise NotImplementedError
