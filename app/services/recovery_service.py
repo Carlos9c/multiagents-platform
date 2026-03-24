@@ -7,7 +7,10 @@ from app.models.artifact import Artifact
 from app.models.execution_run import ExecutionRun
 from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
+    TERMINAL_TASK_STATUSES,
     Task,
 )
 from app.schemas.recovery import (
@@ -62,6 +65,26 @@ def _get_source_entities_or_raise(
     return run, task
 
 
+def _ensure_source_task_is_recoverable(source_task: Task) -> None:
+    if source_task.planning_level != PLANNING_LEVEL_ATOMIC:
+        raise RecoveryServiceError(
+            f"Recovery can only materialize decisions for atomic tasks. "
+            f"Task {source_task.id} has planning_level='{source_task.planning_level}'."
+        )
+
+    if source_task.status not in TERMINAL_TASK_STATUSES:
+        raise RecoveryServiceError(
+            f"Recovery requires the source task to be terminal before materialization. "
+            f"Task {source_task.id} has status='{source_task.status}'."
+        )
+
+    if source_task.status not in {TASK_STATUS_FAILED, TASK_STATUS_PARTIAL}:
+        raise RecoveryServiceError(
+            f"Recovery only applies to failed or partial atomic tasks. "
+            f"Task {source_task.id} has status='{source_task.status}'."
+        )
+
+
 def _infer_parent_task_id_for_created_tasks(source_task: Task) -> int:
     return source_task.parent_task_id or source_task.id
 
@@ -98,28 +121,6 @@ def _build_created_task_from_recovery(
     )
 
 
-def _reopen_source_task_for_retry(
-    db: Session,
-    *,
-    source_task: Task,
-    decision: RecoveryDecision,
-) -> Task:
-    source_task.status = TASK_STATUS_PENDING
-    source_task.is_blocked = False
-    source_task.blocking_reason = None
-
-    if decision.execution_guidance:
-        source_task.implementation_notes = (
-            (source_task.implementation_notes or "").strip() + "\n\n"
-            + f"Retry guidance: {decision.execution_guidance.strip()}"
-        ).strip()
-
-    db.add(source_task)
-    db.commit()
-    db.refresh(source_task)
-    return source_task
-
-
 def _build_source_task_summary(
     *,
     source_task: Task,
@@ -134,6 +135,7 @@ def _build_source_task_summary(
             "objective": source_task.objective,
             "task_type": source_task.task_type,
             "planning_level": source_task.planning_level,
+            "status": source_task.status,
             "acceptance_criteria": source_task.acceptance_criteria,
             "technical_constraints": source_task.technical_constraints,
             "out_of_scope": source_task.out_of_scope,
@@ -222,29 +224,30 @@ def materialize_recovery_decision(
             f"Source task {source_task.id} does not belong to project {project_id}."
         )
 
+    _ensure_source_task_is_recoverable(source_task)
+    original_status = source_task.status
+
     if decision.action == "manual_review":
         if decision.created_tasks:
             raise RecoveryServiceError(
                 "Recovery action 'manual_review' must not contain created tasks."
             )
+
+        db.refresh(source_task)
+        if source_task.status != original_status:
+            raise RecoveryServiceError(
+                f"Recovery integrity error: source task {source_task.id} changed status from "
+                f"'{original_status}' to '{source_task.status}' during manual_review materialization."
+            )
+
         return []
 
     if decision.action == "retry":
-        if decision.created_tasks:
-            raise RecoveryServiceError(
-                "Recovery action 'retry' must not contain created tasks."
-            )
-        if not decision.retry_same_task:
-            raise RecoveryServiceError(
-                "Recovery action 'retry' requires retry_same_task=true."
-            )
-
-        _reopen_source_task_for_retry(
-            db=db,
-            source_task=source_task,
-            decision=decision,
+        raise RecoveryServiceError(
+            "Recovery action 'retry' is not supported in the current workflow. "
+            "The source atomic task must remain terminal. Use 'reatomize' or "
+            "'insert_followup' to create new tasks instead."
         )
-        return []
 
     if decision.action not in {"reatomize", "insert_followup"}:
         raise RecoveryServiceError(f"Unsupported recovery action '{decision.action}'.")
@@ -282,6 +285,15 @@ def materialize_recovery_decision(
 
     db.flush()
     db.commit()
+
+    db.refresh(source_task)
+
+    if source_task.status != original_status:
+        raise RecoveryServiceError(
+            f"Recovery integrity error: source task {source_task.id} changed status from "
+            f"'{original_status}' to '{source_task.status}' after creating follow-up tasks. "
+            "The original atomic task must remain terminal."
+        )
 
     return created_tasks
 

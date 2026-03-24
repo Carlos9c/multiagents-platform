@@ -46,6 +46,10 @@ from app.services.execution_runs import (
 )
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_storage import CODE_DOMAIN, ProjectStorageService
+from app.services.task_hierarchy_reconciliation_service import (
+    TaskHierarchyReconciliationServiceError,
+    reconcile_task_hierarchy_after_changes,
+)
 from app.services.task_validation_service import (
     TaskValidationServiceError,
     apply_validation_decision_to_task,
@@ -298,6 +302,22 @@ def _promote_validated_workspace_to_source(
         ) from exc
 
 
+def _reconcile_hierarchy_or_raise(
+    db: Session,
+    *,
+    affected_task_ids: list[int],
+) -> None:
+    try:
+        reconcile_task_hierarchy_after_changes(
+            db=db,
+            affected_task_ids=affected_task_ids,
+        )
+    except TaskHierarchyReconciliationServiceError as exc:
+        raise TaskExecutionServiceError(
+            f"Task hierarchy reconciliation failed after terminal task update: {str(exc)}"
+        ) from exc
+
+
 def _validate_after_execution(
     db: Session,
     *,
@@ -356,6 +376,11 @@ def _validate_after_execution(
             f"Unsupported validation decision '{decision}'."
         )
 
+    _reconcile_hierarchy_or_raise(
+        db=db,
+        affected_task_ids=[task.id],
+    )
+
     refreshed_task = _get_task_or_raise(db, task.id)
 
     return _build_sync_result(
@@ -392,6 +417,11 @@ def _finalize_prevalidation_terminal_outcome(
             "Execution reached a terminal state before validation, and the service "
             f"could not persist the required validation artifact for task {task.id}: {str(exc)}"
         ) from exc
+
+    _reconcile_hierarchy_or_raise(
+        db=db,
+        affected_task_ids=[task.id],
+    )
 
     refreshed_task = _get_task_or_raise(db, task.id)
 

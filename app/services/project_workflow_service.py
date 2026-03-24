@@ -224,11 +224,55 @@ def _run_atomic_generation_phase(
     return False
 
 
+def _get_task_or_raise(db: Session, task_id: int) -> Task:
+    task = db.get(Task, task_id)
+    if not task:
+        raise ProjectWorkflowServiceError(f"Task {task_id} not found")
+    return task
+
+
+def _assert_batch_task_is_atomic(
+    db: Session,
+    *,
+    task_id: int,
+    batch_id: str | None = None,
+    plan_version: int | None = None,
+) -> Task:
+    task = _get_task_or_raise(db, task_id)
+
+    if task.planning_level != PLANNING_LEVEL_ATOMIC:
+        location_parts: list[str] = []
+        if batch_id is not None:
+            location_parts.append(f"batch '{batch_id}'")
+        if plan_version is not None:
+            location_parts.append(f"plan version {plan_version}")
+
+        location_suffix = f" in {' / '.join(location_parts)}" if location_parts else ""
+
+        raise ProjectWorkflowServiceError(
+            f"Execution plan integrity error{location_suffix}: task {task.id} has planning_level "
+            f"'{task.planning_level}'. Only atomic tasks may be executed. Parent tasks must be "
+            "resolved deterministically from their children and must never reach the executor."
+        )
+
+    return task
+
+
 def _execute_batch_tasks_synchronously(
     db: Session,
     batch_task_ids: list[int],
+    *,
+    batch_id: str | None = None,
+    plan_version: int | None = None,
 ) -> None:
     for task_id in batch_task_ids:
+        _assert_batch_task_is_atomic(
+            db=db,
+            task_id=task_id,
+            batch_id=batch_id,
+            plan_version=plan_version,
+        )
+
         try:
             result = execute_task_sync(db=db, task_id=task_id)
 
@@ -285,6 +329,8 @@ def _run_execution_iteration(
         _execute_batch_tasks_synchronously(
             db=db,
             batch_task_ids=batch.task_ids,
+            batch_id=batch.batch_id,
+            plan_version=plan.plan_version,
         )
 
         post_batch_result = _process_batch_after_terminal_tasks(
@@ -313,20 +359,14 @@ def _run_execution_iteration(
             resulting_status = "execution_in_progress"
             break
 
-        # Important:
-        # replanning/resequencing should not automatically become manual review.
-        # If post-batch asks for automatic structural correction, allow a new iteration.
         if post_batch_result.requires_replanning or post_batch_result.requires_resequencing:
             reopened_finalization = True
             resulting_status = "execution_in_progress"
             break
 
-        # If evaluator explicitly allows continuing, move to next batch in same iteration.
         if post_batch_result.continue_execution:
             continue
 
-        # If execution cannot continue, but no automatic action was requested and no
-        # stage closure happened, this is a true manual-review situation.
         manual_review_required = True
         resulting_status = "awaiting_manual_review"
         break

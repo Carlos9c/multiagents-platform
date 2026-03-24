@@ -35,6 +35,10 @@ from app.services.recovery_service import (
     merge_recovery_contexts,
     persist_recovery_decision,
 )
+from app.services.task_hierarchy_reconciliation_service import (
+    TaskHierarchyReconciliationServiceError,
+    reconcile_task_hierarchy_after_changes,
+)
 
 TERMINAL_RUN_STATUSES = {
     EXECUTION_RUN_STATUS_SUCCEEDED,
@@ -175,6 +179,29 @@ def _require_validation_artifact_for_problematic_task(
             f"task {task.id} is '{task.status}' but has no '{CODE_VALIDATION_RESULT_ARTIFACT_TYPE}' artifact."
         )
     return validation_artifact
+
+
+def _require_recovery_source_task_remains_terminal(
+    db: Session,
+    *,
+    source_task_id: int,
+    batch_id: str,
+    plan_version: int,
+) -> Task:
+    refreshed_task = db.get(Task, source_task_id)
+    if refreshed_task is None:
+        raise PostBatchServiceError(
+            f"Batch '{batch_id}' in plan version {plan_version} lost source task {source_task_id} after recovery materialization."
+        )
+
+    if refreshed_task.status not in {TASK_STATUS_FAILED, TASK_STATUS_PARTIAL}:
+        raise PostBatchServiceError(
+            f"Recovery integrity error in batch '{batch_id}' plan version {plan_version}: "
+            f"source task {refreshed_task.id} ended with invalid status '{refreshed_task.status}' "
+            "after recovery materialization. The original atomic task must remain terminal."
+        )
+
+    return refreshed_task
 
 
 def _get_artifact_ids_for_tasks(
@@ -359,106 +386,94 @@ def _normalize_legacy_evaluation_outcome(evaluation_decision: Any) -> Normalized
 
 
 def _normalize_new_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
-    decision = _normalize_string(_read_attr(evaluation_decision, "decision"))
-    project_stage_closed = _normalize_bool(_read_attr(evaluation_decision, "project_stage_closed"), default=False)
-    manual_review_required = _normalize_bool(_read_attr(evaluation_decision, "manual_review_required"), default=False)
-    recovery_strategy = _normalize_string(_read_attr(evaluation_decision, "recovery_strategy"), default="none")
-    decision_summary = _normalize_string(_read_attr(evaluation_decision, "decision_summary"))
-    replan = _read_attr(evaluation_decision, "replan")
+    decision = _normalize_string(_read_attr(evaluation_decision, "decision"), "")
+    decision_summary = _normalize_string(_read_attr(evaluation_decision, "decision_summary"), "")
+    notes_list = _read_attr(evaluation_decision, "notes", None)
+
+    project_stage_closed = _normalize_bool(
+        _read_attr(evaluation_decision, "project_stage_closed"),
+        False,
+    )
+    manual_review_required = _normalize_bool(
+        _read_attr(evaluation_decision, "manual_review_required"),
+        False,
+    )
     followup_atomic_tasks_required = _normalize_bool(
         _read_attr(evaluation_decision, "followup_atomic_tasks_required"),
-        default=False,
+        False,
     )
 
+    recovery_strategy = _normalize_string(
+        _read_attr(evaluation_decision, "recovery_strategy"),
+        "none",
+    )
+
+    replan = _read_attr(evaluation_decision, "replan", None)
     replan_required = False
-    replan_level = None
     if replan is not None:
-        replan_required = _normalize_bool(_read_attr(replan, "required"), default=False)
-        replan_level = _normalize_string(_read_attr(replan, "level"))
+        replan_required = _normalize_bool(_read_attr(replan, "required"), False)
 
-    if decision == "stage_completed":
-        return NormalizedEvaluationOutcome(
-            continue_execution=False,
-            requires_replanning=False,
-            requires_resequencing=False,
-            requires_manual_review=False,
-            is_stage_closed=project_stage_closed,
-            reopened_finalization=False,
-            notes=decision_summary or "Stage evaluator closed the current stage.",
+    requires_replanning = replan_required
+    requires_resequencing = followup_atomic_tasks_required
+    reopened_finalization = False
+
+    is_stage_closed = project_stage_closed
+    requires_manual_review = manual_review_required
+
+    continue_execution = False
+
+    if decision == "continue":
+        continue_execution = True
+    elif decision == "stage_incomplete":
+        continue_execution = (
+            not is_stage_closed
+            and not requires_manual_review
+            and recovery_strategy == "none"
+            and not requires_replanning
+            and not requires_resequencing
         )
+    elif decision == "project_complete":
+        is_stage_closed = True
+        continue_execution = False
+    elif decision == "manual_review":
+        requires_manual_review = True
+        continue_execution = False
+    elif decision == "finalization_reopened":
+        reopened_finalization = True
+        continue_execution = False
 
-    if decision == "manual_review_required" or manual_review_required or recovery_strategy == "manual_review":
-        return NormalizedEvaluationOutcome(
-            continue_execution=False,
-            requires_replanning=False,
-            requires_resequencing=False,
-            requires_manual_review=True,
-            is_stage_closed=False,
-            reopened_finalization=False,
-            notes=decision_summary or "Stage evaluator requires manual review.",
-        )
+    if requires_replanning or requires_resequencing:
+        continue_execution = False
 
-    if recovery_strategy == "none":
-        # Important:
-        # none + not closed should generally mean the stage can continue or at least is not blocked
-        # by evaluator semantics alone. We keep continue_execution true here to avoid artificial
-        # checkpoint_blocked outcomes when evaluator simply does not request recovery.
-        return NormalizedEvaluationOutcome(
-            continue_execution=not project_stage_closed,
-            requires_replanning=False,
-            requires_resequencing=False,
-            requires_manual_review=False,
-            is_stage_closed=project_stage_closed,
-            reopened_finalization=False,
-            notes=decision_summary or "Stage evaluator returned no automatic recovery action.",
-        )
+    if requires_manual_review:
+        continue_execution = False
 
-    if recovery_strategy == "reatomize_failed_tasks":
-        return NormalizedEvaluationOutcome(
-            continue_execution=False,
-            requires_replanning=True,
-            requires_resequencing=True,
-            requires_manual_review=False,
-            is_stage_closed=False,
-            reopened_finalization=True,
-            notes=decision_summary or "Stage evaluator requested re-atomization of failed tasks.",
-        )
+    if is_stage_closed:
+        continue_execution = False
 
-    if recovery_strategy == "insert_followup_atomic_tasks" or followup_atomic_tasks_required:
-        return NormalizedEvaluationOutcome(
-            continue_execution=False,
-            requires_replanning=False,
-            requires_resequencing=True,
-            requires_manual_review=False,
-            is_stage_closed=False,
-            reopened_finalization=True,
-            notes=decision_summary or "Stage evaluator requested follow-up atomic tasks.",
-        )
+    notes_parts: list[str] = []
+    if decision_summary:
+        notes_parts.append(decision_summary)
 
-    if recovery_strategy == "replan_from_high_level":
-        if not replan_required or replan_level != "high_level":
-            raise PostBatchServiceError(
-                "Evaluator output is inconsistent: recovery_strategy='replan_from_high_level' "
-                "requires replan.required=true and replan.level='high_level'."
-            )
-        return NormalizedEvaluationOutcome(
-            continue_execution=False,
-            requires_replanning=True,
-            requires_resequencing=True,
-            requires_manual_review=False,
-            is_stage_closed=False,
-            reopened_finalization=True,
-            notes=decision_summary or "Stage evaluator requested high-level replanning.",
-        )
+    if isinstance(notes_list, list):
+        notes_parts.extend(str(item).strip() for item in notes_list if str(item).strip())
 
-    raise PostBatchServiceError(
-        f"Unsupported recovery_strategy '{recovery_strategy}' returned by stage evaluator."
+    notes = " ".join(notes_parts).strip() or "Checkpoint evaluation completed."
+
+    return NormalizedEvaluationOutcome(
+        continue_execution=continue_execution,
+        requires_replanning=requires_replanning,
+        requires_resequencing=requires_resequencing,
+        requires_manual_review=requires_manual_review,
+        is_stage_closed=is_stage_closed,
+        reopened_finalization=reopened_finalization,
+        notes=notes,
     )
 
 
 def _normalize_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
     if evaluation_decision is None:
-        raise PostBatchServiceError("Post-batch evaluation returned no decision object.")
+        raise PostBatchServiceError("Checkpoint evaluation returned no decision object.")
 
     if _is_new_stage_evaluation_output(evaluation_decision):
         return _normalize_new_evaluation_outcome(evaluation_decision)
@@ -471,12 +486,6 @@ def _degrade_illegal_stage_closure_for_non_final_batch(
     normalized: NormalizedEvaluationOutcome,
     is_final_batch: bool,
 ) -> NormalizedEvaluationOutcome:
-    """
-    Only the final batch of the current plan may close the stage automatically.
-
-    If evaluator closes the stage early on a non-final batch, we degrade that decision into
-    a safe continuation outcome instead of letting PostBatchResult become internally inconsistent.
-    """
     if is_final_batch or not normalized.is_stage_closed:
         return normalized
 
@@ -492,6 +501,27 @@ def _degrade_illegal_stage_closure_for_non_final_batch(
             "Stage closure was deferred because only the final batch can close the stage in the current workflow."
         ),
     )
+
+
+def _reconcile_hierarchy_after_batch_changes(
+    db: Session,
+    *,
+    executed_task_ids: list[int],
+    created_recovery_task_ids: list[int],
+) -> None:
+    affected_task_ids = list(
+        dict.fromkeys(executed_task_ids + created_recovery_task_ids)
+    )
+
+    try:
+        reconcile_task_hierarchy_after_changes(
+            db=db,
+            affected_task_ids=affected_task_ids,
+        )
+    except TaskHierarchyReconciliationServiceError as exc:
+        raise PostBatchServiceError(
+            f"Post-batch hierarchy reconciliation failed: {str(exc)}"
+        ) from exc
 
 
 def process_batch_after_execution(
@@ -516,6 +546,7 @@ def process_batch_after_execution(
     successful_task_ids: list[int] = []
     problematic_run_ids: list[int] = []
     recovery_contexts: list[RecoveryContext] = []
+    created_recovery_task_ids: list[int] = []
 
     next_batch_summary = _build_next_batch_summary(plan, batch_id)
     remaining_plan_summary = _build_remaining_plan_summary(plan, batch_id)
@@ -598,6 +629,16 @@ def process_batch_after_execution(
                 project_id=project_id,
                 decision=decision,
             )
+
+            _require_recovery_source_task_remains_terminal(
+                db=db,
+                source_task_id=task.id,
+                batch_id=batch_id,
+                plan_version=plan.plan_version,
+            )
+
+            created_recovery_task_ids.extend(task.id for task in created_tasks)
+
             recovery_contexts.append(
                 build_recovery_context_entry(
                     decision=decision,
@@ -614,12 +655,18 @@ def process_batch_after_execution(
                 f"unexpected terminal task status '{task.status}' for task {task.id}."
             )
 
+    _reconcile_hierarchy_after_batch_changes(
+        db=db,
+        executed_task_ids=executed_task_ids,
+        created_recovery_task_ids=created_recovery_task_ids,
+    )
+
     aggregated_recovery_context = merge_recovery_contexts(recovery_contexts)
 
     artifact_ids_since_last_checkpoint = _get_artifact_ids_for_tasks(
         db=db,
         project_id=project_id,
-        task_ids=executed_task_ids,
+        task_ids=executed_task_ids + created_recovery_task_ids,
     )
 
     evaluation_decision = evaluate_checkpoint(
