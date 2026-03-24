@@ -4,503 +4,402 @@
 
 Este proyecto implementa una **plataforma backend multiagente** cuyo objetivo es:
 
-> Transformar una idea de software en un sistema ejecutable de forma progresiva y autónoma.
+> Transformar una idea de software en un sistema ejecutable de forma progresiva, trazable y cada vez más autónoma.
 
-El sistema está diseñado para evolucionar hacia proyectos complejos mediante planificación jerárquica, descomposición progresiva, ejecución estructurada, recuperación automática ante fallos, evaluación por etapas y trazabilidad completa por proyecto.
+El sistema está diseñado para escalar hacia proyectos complejos mediante:
+
+- planificación jerárquica
+- descomposición progresiva
+- ejecución distribuida
+- evaluación estructurada
+- recuperación inteligente
+- trazabilidad completa por proyecto
 
 ---
 
-## 🏗️ Estado actual del proyecto
+# 🏗️ Estado actual del proyecto
 
-### ✅ Núcleo implementado
+## ✅ Núcleo implementado
 
-#### 📦 Projects
+### 📦 Projects
 
 - Multi-tenant por `project_id`
 - Aislamiento completo por proyecto
-- Inicialización automática del storage por proyecto
-
-#### 📋 Tasks
-
-- Jerarquía operativa actual:
-  - `high_level`
-  - `atomic`
-- Estados soportados:
-  - `pending`
-  - `running`
-  - `completed`
-  - `failed`
-  - `partial`
-  - `awaiting_validation`
-- Campos enriquecidos:
-  - `objective`
-  - `acceptance_criteria`
-  - `technical_constraints`
-  - `out_of_scope`
-  - `task_type`
-  - `priority`
-
-#### ⚙️ Execution Runs
-
-Cada ejecución genera un `ExecutionRun` con trazabilidad de:
-
-- `work_summary`
-- `work_details`
-- `blockers_found`
-- `validation_notes`
-- `failure_type`
-- `failure_code`
-- `recovery_action`
-
-#### 📁 Project Storage
-
-- Separación por dominios, actualmente con `CODE_DOMAIN`
-- Workspace aislado por ejecución
-- Promoción explícita `workspace -> source` tras validación exitosa
-- Bootstrap automático de storage al inicio del workflow
+- Base para ejecución concurrente
 
 ---
 
-## 🧩 Arquitectura actual
+### 📋 Tasks (modelo jerárquico estable)
 
-### 1. Planner
+- Jerarquía persistida:
+  - `high_level`
+  - `technical`
+  - `atomic`
 
-Genera tareas `high_level` a partir de la descripción del proyecto.
+- Relaciones parent-child persistidas
+- Estados bien definidos:
+  - `pending`
+  - `awaiting_validation`
+  - `completed`
+  - `partial`
+  - `failed`
 
-Responsabilidades actuales:
+---
 
-- estructurar el proyecto en workstreams relevantes
-- mantener nivel high-level
-- no generar tareas atómicas
-- no decidir ejecutor final
+### 🔄 Reglas de consolidación jerárquica
 
-### 2. Atomic Task Generator
+Implementado y validado mediante `task_hierarchy_service`.
 
-Convierte tareas `high_level` directamente en tareas `atomic`.
+Un parent:
+- pasa a `completed` si todas sus hijas están `completed`
+- pasa a `pending` si existe al menos una hija no terminal
+- pasa a `failed` si todas son terminales y al menos una es `failed`
+- pasa a `partial` si todas son terminales, ninguna es `failed` y alguna es `partial`
 
-Cambio estructural importante:
+Importante:
+- Recovery puede reabrir el parent a `pending` creando nuevas tasks
+- Nunca se ejecutan tasks no atómicas
+- Las tasks padre no llegan al executor; se resuelven determinísticamente por el estado de sus hijas
 
-Antes:
-`high_level -> refined -> atomic`
+---
 
-Ahora:
-`high_level -> atomic`
+### 🧠 Planner + Refiners
 
-Esto reduce coste, iteraciones y ambigüedad.
+Pipeline implementado:
 
-Mejoras implementadas:
+1. High-level planning
+2. Technical refinement
+3. Atomic task generation
 
-- el prompt ya está orientado a capacidades reales del `code_executor`
-- evita semántica “multi-executor futuro” en el flujo activo
-- busca entregables repo-based y file-based
-- reduce tareas no ejecutables
+Las atomic tasks ya incluyen:
+- objetivo claro
+- criterios de aceptación
+- constraints
+- tipo de ejecutor esperado a nivel orientativo
 
-### 3. Execution Sequencer
+---
 
-Genera batches y checkpoints a partir de las tareas atómicas.
+### ⚙️ Execution Plan
 
-Responsabilidades:
+- Generación de batches (`ExecutionPlan`)
+- Checkpoints obligatorios tras cada batch
+- Dependencias implícitas
+- Secuenciación controlada
 
-- ordenar la ejecución
-- agrupar trabajo por batches
-- definir checkpoints para evaluación posterior
+---
 
-### 4. Code Executor
+### ▶️ Ejecución (`task_execution_service`)
 
-Ejecuta tareas atómicas sobre workspace aislado.
+- Solo ejecuta tasks `atomic`
+- Flujo completo:
+  1. Executor
+  2. Validación
+  3. Persistencia
+  4. Reconciliación jerárquica
 
-Genera:
+- Rutas soportadas:
+  - `completed`
+  - `partial`
+  - `failed`
+  - `rejected`
 
-- cambios sobre archivos
-- journal de ejecución
-- edit plan
-- output snapshot
-- workspace changes
+Además:
+- en `completed` se promociona el workspace validado a source
+- tras cualquier cierre terminal se reconcilia la jerarquía
+- la ejecución no permite colar tasks no atómicas al executor
 
-### 5. Validation Service
+---
 
-Valida el resultado del executor y genera siempre `code_validation_result`.
+### 🔁 Recovery Service
 
-Fixes implementados:
+Soporta actualmente:
 
-- ya no quedan tareas fallidas sin artefacto de validación
-- existe validación terminal para fallos/rechazos pre-validación
-- separación entre validación normal y validación terminal
-
-### 6. Recovery Service
-
-Decide qué hacer cuando una tarea falla o queda parcial.
-
-Contrato operativo actual:
-
-- `retry`
 - `reatomize`
 - `insert_followup`
 - `manual_review`
 
-Mejoras implementadas:
+Invariantes clave fijadas:
+- la task original debe permanecer terminal
+- recovery no debe reciclar silenciosamente la task original como `pending`
+- si hace falta más trabajo, se crean nuevas tasks
+- el parent se reabre por consolidación jerárquica, no por reabrir la task original
 
-- contrato único de recovery
-- eliminación de rutas legacy ligadas a refinement
-- mejor alineación con evaluator y post-batch
-- soporte operativo real para `retry`
-
-### 7. Evaluator
-
-Evalúa el estado de la etapa tras cada batch.
-
-Decide:
-
-- `stage_completed`
-- `stage_incomplete`
-- `manual_review_required`
-
-Y además define:
-
-- estrategia de recovery
-- necesidad de replan
-- necesidad de follow-up
-- cierre o no de etapa
-
-Mejoras implementadas:
-
-- eliminación de `refined` como nivel operativo
-- eliminación de `retry_batch` del contrato nuevo
-- reglas más estrictas para consistencia del output
-- mejor tratamiento conceptual de fallos locales frente a replanning estructural
-
-### 8. Post-Batch Processor
-
-Orquesta lo que ocurre al terminar un batch:
-
-- verifica estados terminales
-- invoca recovery si hay tareas problemáticas
-- llama al evaluator
-- construye `PostBatchResult`
-- decide continuidad, resequencing, replanning o bloqueo
-
-Fixes implementados:
-
-- exige artefacto de validación para tareas problemáticas
-- alinea `RecoveryContext` con el resto del sistema
-- evita incoherencias de stage closure en batches no finales
-- corrige el bug de `checkpoint_blocked` incompatible con cierre de etapa
-
-### 9. Project Workflow Service
-
-Orquesta el pipeline end-to-end.
-
-Flujo actual:
-
-1. planner
-2. atomic generation
-3. execution plan
-4. ejecución batch a batch
-5. recovery
-6. evaluation
-7. iteraciones automáticas o cierre
-
-Mejoras implementadas:
-
-- refinement opcional, no obligatorio
-- compatibilidad legacy con `refined`
-- no envía automáticamente todo replanning a manual review
-- permite iteraciones automáticas tras resequencing/replanning
-- storage bootstrap al inicio del workflow
+Nota:
+- el comportamiento `retry` quedó identificado como fuente de incoherencias y debe tratarse con mucho cuidado si se mantiene
 
 ---
 
-## 🔁 Workflow actual
+### 🔍 Post-Batch Service
 
-### Flujo principal
+Responsable de:
 
-1. Se genera planificación `high_level`
-2. Se atomiza directamente
-3. Se genera execution plan con batches y checkpoints
-4. Se ejecutan tareas atómicas en orden
-5. Cada tarea:
-   - ejecuta
-   - valida
-   - si `completed`, promueve `workspace -> source`
-6. Al terminar cada batch:
-   - se procesan tareas problemáticas
-   - se genera recovery si aplica
-   - se evalúa el checkpoint
-7. El workflow decide:
-   - continuar
-   - reatomizar / resecuenciar / replanificar
-   - requerir revisión manual
-   - cerrar etapa
+- validar que el batch terminó realmente
+- verificar que tasks y runs están en estado terminal
+- ejecutar recovery si aplica
+- reconciliar jerarquía tras recovery
+- ejecutar evaluación del checkpoint
 
----
-
-## 🧠 Sistema de contexto
-
-### Diseño actual
-
-El contexto que recibe el executor se construye con:
-
-- memoria operativa del proyecto
-- memoria de tareas previas
-- archivos ya existentes en el repositorio
-
-Regla clave ya acordada:
-
-> El context selector solo selecciona contexto ya existente en el repositorio.
-
-También queda claro que:
-
-- puede crearse un fichero nuevo durante la ejecución
-- pero ese fichero nuevo no forma parte del contexto seleccionado
-- si un path no existe, no debe seleccionarse como contexto
-
-### Problemas detectados en esta capa
-
-Se detectó que el selector estaba mezclando:
-
-- paths de contexto existente
-- paths de salida futuros
-
-Esto provocó errores como:
-
-- `Model selected unknown repository paths`
-- bloqueos artificiales en tareas documentales o greenfield
-
-### Dirección de arreglo ya definida
-
-- pasar explícitamente al prompt la lista de ficheros existentes
-- usar memoria de proyecto + ficheros existentes como única base contextual
-- no romper el proceso por rutas inventadas fuera de responsabilidad del selector
-- filtrar y degradar en vez de bloquear por completo cuando el modelo proponga paths inexistentes
-
----
-
-## 🐛 Problemas detectados y cambios realizados
-
-### 1. Atomic tasks no ejecutables
-
-Problema:
-- se generaban tareas incompatibles con las capacidades reales del executor
-
-Solución:
-- reescritura del prompt de atomic
-- enfoque basado en capacidades reales del `code_executor`
-- reducción del lenguaje ambiguo de “multi-executor futuro”
-
-### 2. Fallos sin `code_validation_result`
-
-Problema:
-- post-batch rompía si una tarea fallaba sin artefacto de validación
-
-Solución:
-- validación terminal explícita
-- persistencia de `code_validation_result` incluso en fallos y rechazos pre-validación
-
-### 3. Desalineación entre generación atómica y cliente atomic
-
-Problema:
-- mismatch entre `parent_task_*` y `refined_task_*`
-
-Solución:
-- alineación de `atomic_task_generator.py` y `atomic_task_generator_client.py`
-
-### 4. Recovery desalineado
-
-Problemas:
-- coexistían contratos incompatibles
-- recovery reinterpretaba tareas de forma demasiado agresiva
-
-Solución:
-- contrato único en `schemas/recovery.py`
-- `recovery_client.py` reescrito sobre ese contrato
-- `recovery_service.py` reescrito para materialización coherente
-- mejor preservación de intención original
-
-### 5. Evaluator y post-batch inconsistentes
-
-Problemas:
-- `retry_batch` sin materialización real
-- stage closure posible en momentos incoherentes
-- demasiada tendencia a manual review
-
-Solución:
-- refactor del schema de evaluación
-- limpieza del evaluator
-- refactor de `post_batch_service.py`
-- protección frente a cierre de etapa en batches intermedios
-
-### 6. Workflow demasiado agresivo hacia manual review
-
-Problema:
-- `requires_replanning` acababa demasiado pronto en `awaiting_manual_review`
-
-Solución:
-- reescritura de `project_workflow_service.py`
-- soporte para iteraciones automáticas de replanning/resequencing
-
-### 7. Promoción a source
-
-Problemas detectados:
-- durante un tiempo la validación no promovía a `source`
-- luego apareció un bug por llamada incompleta a `promote_workspace_to_source`
-
-Soluciones:
-- la promoción ahora ocurre tras validación `completed`
-- antes de marcar task como `completed`
-- se corrigió el uso de `domain_name=CODE_DOMAIN`
-
-### 8. Logging y observabilidad del LLM
-
-Problema:
-- no había visibilidad real de latencia por llamada LLM
-
-Solución:
-- instrumentación centralizada en `/app/services/llm`
-- logs de:
-  - inicio de llamada
-  - fin de llamada
-  - duración
-  - tamaño de prompt
-  - tokens si están disponibles
-  - errores
-- timeout explícito en el provider de OpenAI
-- soporte para override de modelo por llamada desde factory
-
-### 9. Configuración LLM por tarea
-
-Mejora implementada:
-
-- `get_llm_provider(model=None)`
-- por defecto usa `settings.openai_model`
-- permite usar un modelo distinto para una llamada concreta
-
-Ejemplo de intención ya acordada:
-- usar un modelo más rápido como `gpt-5.4-mini` en tareas costosas como atomic generation
-
----
-
-## 📊 Observabilidad actual
-
-Se ha avanzado en logging de LLM para identificar:
-
-- qué llamada tarda
-- cuánto tarda
-- qué schema usa
-- tamaño del prompt
-- si hay llamadas anormalmente lentas
-
-Esto es especialmente importante porque se detectaron casos de llamadas extremadamente lentas en atomic generation.
-
----
-
-## ⚠️ Limitaciones actuales
-
-A día de hoy siguen existiendo estas limitaciones o frentes abiertos:
-
-- ejecución completamente síncrona
-- sin paralelización
-- context selection todavía en fase de ajuste fino
-- evaluator todavía sensible a diseño del post-batch
-- latencias LLM todavía por optimizar
-- falta de control fino de coste por etapa
-- el README previo estaba desactualizado y no reflejaba esta evolución
-
----
-
-## ✅ Estado funcional actual
-
-El sistema ya dispone de:
-
-- planificación high-level
-- atomización directa
-- secuenciación por batches
-- ejecución de tareas atómicas
-- validación terminal y normal
-- promoción a source
-- recovery estructurado
-- evaluación por checkpoint
-- workflow iterativo
-- logging centralizado de llamadas LLM
-
-En otras palabras, el pipeline ya está cerca de un E2E real, aunque todavía requiere estabilización especialmente en contexto, evaluación y latencia.
-
----
-
-## 🧭 Siguientes pasos propuestos
-
-### Prioridad alta
-
-#### 1. Cerrar correctamente la capa de code context
-
-Objetivo:
-- asegurar que el selector solo use ficheros existentes
-- evitar paths inventados
-- no bloquear el proceso por errores fuera de su responsabilidad
-
-#### 2. Ajustar fino evaluator + post-batch tras nuevas ejecuciones
-
-Objetivo:
-- comprobar que las nuevas reglas no escalan a manual review demasiado pronto
-- validar que las decisiones de cierre y replanning son coherentes
-
-#### 3. Medir latencias reales LLM por tipo de llamada
-
-Objetivo:
-- identificar qué servicios son más lentos
-- decidir dónde usar modelos más rápidos
-- ajustar prompts por coste/latencia
-
-#### 4. Afinar recovery en base a resultados reales
-
-Objetivo:
-- comprobar si `retry`, `reatomize` e `insert_followup` se comportan como esperáis
-- validar que preservan la intención original de la tarea
-
-### Prioridad media
-
-#### 5. Reducir coste y tamaño de prompts
-
-Especialmente en:
-- atomic generation
-- evaluation
+Integración completa con:
 - recovery
-- context selection
+- evaluation
+- hierarchy reconciliation
 
-#### 6. Limpiar restos legacy de `refined`
-
-Sigue habiendo trazas semánticas y metadata histórica que conviene limpiar cuando el flujo actual quede estable.
-
-#### 7. Mejorar trazabilidad de promociones y reaperturas
-
-Para dejar aún más claro cuándo:
-- una task fue reintentada
-- se promovió a source
-- se abrió nueva iteración
-
-### Futuro
-
-- paralelización de batches si el modelo de storage/source lo permite
-- especialización real por tipos de executor
-- control de costes por proyecto o workflow
-- endpoint E2E estable y productizable
+Además:
+- ya normaliza correctamente decisiones como `stage_incomplete`
+- protege al workflow de continuar por rutas inconsistentes
+- debe endurecerse todavía frente a cualquier reactivación incorrecta de la source task tras recovery
 
 ---
 
-## 🧠 Conclusión
+### 🧪 Evaluación de checkpoints
 
-El sistema ha evolucionado de una arquitectura con mucha dependencia de refinement y prompts ambiguos a un pipeline mucho más honesto con la realidad del executor y del workflow.
+Nuevo contrato soportado a nivel práctico:
 
-Los avances más importantes han sido:
+- `stage_incomplete`
+- `continue`
+- `project_complete`
+- `manual_review`
+- reapertura de finalización
+- replanificación o resecuenciación cuando aplique
 
-- salto directo `high_level -> atomic`
-- validación estructurada y persistente
-- recovery coherente
-- evaluator más limpio
-- post-batch corregido
-- workflow con iteraciones automáticas
-- promoción a source tras validación
-- observabilidad real de llamadas LLM
+Regla crítica ya corregida:
 
-### Estado actual resumido
+> `stage_incomplete` sin manual review, sin replan y sin follow-up extra debe permitir continuar al siguiente batch
 
-> La plataforma ya tiene una base E2E funcional y bastante más robusta que al inicio, pero todavía está en fase de estabilización fina en context selection, evaluator/post-batch y latencia de LLM.
+Esto corrige un bug previo donde el workflow se detenía por ambigüedad de normalización.
+
+---
+
+### 🔄 Workflow Orchestration end-to-end
+
+Pipeline actual:
+
+Planning → Refinement → Atomic Generation → Execution Plan → Batch Execution → Post-Batch → Evaluation → Continuation / Stop
+
+Soporta:
+- múltiples batches
+- iteraciones
+- finalización controlada
+- guard de finalización
+- cierre de etapa
+- manual review cuando corresponde
+
+---
+
+# 🧪 Sistema de tests
+
+Se ha introducido una suite de tests robusta con `pytest`.
+
+## Cobertura actual
+
+### `task_hierarchy_service`
+- consolidación correcta de estados
+- reapertura del parent por recovery
+
+### `recovery_service`
+- creación de nuevas tasks
+- invariantes de terminalidad de la task original
+- manual review
+- validación de rutas de recovery
+
+### `post_batch_service`
+- integración recovery + evaluación
+- continuación correcta con `stage_incomplete`
+- detección de estados inválidos tras recovery
+
+### `project_workflow_service`
+- ejecución multi-batch
+- validación de atomicidad
+- protección frente a tasks no atómicas en batches
+- flujo E2E controlado
+
+### `task_execution_service`
+- ejecución completa de atomic tasks
+- rutas `completed`, `partial`, `failed`, `rejected`
+- promoción de workspace
+- reconciliación jerárquica
+
+Resultado:
+- el sistema ya es bastante más testeable
+- las invariantes principales del workflow están cubiertas
+- la base es mucho más segura para iterar
+
+---
+
+# ⚠️ Problemas actuales detectados
+
+## 1. El executor es el cuello de botella real
+
+Los fallos recientes no vienen ya del workflow ni de recovery, sino de la capa de ejecución.
+
+Ejemplo real detectado:
+- rechazo por contexto insuficiente
+- repo demasiado sparse
+- falta de superficie de código clara
+
+Conclusión:
+- el sistema puede planificar y orquestar
+- pero la ejecución aún no es suficientemente inteligente respecto al estado real del repositorio
+
+---
+
+## 2. Algunas atomic tasks son válidas conceptualmente pero no operativamente
+
+Actualmente puede ocurrir que una atomic task describa algo correcto a nivel funcional, pero no ejecutable en el estado real del repo.
+
+Ejemplo:
+- “implementar API mínima”
+- pero no existe todavía estructura, entrypoint ni módulos base
+
+Esto no es un simple bug: es una limitación del modelo actual de ejecución.
+
+---
+
+## 3. Falta awareness real del workspace/source
+
+El sistema todavía no decide bien:
+- qué estructura existe
+- dónde debe ir cada fichero
+- cuándo una tarea requiere bootstrap previo
+- qué tipo de agente o estrategia conviene según el estado del repo
+
+---
+
+# 🧭 Nueva dirección propuesta: Execution Orchestrator
+
+## Idea principal
+
+Introducir una nueva capa entre atomic task y executor especializado:
+
+**Execution Orchestrator**
+
+### Responsabilidades
+
+- interpretar la atomic task
+- inspeccionar el estado real del repo/workspace
+- decidir el modo de ejecución
+- seleccionar el subagente más adecuado
+- decidir dónde deberían vivir los cambios
+- preparar el contexto operativo real antes de ejecutar
+
+---
+
+## Modelo propuesto
+
+Atomic Task  
+↓  
+Execution Orchestrator  
+↓  
+Specialized Subagent  
+↓  
+Executor Result
+
+---
+
+## Tipos de ejecución que el orquestador debería distinguir
+
+- `bootstrap`
+- `edit_existing`
+- `extend_existing`
+- `repair_failed_work`
+- `tests_only`
+- `docs_only`
+
+Esto permitiría resolver correctamente casos donde hoy el executor rechaza por falta de superficie.
+
+---
+
+## Posibles subagentes futuros
+
+- `scaffolding_agent`
+- `backend_agent`
+- `test_agent`
+- `docs_agent`
+- `refactor_agent`
+
+---
+
+## Restricciones del orquestador
+
+El orquestador **no debe**:
+- cambiar el objetivo funcional de la atomic task
+- replanificar la etapa
+- inventar alcance no pedido
+
+El orquestador **sí puede**:
+- elegir subagente
+- seleccionar working set
+- decidir rutas objetivo
+- clasificar el modo de ejecución
+- detectar que antes hace falta bootstrap o scaffolding
+
+---
+
+# 🔧 Próximos pasos priorizados
+
+## Corto plazo
+
+1. Endurecer recovery definitivamente
+   - evitar cualquier reapertura incoherente de la task original
+   - mantener la source task siempre terminal
+   - detectar de forma explícita estados corruptos tras materialización
+
+2. Añadir tests adicionales sobre recovery y executor
+   - rechazo por repo sparse
+   - generación de follow-up/bootstrap tasks
+   - protección ante retries incoherentes
+
+3. Mejorar el atomic task generator
+   - introducir awareness de precondiciones ejecutables
+   - evitar atomics que dependan de estructura inexistente sin declararlo
+
+---
+
+## Medio plazo
+
+4. Diseñar el contrato del `Execution Orchestrator`
+   - inputs
+   - outputs
+   - límites de decisión
+   - interacción con subagentes
+
+5. Implementar una primera versión mínima
+   - clasificación de tipo de ejecución
+   - routing básico a un subagente adecuado
+   - detección de repositorio sparse
+
+6. Crear al menos dos subagentes iniciales
+   - `scaffolding_agent`
+   - `implementation_agent`
+
+---
+
+## Largo plazo
+
+7. Framework serio de subagentes con tools
+8. Selección dinámica de ejecutor en tiempo de ejecución
+9. Mayor autonomía operativa sin perder trazabilidad
+10. Ejecución multiagente especializada y robusta
+
+---
+
+# 📌 Conclusión
+
+El proyecto ya no es solo una maqueta conceptual.
+
+A día de hoy ya existe:
+- pipeline end-to-end
+- jerarquía coherente
+- recovery razonablemente saneado
+- evaluación integrada
+- tests útiles sobre invariantes críticas
+
+El siguiente gran salto no pasa por añadir más planificación.
+
+Pasa por resolver esta pregunta:
+
+> ¿cómo aterrizamos una atomic task sobre el estado real del repo sin depender de que el executor “adivine” la estructura?
+
+La respuesta más prometedora ahora mismo es:
+
+> introducir una capa de **Execution Orchestrator** que decida cómo, dónde y con qué subagente debe ejecutarse cada atomic task.
