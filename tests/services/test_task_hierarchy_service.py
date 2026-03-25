@@ -1,3 +1,4 @@
+# tests/services/test_task_hierarchy_service.py
 import pytest
 from pydantic import ValidationError
 
@@ -26,7 +27,7 @@ def test_reatomize_creates_new_atomic_tasks_and_keeps_source_failed(
         project_id=project.id,
         title="Parent task",
         planning_level="high_level",
-        executor_type="pending_atomic_assignment",
+        executor_type="pending_engine_routing",
     )
     source_task = make_task(
         project_id=project.id,
@@ -86,7 +87,7 @@ def test_manual_review_keeps_source_partial_and_creates_no_tasks(
         project_id=project.id,
         title="Parent task",
         planning_level="high_level",
-        executor_type="pending_atomic_assignment",
+        executor_type="pending_engine_routing",
     )
     source_task = make_task(
         project_id=project.id,

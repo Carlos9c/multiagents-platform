@@ -1,9 +1,10 @@
+# tests/services/test_recovery_service.py
 import pytest
 from pydantic import ValidationError
 
 from app.schemas.recovery import RecoveryDecision
 from app.models.task import (
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
@@ -26,7 +27,7 @@ def test_reatomize_creates_new_atomic_tasks_with_pending_executor_and_keeps_sour
         project_id=project.id,
         title="Parent task",
         planning_level="high_level",
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
     source_task = make_task(
         project_id=project.id,
@@ -34,7 +35,7 @@ def test_reatomize_creates_new_atomic_tasks_with_pending_executor_and_keeps_sour
         title="Failed atomic task",
         status=TASK_STATUS_FAILED,
         sequence_order=1,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
     run = make_execution_run(task_id=source_task.id, status="failed")
 
@@ -72,7 +73,7 @@ def test_reatomize_creates_new_atomic_tasks_with_pending_executor_and_keeps_sour
     assert len(created_tasks) == 2
     assert all(task.status == TASK_STATUS_PENDING for task in created_tasks)
     assert all(task.parent_task_id == parent.id for task in created_tasks)
-    assert all(task.executor_type == PENDING_ATOMIC_ASSIGNMENT_EXECUTOR for task in created_tasks)
+    assert all(task.executor_type == PENDING_ENGINE_ROUTING_EXECUTOR for task in created_tasks)
     assert created_tasks[0].sequence_order > source_task.sequence_order
 
 
@@ -88,7 +89,7 @@ def test_manual_review_keeps_source_partial_and_creates_no_tasks(
         project_id=project.id,
         title="Parent task",
         planning_level="high_level",
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
     source_task = make_task(
         project_id=project.id,
@@ -96,7 +97,7 @@ def test_manual_review_keeps_source_partial_and_creates_no_tasks(
         title="Partial atomic task",
         status=TASK_STATUS_PARTIAL,
         sequence_order=1,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
     run = make_execution_run(task_id=source_task.id, status="failed")
 

@@ -1,7 +1,7 @@
 import pytest
 
 from app.models.task import (
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_PENDING,
@@ -179,7 +179,7 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
     failed_task = make_task(
         project_id=project.id,

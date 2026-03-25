@@ -8,7 +8,7 @@ from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
     PLANNING_LEVEL_REFINED,
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     Task,
 )
 from app.schemas.atomic_task_generator import AtomicTaskGenerationOutput
@@ -243,7 +243,7 @@ def generate_atomic_tasks(
             priority=atomic.priority,
             task_type=atomic.task_type,
             planning_level=PLANNING_LEVEL_ATOMIC,
-            executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+            executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
             sequence_order=index,
             status="pending",
             is_blocked=False,

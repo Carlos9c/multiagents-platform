@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.models.artifact import Artifact
 from app.models.project import Project
 from app.models.task import (
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_HIGH_LEVEL,
     PLANNING_LEVEL_REFINED,
     TASK_STATUS_PENDING,
@@ -125,7 +125,7 @@ def refine_high_level_task(
             priority=refined.priority,
             task_type=refined.task_type,
             planning_level=PLANNING_LEVEL_REFINED,
-            executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+            executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
             sequence_order=index,
             status=TASK_STATUS_PENDING,
             is_blocked=False,

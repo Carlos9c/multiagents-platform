@@ -1,7 +1,7 @@
 from pydantic import BaseModel, field_validator
 
 from app.models.task import (
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     VALID_EXECUTOR_TYPES,
     VALID_PLANNING_LEVELS,
     VALID_TASK_STATUSES,
@@ -25,7 +25,7 @@ class TaskCreate(BaseModel):
     priority: str = "medium"
     task_type: str = "implementation"
     planning_level: str = "high_level"
-    executor_type: str = PENDING_ATOMIC_ASSIGNMENT_EXECUTOR
+    executor_type: str = PENDING_ENGINE_ROUTING_EXECUTOR
     sequence_order: int | None = None
     status: str = "pending"
     is_blocked: bool = False

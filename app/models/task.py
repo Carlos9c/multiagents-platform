@@ -24,9 +24,10 @@ TERMINAL_TASK_STATUSES = {
 # IMPORTANTE:
 # executor_type ya no representa una decisión cerrada tomada por atomic.
 # En el estado persistido de la task, este campo debe interpretarse como:
-# - pending_atomic_assignment: routing pendiente / no resuelto todavía
+# - pending_engine_routing: la task atómica todavía no tiene routing final resuelto
+#   y será derivada por el execution engine en tiempo de ejecución
 # - otro valor concreto: compatibilidad legacy o resolución persistida excepcional
-PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
+PENDING_ENGINE_ROUTING_EXECUTOR = "pending_engine_routing"
 CODE_EXECUTOR = "code_executor"
 
 VALID_PLANNING_LEVELS = {
@@ -45,7 +46,7 @@ VALID_TASK_STATUSES = {
 }
 
 VALID_EXECUTOR_TYPES = {
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     CODE_EXECUTOR,
 }
 
@@ -105,7 +106,7 @@ class Task(Base):
     executor_type: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
-        default=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        default=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
 
     sequence_order: Mapped[int | None] = mapped_column(Integer, nullable=True)

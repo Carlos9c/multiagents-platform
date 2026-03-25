@@ -11,7 +11,7 @@ from app.execution_engine.contracts import (
 )
 from app.models.task import (
     CODE_EXECUTOR,
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_HIGH_LEVEL,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
@@ -132,7 +132,7 @@ def test_execute_task_sync_rejects_non_atomic_task(
         title="High-level task",
         planning_level=PLANNING_LEVEL_HIGH_LEVEL,
         status=TASK_STATUS_PENDING,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
 
     with pytest.raises(TaskExecutionServiceError, match="Only atomic tasks can be executed"):
@@ -150,7 +150,7 @@ def test_execute_task_sync_resolves_pending_executor_at_runtime(
         project_id=project.id,
         title="Atomic task with unresolved executor",
         status=TASK_STATUS_PENDING,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
 
     captured = {}
@@ -185,7 +185,7 @@ def test_execute_task_sync_resolves_pending_executor_at_runtime(
     assert captured["request"].executor_type == CODE_EXECUTOR
     assert result.executor_type == CODE_EXECUTOR
     db_session.refresh(atomic_task)
-    assert atomic_task.executor_type == PENDING_ATOMIC_ASSIGNMENT_EXECUTOR
+    assert atomic_task.executor_type == PENDING_ENGINE_ROUTING_EXECUTOR
 
 
 def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
@@ -248,7 +248,7 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
     atomic_task = make_task(
         project_id=project.id,
@@ -268,7 +268,6 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
             summary="Execution finished successfully.",
         ),
     )
-
     _patch_workspace_runtime(monkeypatch, promoted_state=promoted)
 
     monkeypatch.setattr(
@@ -312,7 +311,7 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
     atomic_task = make_task(
         project_id=project.id,
@@ -330,7 +329,6 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
             summary="Execution finished but validation will be partial.",
         ),
     )
-
     _patch_workspace_runtime(monkeypatch)
 
     monkeypatch.setattr(
@@ -373,7 +371,7 @@ def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
     atomic_task = make_task(
         project_id=project.id,
@@ -391,7 +389,6 @@ def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
             summary="Execution engine reported a failed execution.",
         ),
     )
-
     _patch_workspace_runtime(monkeypatch)
 
     monkeypatch.setattr(
@@ -429,7 +426,7 @@ def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
     atomic_task = make_task(
         project_id=project.id,
@@ -447,7 +444,6 @@ def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
             summary="Execution engine rejected the task.",
         ),
     )
-
     _patch_workspace_runtime(monkeypatch)
 
     monkeypatch.setattr(

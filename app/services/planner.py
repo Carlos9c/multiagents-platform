@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.models.project import Project
 from app.models.task import (
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_HIGH_LEVEL,
     TASK_STATUS_PENDING,
     Task,
@@ -81,7 +81,7 @@ def generate_project_plan(db: Session, project_id: int) -> dict:
             priority=planned_task.priority,
             task_type=planned_task.task_type,
             planning_level=PLANNING_LEVEL_HIGH_LEVEL,
-            executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+            executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
             sequence_order=index,
             status=TASK_STATUS_PENDING,
             is_blocked=False,

@@ -31,7 +31,7 @@ from app.models.task import (
     CODE_EXECUTOR,
     EXECUTABLE_TASK_STATUSES,
     PLANNING_LEVEL_ATOMIC,
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     Task,
 )
 from app.schemas.code_execution import (
@@ -149,7 +149,7 @@ def _resolve_executor_type_for_task(task: Task) -> str:
     if task.planning_level != PLANNING_LEVEL_ATOMIC:
         raise TaskExecutionServiceError("Only atomic tasks can be executed.")
 
-    if not task.executor_type or task.executor_type == PENDING_ATOMIC_ASSIGNMENT_EXECUTOR:
+    if not task.executor_type or task.executor_type == PENDING_ENGINE_ROUTING_EXECUTOR:
         return CODE_EXECUTOR
 
     if task.executor_type in SUPPORTED_EXECUTORS:

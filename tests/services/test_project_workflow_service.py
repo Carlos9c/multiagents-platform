@@ -4,7 +4,7 @@ import pytest
 
 from app.models.project import Project
 from app.models.task import (
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_HIGH_LEVEL,
     TASK_STATUS_PENDING,
 )
@@ -166,7 +166,7 @@ def test_workflow_rejects_non_atomic_task_inside_execution_batch(
         title="High-level task incorrectly inserted into batch",
         planning_level=PLANNING_LEVEL_HIGH_LEVEL,
         status=TASK_STATUS_PENDING,
-        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
 
     plan = make_execution_plan(

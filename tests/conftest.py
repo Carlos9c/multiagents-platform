@@ -1,3 +1,4 @@
+# tests/conftest.py
 import os
 import sys
 from pathlib import Path
@@ -28,7 +29,7 @@ from app.models.execution_run import (
 from app.models.project import Project
 from app.models.task import (
     CODE_EXECUTOR,
-    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
     TASK_STATUS_PENDING,
@@ -295,11 +296,11 @@ def make_recovery_decision() -> Callable[..., RecoveryDecision]:
             confidence="high",
             reason=reason,
             covered_gap_summary=covered_gap_summary,
+            execution_guidance=execution_guidance,
             retry_same_task=retry_same_task,
             requires_manual_review=requires_manual_review,
             still_blocks_progress=still_blocks_progress,
             created_tasks=task_payloads,
-            execution_guidance=execution_guidance,
             decision_origin="post_batch_recovery",
         )
 
