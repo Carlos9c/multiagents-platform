@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.models.artifact import Artifact
 from app.models.project import Project
 from app.models.task import (
+    EXECUTION_ENGINE,
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
     PLANNING_LEVEL_REFINED,
@@ -15,7 +16,7 @@ from app.schemas.atomic_task_generator import AtomicTaskGenerationOutput
 from app.services.atomic_task_generator_client import call_atomic_task_generator_model
 
 
-AVAILABLE_EXECUTORS = ["code_executor"]
+AVAILABLE_EXECUTORS = [EXECUTION_ENGINE]
 
 ALLOWED_PARENT_PLANNING_LEVELS = {
     PLANNING_LEVEL_HIGH_LEVEL,
@@ -258,9 +259,28 @@ def generate_atomic_tasks(
 
     artifact_payload = {
         "parent_task_id": parent_task.id,
-        "parent_planning_level": parent_task.planning_level,
+        "project_id": project.id,
         "available_executors": AVAILABLE_EXECUTORS,
-        "atomic_output": atomic_output.model_dump(),
+        "atomic_tasks": [
+            {
+                "title": task.title,
+                "description": task.description,
+                "summary": task.summary,
+                "objective": task.objective,
+                "proposed_solution": task.proposed_solution,
+                "implementation_steps": task.implementation_steps,
+                "acceptance_criteria": task.acceptance_criteria,
+                "tests_required": task.tests_required,
+                "technical_constraints": task.technical_constraints,
+                "out_of_scope": task.out_of_scope,
+                "priority": task.priority,
+                "task_type": task.task_type,
+                "planning_level": task.planning_level,
+                "executor_type": task.executor_type,
+                "sequence_order": task.sequence_order,
+            }
+            for task in created_tasks
+        ],
     }
 
     artifact = Artifact(
@@ -268,10 +288,14 @@ def generate_atomic_tasks(
         task_id=parent_task.id,
         artifact_type="atomic_task_generation",
         content=json.dumps(artifact_payload, ensure_ascii=False, indent=2),
-        created_by="atomic_task_generator_agent",
+        created_by="atomic_task_generator",
     )
     db.add(artifact)
     db.commit()
+    db.refresh(artifact)
+
+    for task in created_tasks:
+        db.refresh(task)
 
     return _build_created_response(
         project=project,

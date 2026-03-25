@@ -21,14 +21,17 @@ TERMINAL_TASK_STATUSES = {
     TASK_STATUS_FAILED,
 }
 
-# IMPORTANTE:
-# executor_type ya no representa una decisión cerrada tomada por atomic.
-# En el estado persistido de la task, este campo debe interpretarse como:
-# - pending_engine_routing: la task atómica todavía no tiene routing final resuelto
-#   y será derivada por el execution engine en tiempo de ejecución
-# - otro valor concreto: compatibilidad legacy o resolución persistida excepcional
+# executor_type sigue existiendo como contrato de dominio de alto nivel.
+# Valores canónicos:
+# - pending_engine_routing: la task todavía no tiene routing final resuelto
+# - execution_engine: la task será ejecutada por el engine orquestado
 PENDING_ENGINE_ROUTING_EXECUTOR = "pending_engine_routing"
-CODE_EXECUTOR = "code_executor"
+EXECUTION_ENGINE = "execution_engine"
+
+# Alias legacy temporal para transición de código/tests aún no migrados.
+LEGACY_EXECUTOR_TYPE_ALIASES = {
+    "code_executor": EXECUTION_ENGINE,
+}
 
 VALID_PLANNING_LEVELS = {
     PLANNING_LEVEL_HIGH_LEVEL,
@@ -47,13 +50,24 @@ VALID_TASK_STATUSES = {
 
 VALID_EXECUTOR_TYPES = {
     PENDING_ENGINE_ROUTING_EXECUTOR,
-    CODE_EXECUTOR,
+    EXECUTION_ENGINE,
 }
 
 EXECUTABLE_TASK_STATUSES = {
     TASK_STATUS_PENDING,
     TASK_STATUS_FAILED,
 }
+
+
+def normalize_executor_type(executor_type: str | None) -> str | None:
+    if executor_type is None:
+        return None
+    return LEGACY_EXECUTOR_TYPE_ALIASES.get(executor_type, executor_type)
+
+
+def is_valid_executor_type(executor_type: str | None) -> bool:
+    normalized = normalize_executor_type(executor_type)
+    return normalized in VALID_EXECUTOR_TYPES
 
 
 class Task(Base):

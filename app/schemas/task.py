@@ -2,9 +2,10 @@ from pydantic import BaseModel, field_validator
 
 from app.models.task import (
     PENDING_ENGINE_ROUTING_EXECUTOR,
-    VALID_EXECUTOR_TYPES,
     VALID_PLANNING_LEVELS,
     VALID_TASK_STATUSES,
+    normalize_executor_type,
+    is_valid_executor_type,
 )
 
 
@@ -44,12 +45,14 @@ class TaskCreate(BaseModel):
     @field_validator("executor_type")
     @classmethod
     def validate_executor_type(cls, value: str) -> str:
-        if value not in VALID_EXECUTOR_TYPES:
+        normalized = normalize_executor_type(value)
+        if not is_valid_executor_type(normalized):
             raise ValueError(
-                f"Invalid executor_type '{value}'. "
-                f"Allowed values: {sorted(VALID_EXECUTOR_TYPES)}"
+                "Invalid executor_type "
+                f"'{value}'. Allowed canonical values: "
+                f"{sorted(['execution_engine', 'pending_engine_routing'])}"
             )
-        return value
+        return normalized
 
     @field_validator("status")
     @classmethod

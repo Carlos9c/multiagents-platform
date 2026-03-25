@@ -4,6 +4,7 @@ import pytest
 
 from app.models.project import Project
 from app.models.task import (
+    EXECUTION_ENGINE,
     PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_HIGH_LEVEL,
     TASK_STATUS_PENDING,
@@ -90,7 +91,7 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
         return types.SimpleNamespace(
             final_task_status="completed",
             validation_decision="completed",
-            executor_type="code_executor",
+            executor_type=EXECUTION_ENGINE,
         )
 
     monkeypatch.setattr(

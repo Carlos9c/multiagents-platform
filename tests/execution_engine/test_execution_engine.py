@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
+from app.models.task import EXECUTION_ENGINE
 from app.execution_engine.agent_runtime.base import BaseAgentRuntime
 from app.execution_engine.budget import LoopBudget
 from app.execution_engine.contracts import (
@@ -125,7 +125,7 @@ def _make_request(workspace_path: Path) -> ExecutionRequest:
         acceptance_criteria="The API exists and tests pass.",
         technical_constraints="Use FastAPI.",
         out_of_scope="Persistence layer.",
-        executor_type="code_executor",
+        executor_type=EXECUTION_ENGINE,
         success_criteria=[],
         constraints=[],
         allowed_paths=[],

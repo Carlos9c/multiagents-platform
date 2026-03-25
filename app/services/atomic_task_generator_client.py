@@ -1,5 +1,6 @@
 from pydantic import ValidationError
 
+from app.models.task import EXECUTION_ENGINE, normalize_executor_type
 from app.schemas.atomic_task_generator import AtomicTaskGenerationOutput
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
@@ -13,16 +14,16 @@ Return ONLY JSON matching the provided schema.
 
 Primary principle:
 - Atomicity is not decided only by semantic neatness.
-- Atomicity must be decided by REAL executor capability.
+- Atomicity must be decided by REAL execution capability.
 - A task is atomic only if exactly one currently available executor can complete it end to end with the capabilities it actually has.
 
 Current system reality:
-- The active executor is code_executor.
+- The active execution target is execution_engine.
 - Do not reason about hypothetical future executors.
 - Do not optimize for a future multi-executor platform.
 - Optimize for the executor list that is explicitly provided in the prompt.
 
-What code_executor CAN do:
+What the execution engine CAN do with its current subagents and tools:
 - read repository context already available inside the project workspace
 - inspect existing code files in the repository
 - decide which files are relevant
@@ -32,7 +33,7 @@ What code_executor CAN do:
 - produce repository-based deliverables that can be validated from file changes and workspace evidence
 - write documentation files only when the documentation itself is a concrete repository deliverable
 
-What code_executor CANNOT be expected to do as the core of an atomic task:
+What the execution engine CANNOT be expected to do as the core of an atomic task:
 - perform manual human investigation
 - gather external real-world information
 - validate behavior through human observation outside its execution contract
@@ -43,7 +44,7 @@ What code_executor CANNOT be expected to do as the core of an atomic task:
 - produce a task that depends primarily on unavailable tools, humans, or future executors
 
 Hard executor-oriented rule:
-- If the parent task mixes executable code work with non-executable research/manual work, do NOT keep them mixed in one atomic task.
+- If the parent task mixes executable repository work with non-executable research/manual work, do NOT keep them mixed in one atomic task.
 - Extract only the repository-executable slice.
 - Reformulate the task around a concrete repo/file deliverable whenever possible.
 
@@ -59,7 +60,7 @@ When to split:
 - split when there are clearly separate validation boundaries
 - split when implementation and documentation are both substantial and separable
 - split when two feature slices can be completed independently
-- split when one part is executable by code_executor and another part is not
+- split when one part is executable by the execution engine and another part is not
 
 When NOT to split:
 - one coherent implementation slice with one repository-level deliverable
@@ -67,7 +68,7 @@ When NOT to split:
 - one coherent API/code contract change with a single validation boundary
 - one small implementation plus its directly related tests if they belong to the same deliverable
 
-Forbidden task patterns for code_executor:
+Forbidden task patterns for the execution engine:
 - “investigate the real runtime behavior and document findings”
 - “run the system manually to understand how it works” as the main task
 - “collect and validate real operational information” as the main task
@@ -85,7 +86,7 @@ Required output quality:
 - do not include ids, dependencies, estimates, or metadata outside the schema
 
 Self-check before finalizing each atomic task:
-- Can the assigned executor really complete this task with its actual capabilities?
+- Can the current execution target really complete this task with its actual capabilities?
 - Is the main deliverable a concrete repository or file outcome?
 - Would post-execution validation be able to inspect repo/workspace evidence?
 - Is this task free from hidden manual/external work?
@@ -97,11 +98,13 @@ def _build_executor_capabilities_text(available_executors: list[str]) -> str:
     sections: list[str] = []
 
     for executor in available_executors:
-        if executor == "code_executor":
+        normalized_executor = normalize_executor_type(executor)
+
+        if normalized_executor == EXECUTION_ENGINE:
             sections.append(
                 "\n".join(
                     [
-                        "- code_executor",
+                        f"- {EXECUTION_ENGINE}",
                         "  - can inspect repository files and existing code structure",
                         "  - can plan and apply file edits inside the project workspace",
                         "  - can create/modify source code, tests, configs, and repository documentation files",
@@ -114,7 +117,7 @@ def _build_executor_capabilities_text(available_executors: list[str]) -> str:
             sections.append(
                 "\n".join(
                     [
-                        f"- {executor}",
+                        f"- {normalized_executor}",
                         "  - no explicit capability profile was provided",
                         "  - use it only if the prompt explicitly includes it in the available executor list",
                     ]
@@ -142,8 +145,12 @@ def build_atomic_user_prompt(
     parent_task_out_of_scope: str,
     available_executors: list[str],
 ) -> str:
-    executors_text = "\n".join(f"- {executor}" for executor in available_executors)
-    capability_text = _build_executor_capabilities_text(available_executors)
+    normalized_executors = [
+        normalize_executor_type(executor) or executor
+        for executor in available_executors
+    ]
+    executors_text = "\n".join(f"- {executor}" for executor in normalized_executors)
+    capability_text = _build_executor_capabilities_text(normalized_executors)
 
     return f"""
 Project name: {project_name}
@@ -181,17 +188,17 @@ Mandatory instructions:
 - Prefer the smallest number of tasks that remain truly executable.
 - Avoid overlap.
 
-For code_executor specifically:
+For the execution engine specifically:
 - Prefer tasks that end in a concrete repository deliverable.
 - Good deliverables include source files, test files, config files, or repository documentation files.
 - Bad deliverables include open-ended investigation, manual verification, and external information gathering.
-- Do not assign code_executor a task whose core output depends on observing runtime behavior manually.
-- Do not assign code_executor a task whose core output is “analyze and document findings” unless the analysis is directly tied to a concrete repository artifact that can be produced from repo context.
+- Do not assign the execution engine a task whose core output depends on observing runtime behavior manually.
+- Do not assign the execution engine a task whose core output is “analyze and document findings” unless the analysis is directly tied to a concrete repository artifact that can be produced from repo context.
 
 Split when:
 - there are clearly separate repository deliverables
 - there are clearly separate validation boundaries
-- executable code work is mixed with manual/research work
+- executable repository work is mixed with manual/research work
 - two feature slices can be implemented independently
 
 Do NOT split when:
@@ -213,8 +220,12 @@ def build_atomic_retry_prompt(
     validation_error: str,
     available_executors: list[str],
 ) -> str:
-    executors_text = ", ".join(available_executors)
-    capability_text = _build_executor_capabilities_text(available_executors)
+    normalized_executors = [
+        normalize_executor_type(executor) or executor
+        for executor in available_executors
+    ]
+    executors_text = ", ".join(normalized_executors)
+    capability_text = _build_executor_capabilities_text(normalized_executors)
 
     return f"""
 Project name: {project_name}
@@ -239,8 +250,8 @@ Important corrections:
 - each atomic task must have one primary deliverable and one validation boundary
 - each atomic task must be compatible with the REAL capabilities of the assigned executor
 - do not invent future executors or hypothetical capabilities
-- for code_executor, require a concrete repository/file deliverable
-- do not make manual investigation, external research, or manual validation the core of a code_executor task
+- for the execution engine, require a concrete repository/file deliverable
+- do not make manual investigation, external research, or manual validation the core of an execution engine task
 - avoid overlap
 - do not over-fragment
 - split only when there are clearly separate deliverables, clearly separate validation boundaries, or executable and non-executable work are mixed

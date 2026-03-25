@@ -12,7 +12,7 @@ from app.execution_engine.contracts import (
 )
 from app.models.execution_run import ExecutionRun
 from app.models.task import (
-    CODE_EXECUTOR,
+    EXECUTION_ENGINE,
     PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_HIGH_LEVEL,
     TASK_STATUS_COMPLETED,
@@ -204,8 +204,8 @@ def test_execute_task_sync_resolves_pending_executor_at_runtime(
 
     result = execute_task_sync(db_session, atomic_task.id)
 
-    assert captured["request"].executor_type == CODE_EXECUTOR
-    assert result.executor_type == CODE_EXECUTOR
+    assert captured["request"].executor_type == EXECUTION_ENGINE
+    assert result.executor_type == EXECUTION_ENGINE
 
     db_session.refresh(atomic_task)
     latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
@@ -226,7 +226,7 @@ def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
         project_id=project.id,
         title="Atomic task with explicit executor",
         status=TASK_STATUS_PENDING,
-        executor_type=CODE_EXECUTOR,
+        executor_type=EXECUTION_ENGINE,
     )
 
     captured = {}
@@ -260,8 +260,8 @@ def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
 
     result = execute_task_sync(db_session, atomic_task.id)
 
-    assert captured["request"].executor_type == CODE_EXECUTOR
-    assert result.executor_type == CODE_EXECUTOR
+    assert captured["request"].executor_type == EXECUTION_ENGINE
+    assert result.executor_type == EXECUTION_ENGINE
 
     db_session.refresh(atomic_task)
     latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
@@ -290,7 +290,7 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
         parent_task_id=parent.id,
         title="Atomic implementation task",
         status=TASK_STATUS_PENDING,
-        executor_type=CODE_EXECUTOR,
+        executor_type=EXECUTION_ENGINE,
     )
 
     promoted = {"called": False}
@@ -330,7 +330,7 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
     assert result.run_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION
     assert result.final_task_status == TASK_STATUS_COMPLETED
     assert result.validation_decision == "completed"
-    assert result.executor_type == CODE_EXECUTOR
+    assert result.executor_type == EXECUTION_ENGINE
     assert atomic_task.status == TASK_STATUS_COMPLETED
     assert parent.status == TASK_STATUS_COMPLETED
     assert promoted["called"] is True
@@ -358,7 +358,7 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
         parent_task_id=parent.id,
         title="Atomic implementation task",
         status=TASK_STATUS_PENDING,
-        executor_type=CODE_EXECUTOR,
+        executor_type=EXECUTION_ENGINE,
     )
 
     expected_sequence = ["context_selection_agent", "command_runner_agent"]
@@ -397,7 +397,7 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
     assert result.run_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION
     assert result.final_task_status == TASK_STATUS_PARTIAL
     assert result.validation_decision == "partial"
-    assert result.executor_type == CODE_EXECUTOR
+    assert result.executor_type == EXECUTION_ENGINE
     assert atomic_task.status == TASK_STATUS_PARTIAL
     assert parent.status == TASK_STATUS_PARTIAL
     assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence
@@ -424,7 +424,7 @@ def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
         parent_task_id=parent.id,
         title="Atomic task that fails",
         status=TASK_STATUS_PENDING,
-        executor_type=CODE_EXECUTOR,
+        executor_type=EXECUTION_ENGINE,
     )
 
     expected_sequence = ["context_selection_agent", "code_change_agent"]
@@ -458,7 +458,7 @@ def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
 
     assert result.final_task_status == TASK_STATUS_FAILED
     assert result.validation_decision == "failed"
-    assert result.executor_type == CODE_EXECUTOR
+    assert result.executor_type == EXECUTION_ENGINE
     assert atomic_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_FAILED
     assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence
@@ -485,7 +485,7 @@ def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
         parent_task_id=parent.id,
         title="Atomic task rejected by executor",
         status=TASK_STATUS_PENDING,
-        executor_type=CODE_EXECUTOR,
+        executor_type=EXECUTION_ENGINE,
     )
 
     expected_sequence = ["context_selection_agent", "command_runner_agent"]
@@ -519,7 +519,7 @@ def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
 
     assert result.run_status == CODE_EXECUTION_STATUS_REJECTED
     assert result.final_task_status == TASK_STATUS_FAILED
-    assert result.executor_type == CODE_EXECUTOR
+    assert result.executor_type == EXECUTION_ENGINE
     assert atomic_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_FAILED
     assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence

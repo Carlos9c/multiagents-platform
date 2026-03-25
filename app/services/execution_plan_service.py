@@ -6,7 +6,7 @@ from app.models.artifact import Artifact
 from app.models.execution_run import ExecutionRun
 from app.models.project import Project
 from app.models.task import (
-    CODE_EXECUTOR,
+    EXECUTION_ENGINE,
     PLANNING_LEVEL_ATOMIC,
     TASK_STATUS_AWAITING_VALIDATION,
     TASK_STATUS_COMPLETED,
@@ -15,6 +15,7 @@ from app.models.task import (
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
     Task,
+    normalize_executor_type
 )
 from app.schemas.execution_plan import (
     CandidateAtomicTask,

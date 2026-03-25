@@ -28,7 +28,7 @@ from app.models.execution_run import (
 )
 from app.models.project import Project
 from app.models.task import (
-    CODE_EXECUTOR,
+    EXECUTION_ENGINE,
     PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
@@ -100,7 +100,7 @@ def make_task(db_session: Session) -> Callable[..., Task]:
         parent_task_id: int | None = None,
         planning_level: str = PLANNING_LEVEL_ATOMIC,
         status: str = TASK_STATUS_PENDING,
-        executor_type: str = CODE_EXECUTOR,
+        executor_type: str = EXECUTION_ENGINE,
         sequence_order: int | None = None,
         task_type: str = "implementation",
         priority: str = "medium",

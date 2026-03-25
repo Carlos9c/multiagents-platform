@@ -1,5 +1,6 @@
 from pydantic import ValidationError
 
+from app.models.task import EXECUTION_ENGINE
 from app.schemas.recovery import RecoveryDecision
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
@@ -64,9 +65,9 @@ Decision rules:
 - Prefer insert_followup only when the task was mostly valid and the remaining work is additive.
 - Use manual_review for ambiguity, conflict, unsafe state, or lack of reliable automated next steps.
 
-Executor compatibility rules:
+Execution compatibility rules:
 - Any created task must be executable by the current system.
-- Assume the active executor is code_executor unless the context explicitly proves otherwise.
+- Assume the active execution target is execution_engine unless the context explicitly proves otherwise.
 - Created tasks must be concrete atomic tasks with a repository/file-oriented outcome.
 - Do not create tasks centered on manual investigation, external research, or human-only validation.
 
@@ -101,7 +102,7 @@ Self-check before finalizing:
 - Am I preserving the original task intent?
 - If action=reatomize or insert_followup, are created_tasks present and still faithful to the original task objective?
 - If action=manual_review, are created_tasks empty and requires_manual_review=true?
-- Are all created tasks compatible with code_executor and repository-based validation?
+- Are all created tasks compatible with the execution engine and repository-based validation?
 - retry is not supported in this workflow and must never be returned.
 """.strip()
 
@@ -142,7 +143,7 @@ Important:
 - Do not use retry.
 - Do not use refined-level recovery.
 - Do not propose legacy recovery actions.
-- Any created tasks must be atomic, executor-compatible, and repository/file-oriented.
+- Any created tasks must be atomic, execution-engine-compatible, and repository/file-oriented.
 - Avoid vague or human-only tasks.
 - Do not change a documentation/scope/requirements task into implementation/bootstrap work unless the evidence clearly requires that.
 - If the failure is mainly about context selection, treat it first as a context-resolution problem rather than an intent-change problem.
@@ -179,7 +180,7 @@ Critical corrections:
 - if the failure is mainly about context selection, prefer conservative reatomize or manual_review over domain-changing recovery
 - if action=reatomize or action=insert_followup:
   - created_tasks must not be empty
-  - created tasks must be concrete atomic tasks compatible with code_executor
+  - created tasks must be concrete atomic tasks compatible with the execution engine
   - created tasks must remain faithful to the source task intent
 - if action=manual_review:
   - requires_manual_review must be true

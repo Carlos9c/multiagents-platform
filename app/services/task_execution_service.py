@@ -29,11 +29,12 @@ from app.models.execution_run import (
     ExecutionRun,
 )
 from app.models.task import (
-    CODE_EXECUTOR,
+    EXECUTION_ENGINE,
     EXECUTABLE_TASK_STATUSES,
     PLANNING_LEVEL_ATOMIC,
     PENDING_ENGINE_ROUTING_EXECUTOR,
     Task,
+    normalize_executor_type,
 )
 from app.schemas.code_execution import (
     CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
@@ -79,9 +80,7 @@ from app.services.tasks import (
 logger = logging.getLogger(__name__)
 
 
-SUPPORTED_EXECUTORS = {
-    CODE_EXECUTOR,
-}
+SUPPORTED_EXECUTORS = {EXECUTION_ENGINE}
 
 VALID_EXECUTOR_FINAL_STATUSES = {
     CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
@@ -141,20 +140,16 @@ def _validate_task_is_executable(task: Task) -> None:
 
 
 def _resolve_executor_type_for_task(task: Task) -> str:
-    """
-    Resolve the concrete executor/profile at execution time.
-
-    Atomic generation no longer owns the final executor assignment.
-    Unresolved atomic tasks route to the active supported executor.
-    """
     if task.planning_level != PLANNING_LEVEL_ATOMIC:
         raise TaskExecutionServiceError("Only atomic tasks can be executed.")
 
-    if not task.executor_type or task.executor_type == PENDING_ENGINE_ROUTING_EXECUTOR:
-        return CODE_EXECUTOR
+    normalized_executor_type = normalize_executor_type(task.executor_type)
 
-    if task.executor_type in SUPPORTED_EXECUTORS:
-        return task.executor_type
+    if not normalized_executor_type or normalized_executor_type == PENDING_ENGINE_ROUTING_EXECUTOR:
+        return EXECUTION_ENGINE
+
+    if normalized_executor_type in SUPPORTED_EXECUTORS:
+        return normalized_executor_type
 
     raise TaskExecutionServiceError(
         f"Unsupported executor_type '{task.executor_type}'. "
