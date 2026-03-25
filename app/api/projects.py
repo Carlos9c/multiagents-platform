@@ -19,6 +19,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     project = Project(
         name=payload.name,
         description=payload.description,
+        enable_technical_refinement=payload.enable_technical_refinement,
     )
     db.add(project)
     db.commit()

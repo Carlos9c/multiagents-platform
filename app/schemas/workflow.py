@@ -1,20 +1,21 @@
-from typing import Literal
-
 from pydantic import BaseModel, Field
 
 
-WorkflowStatus = Literal[
-    "planning_completed",
-    "execution_in_progress",
-    "awaiting_manual_review",
-    "stage_closed",
-    "failed",
-]
+class RunProjectWorkflowRequest(BaseModel):
+    max_workflow_iterations: int = Field(default=5, ge=1, le=20)
+    max_finalization_iterations: int = Field(default=2, ge=1, le=10)
+    enable_technical_refinement: bool = Field(
+        default=False,
+        description=(
+            "When true, the workflow inserts an intermediate refinement phase "
+            "between high-level planning and atomic generation."
+        ),
+    )
 
 
 class WorkflowIterationSummary(BaseModel):
     iteration_number: int
-    plan_version: int
+    plan_version: int | None = None
     batch_ids_processed: list[str] = Field(default_factory=list)
     reopened_finalization: bool = False
     manual_review_required: bool = False
@@ -23,7 +24,7 @@ class WorkflowIterationSummary(BaseModel):
 
 class ProjectWorkflowResult(BaseModel):
     project_id: int
-    status: WorkflowStatus
+    status: str
     planning_completed: bool
     refinement_completed: bool
     atomic_generation_completed: bool

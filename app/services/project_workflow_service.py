@@ -23,7 +23,11 @@ from app.services.post_batch_service import (
     PostBatchServiceError,
     process_batch_after_execution,
 )
-from app.services.project_storage import CODE_DOMAIN, ProjectStorageError, ProjectStorageService
+from app.services.project_storage import (
+    CODE_DOMAIN,
+    ProjectStorageError,
+    ProjectStorageService,
+)
 from app.services.task_execution_service import (
     TaskExecutionServiceError,
     execute_task_sync,
@@ -73,22 +77,6 @@ def _has_tasks_at_level(db: Session, project_id: int, planning_level: str) -> bo
     return task is not None
 
 
-def _get_tasks_at_level(
-    db: Session,
-    project_id: int,
-    planning_level: str,
-) -> list[Task]:
-    return (
-        db.query(Task)
-        .filter(
-            Task.project_id == project_id,
-            Task.planning_level == planning_level,
-        )
-        .order_by(Task.id.asc())
-        .all()
-    )
-
-
 def _get_pending_tasks_at_level(
     db: Session,
     project_id: int,
@@ -122,11 +110,24 @@ def _has_atomic_children(db: Session, parent_task_id: int) -> bool:
     return child is not None
 
 
+def _has_refined_children(db: Session, parent_task_id: int) -> bool:
+    child = (
+        db.query(Task)
+        .filter(
+            Task.parent_task_id == parent_task_id,
+            Task.planning_level == PLANNING_LEVEL_REFINED,
+        )
+        .first()
+    )
+    return child is not None
+
+
 def _get_pending_atomic_generation_parents(
     db: Session,
     *,
     project_id: int,
     planning_level: str,
+    enable_technical_refinement: bool,
 ) -> list[Task]:
     candidate_tasks = _get_pending_tasks_at_level(
         db=db,
@@ -134,11 +135,22 @@ def _get_pending_atomic_generation_parents(
         planning_level=planning_level,
     )
 
-    return [
-        task
-        for task in candidate_tasks
-        if not _has_atomic_children(db, task.id)
-    ]
+    parents: list[Task] = []
+
+    for task in candidate_tasks:
+        if _has_atomic_children(db, task.id):
+            continue
+
+        if (
+            enable_technical_refinement
+            and planning_level == PLANNING_LEVEL_HIGH_LEVEL
+            and _has_refined_children(db, task.id)
+        ):
+            continue
+
+        parents.append(task)
+
+    return parents
 
 
 def _run_planner_if_needed(db: Session, project_id: int) -> bool:
@@ -201,6 +213,7 @@ def _run_atomic_generation_phase(
             db=db,
             project_id=project_id,
             planning_level=planning_level,
+            enable_technical_refinement=enable_technical_refinement,
         )
 
         for task in parents:
@@ -396,9 +409,10 @@ def run_project_workflow(
     project_id: int,
     max_workflow_iterations: int = 5,
     max_finalization_iterations: int = 2,
-    enable_technical_refinement: bool = False,
 ) -> ProjectWorkflowResult:
-    _get_project_or_raise(db=db, project_id=project_id)
+    project = _get_project_or_raise(db=db, project_id=project_id)
+    enable_technical_refinement = project.enable_technical_refinement
+
     _bootstrap_project_storage_for_execution(project_id=project_id)
 
     planning_completed = _run_planner_if_needed(db=db, project_id=project_id)

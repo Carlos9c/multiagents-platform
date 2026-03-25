@@ -4,14 +4,17 @@ from sqlalchemy.orm import Session
 
 from app.models.artifact import Artifact
 from app.models.project import Project
-from app.models.task import Task
+from app.models.task import (
+    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PLANNING_LEVEL_HIGH_LEVEL,
+    PLANNING_LEVEL_REFINED,
+    TASK_STATUS_PENDING,
+    Task,
+)
 from app.schemas.technical_task_refiner import TechnicalTaskRefinementOutput
 from app.services.technical_task_refiner_client import (
     call_technical_task_refiner_model,
 )
-
-
-PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
 
 
 def _format_bullet_list(items: list[str]) -> str:
@@ -22,7 +25,7 @@ def _validate_parent_task(project: Project, task: Task) -> None:
     if task.project_id != project.id:
         raise ValueError("Task does not belong to the given project")
 
-    if task.planning_level != "high_level":
+    if task.planning_level != PLANNING_LEVEL_HIGH_LEVEL:
         raise ValueError("Only high_level tasks can be refined")
 
 
@@ -61,7 +64,7 @@ def refine_high_level_task(
         db.query(Task)
         .filter(
             Task.parent_task_id == parent_task.id,
-            Task.planning_level == "refined",
+            Task.planning_level == PLANNING_LEVEL_REFINED,
         )
         .order_by(Task.sequence_order.asc(), Task.id.asc())
         .all()
@@ -121,10 +124,10 @@ def refine_high_level_task(
             out_of_scope=refined.out_of_scope,
             priority=refined.priority,
             task_type=refined.task_type,
-            planning_level="refined",
+            planning_level=PLANNING_LEVEL_REFINED,
             executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
             sequence_order=index,
-            status="pending",
+            status=TASK_STATUS_PENDING,
             is_blocked=False,
             blocking_reason=None,
         )
