@@ -3,7 +3,7 @@ from __future__ import annotations
 from pydantic import ValidationError
 
 from app.execution_engine.agent_runtime import BaseAgentRuntime
-from app.execution_engine.capabilities import get_executor_capabilities
+from app.execution_engine.capabilities import render_executor_capabilities_for_prompt
 from app.execution_engine.contracts import ExecutionRequest
 from app.execution_engine.execution_plan import (
     STEP_KIND_RESOLVE_FILE_OPERATIONS,
@@ -37,6 +37,7 @@ Hard rules:
 - Do not validate completion. Validation happens outside the execution engine.
 - Do not invent broad refactors.
 - Do not reject just because there is uncertainty.
+- You must reason from the actual execution-engine subagents and tools listed in the prompt.
 
 Critical rule:
 - If the workspace is effectively empty BUT the executor supports artifact creation
@@ -47,7 +48,7 @@ Critical rule:
 
 
 def _build_user_prompt(request: ExecutionRequest, state: ResolutionState) -> str:
-    capabilities = get_executor_capabilities(request.executor_type)
+    capability_text = render_executor_capabilities_for_prompt(request.executor_type)
 
     return f"""
 Task:
@@ -61,10 +62,8 @@ Task:
 - out_of_scope: {request.out_of_scope}
 - executor_type: {request.executor_type}
 
-Executor capabilities:
-- supports_artifact_creation: {capabilities.supports_artifact_creation}
-- supports_artifact_modification: {capabilities.supports_artifact_modification}
-- supports_bootstrap_from_empty_workspace: {capabilities.supports_bootstrap_from_empty_workspace}
+Execution engine capability catalog:
+{capability_text}
 
 Execution context:
 - workspace_path: {request.context.workspace_path}
@@ -85,6 +84,7 @@ Important:
 - Return a minimal but sufficient artifact plan.
 - If the workspace is empty and bootstrap is supported, infer a sensible initial artifact set from the task objective.
 - Do not stop just because no conventions are visible yet.
+- Use the listed capabilities to decide whether bootstrap, create, or modify is the right operational path.
 - If safe placement is genuinely impossible, explain why using rejection_reason.
 """.strip()
 

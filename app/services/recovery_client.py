@@ -1,5 +1,6 @@
 from pydantic import ValidationError
 
+from app.execution_engine.capabilities import render_executor_capabilities_for_prompt
 from app.models.task import EXECUTION_ENGINE
 from app.schemas.recovery import RecoveryDecision
 from app.services.llm.factory import get_llm_provider
@@ -70,6 +71,7 @@ Execution compatibility rules:
 - Assume the active execution target is execution_engine unless the context explicitly proves otherwise.
 - Created tasks must be concrete atomic tasks with a repository/file-oriented outcome.
 - Do not create tasks centered on manual investigation, external research, or human-only validation.
+- You must reason from the actual execution-engine subagents and tools listed in the prompt.
 
 Created task quality rules:
 - title must be concrete and actionable
@@ -115,6 +117,8 @@ def build_recovery_user_prompt(
     next_batch_summary: str | None,
     remaining_plan_summary: str | None,
 ) -> str:
+    capability_text = render_executor_capabilities_for_prompt(EXECUTION_ENGINE)
+
     return f"""
 Source task summary:
 {source_task_summary}
@@ -131,6 +135,9 @@ Next batch summary:
 Remaining plan summary:
 {remaining_plan_summary or "None"}
 
+Execution engine capability catalog:
+{capability_text}
+
 Instructions:
 - Choose the narrowest reliable recovery action.
 - Preserve the original task intent unless there is strong evidence that the task itself is structurally wrong.
@@ -144,6 +151,7 @@ Important:
 - Do not use refined-level recovery.
 - Do not propose legacy recovery actions.
 - Any created tasks must be atomic, execution-engine-compatible, and repository/file-oriented.
+- Use the listed execution-engine subagents and tools as the source of truth for what is realistically doable.
 - Avoid vague or human-only tasks.
 - Do not change a documentation/scope/requirements task into implementation/bootstrap work unless the evidence clearly requires that.
 - If the failure is mainly about context selection, treat it first as a context-resolution problem rather than an intent-change problem.
@@ -157,6 +165,8 @@ def build_recovery_retry_prompt(
     source_task_summary: str,
     execution_context_summary: str,
 ) -> str:
+    capability_text = render_executor_capabilities_for_prompt(EXECUTION_ENGINE)
+
     return f"""
 Your previous recovery output was invalid.
 
@@ -168,6 +178,9 @@ Source task summary:
 
 Execution context summary:
 {execution_context_summary}
+
+Execution engine capability catalog:
+{capability_text}
 
 You must correct the output and return valid JSON matching the schema.
 
@@ -185,6 +198,7 @@ Critical corrections:
 - if action=manual_review:
   - requires_manual_review must be true
   - created_tasks must be empty
+- use the listed execution-engine subagents and tools as the source of truth for what is realistically doable
 - keep the action narrow, concrete, and operationally valid
 """.strip()
 

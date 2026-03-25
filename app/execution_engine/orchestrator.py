@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import logging
+
 from pydantic import ValidationError
 
 from app.execution_engine.agent_runtime import BaseAgentRuntime
 from app.execution_engine.base import ExecutionEngineRejectedError
 from app.execution_engine.budget import LoopBudget
-from app.execution_engine.capabilities import get_executor_capabilities
+from app.execution_engine.capabilities import render_executor_capabilities_for_prompt
 from app.execution_engine.contracts import (
     EXECUTION_DECISION_FAILED,
     EXECUTION_DECISION_PARTIAL,
     ExecutionRequest,
     ExecutionResult,
 )
+from app.execution_engine.execution_plan import ExecutionStep
 from app.execution_engine.monitoring import OrchestratorTrace
 from app.execution_engine.next_action import (
     ACTION_APPLY_FILE_OPERATIONS,
@@ -27,7 +29,6 @@ from app.execution_engine.resolution_state import ResolutionState
 from app.execution_engine.state import ExecutionState
 from app.execution_engine.subagent_registry import SubagentRegistry, SubagentRegistryError
 from app.execution_engine.subagents.base import SubagentRejectedStepError
-from app.execution_engine.execution_plan import ExecutionStep
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 
@@ -51,6 +52,9 @@ Hard rules:
 - Use finish when the current operational pass is sufficient for handing off to external validation.
 - Use reject only when no safe operational route exists.
 - Risk flags should inform caution, not automatically block progress.
+- You must reason from the ACTUAL subagents and tools listed in the prompt.
+- Do not invent capabilities, subagents, tools, or hidden execution paths.
+- Do not keep retrying the same class of action just because it already failed once; use the current state and evidence.
 """.strip()
 
 
@@ -59,7 +63,7 @@ def _build_orchestrator_prompt(
     runtime_state: ExecutionState,
     resolution_state: ResolutionState,
 ) -> str:
-    capabilities = get_executor_capabilities(request.executor_type)
+    capability_text = render_executor_capabilities_for_prompt(request.executor_type)
 
     return f"""
 Task:
@@ -72,10 +76,16 @@ Task:
 - out_of_scope: {request.out_of_scope}
 - executor_type: {request.executor_type}
 
-Executor capabilities:
-- supports_artifact_creation: {capabilities.supports_artifact_creation}
-- supports_artifact_modification: {capabilities.supports_artifact_modification}
-- supports_bootstrap_from_empty_workspace: {capabilities.supports_bootstrap_from_empty_workspace}
+Execution engine capability catalog:
+{capability_text}
+
+Orchestrator action routing:
+- inspect_context -> context_selection_agent
+- resolve_file_operations -> placement_resolver_agent
+- apply_file_operations -> code_change_agent
+- run_command -> command_runner_agent
+- finish -> no subagent; return control to external validation
+- reject -> no subagent; reject execution
 
 Runtime counters:
 - step_count: {runtime_state.step_count}
@@ -101,10 +111,12 @@ Current state:
 - step_notes: {resolution_state.step_notes}
 - evidence_notes: {resolution_state.evidence.notes}
 
-Important:
+Decision discipline:
 - Select exactly one next action.
 - Prefer progress over premature blocking.
+- Respect phase policy and current state.
 - Completion phase should normally finish unless a concrete command is truly necessary.
+- Avoid recursive behavior such as repeatedly choosing the same class of action without new evidence.
 """.strip()
 
 
@@ -113,15 +125,11 @@ def _allowed_actions(
     state: ResolutionState,
     runtime_state: ExecutionState,
 ) -> list[str]:
-    caps = get_executor_capabilities(request.executor_type)
-
     if state.phase == "discovery":
         return [ACTION_INSPECT_CONTEXT, ACTION_REJECT]
 
     if state.phase == "planning":
-        if caps.supports_artifact_creation:
-            return [ACTION_RESOLVE_FILE_OPERATIONS, ACTION_REJECT]
-        return [ACTION_REJECT]
+        return [ACTION_RESOLVE_FILE_OPERATIONS, ACTION_REJECT]
 
     if state.phase == "materialization":
         if state.has_pending_operations():
@@ -129,8 +137,6 @@ def _allowed_actions(
         return [ACTION_FINISH, ACTION_REJECT]
 
     if state.phase == "completion":
-        # Completion should be narrow.
-        # At most one optional command execution, then finish/reject only.
         if runtime_state.command_run_count == 0:
             return [ACTION_FINISH, ACTION_RUN_COMMAND, ACTION_REJECT]
         return [ACTION_FINISH, ACTION_REJECT]
@@ -146,7 +152,6 @@ def _normalize_decision(
 ) -> NextActionDecision:
     allowed = _allowed_actions(request, state, runtime_state)
 
-    # Extra guard: run_command without a concrete command is invalid.
     if decision.action == ACTION_RUN_COMMAND and not (decision.command and decision.command.strip()):
         return NextActionDecision(
             action=ACTION_FINISH,
@@ -162,7 +167,6 @@ def _normalize_decision(
             ],
         )
 
-    # Extra guard: after one command attempt in completion, force finish.
     if (
         state.phase == "completion"
         and decision.action == ACTION_RUN_COMMAND
@@ -237,6 +241,7 @@ class ExecutionOrchestrator:
                 "title": request.task_title,
                 "executor_type": request.executor_type,
                 "max_steps": self.budget.max_steps,
+                "registered_subagents": self.registry.all_names(),
             },
         )
 
@@ -290,55 +295,19 @@ class ExecutionOrchestrator:
                 task_id=request.task_id,
                 payload=decision.model_dump(),
             )
-
-            logger.info(
-                "execution_orchestrator_next_action task_id=%s step=%s phase=%s action=%s",
-                request.task_id,
-                runtime_state.step_count,
-                resolution_state.phase,
-                decision.action,
-            )
-
             runtime_state.register_step()
-            resolution_state.add_risk_flags(decision.risk_flags)
 
             if decision.action == ACTION_FINISH:
-                if not resolution_state.has_outputs():
-                    resolution_state.evidence.notes.extend(
-                        resolution_state.orchestrator_trace.to_notes()
-                    )
-                    return ExecutionResult(
-                        task_id=request.task_id,
-                        decision=EXECUTION_DECISION_FAILED,
-                        summary="Execution reached finish without materialized outputs.",
-                        details="The orchestrator refused to finish because no outputs were produced.",
-                        remaining_scope=request.task_description or request.task_title,
-                        blockers_found=["no_materialized_output"],
-                        validation_notes=[
-                            "Execution orchestrator detected finish without outputs."
-                        ],
-                        execution_agent_sequence=list(executed_subagents),
-                        evidence=resolution_state.evidence,
-                    )
-
-                remaining_scope = (
-                    "Some planned file operations remain pending."
-                    if resolution_state.has_pending_operations()
-                    else "External task validation remains pending."
-                )
-
-                blockers_found = (
-                    [f"pending_operations={','.join(resolution_state.pending_operation_paths)}"]
-                    if resolution_state.has_pending_operations()
-                    else []
-                )
+                remaining_scope = request.task_description or request.task_title
+                blockers_found = list(resolution_state.risk_flags)
 
                 resolution_state.orchestrator_trace.add_event(
                     event_type="orchestrator_finished",
                     step_count=runtime_state.step_count,
                     task_id=request.task_id,
                     payload={
-                        "reason": decision.rationale,
+                        "decision": decision.model_dump(),
+                        "phase": resolution_state.phase,
                         "pending_operation_paths": list(
                             resolution_state.pending_operation_paths
                         ),
@@ -347,7 +316,6 @@ class ExecutionOrchestrator:
                         ),
                     },
                 )
-
                 resolution_state.evidence.notes.extend(
                     resolution_state.orchestrator_trace.to_notes()
                 )

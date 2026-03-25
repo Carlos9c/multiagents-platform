@@ -1,6 +1,7 @@
 from pydantic import ValidationError
 
-from app.models.task import EXECUTION_ENGINE, normalize_executor_type
+from app.execution_engine.capabilities import render_executor_capabilities_for_prompt
+from app.models.task import normalize_executor_type
 from app.schemas.atomic_task_generator import AtomicTaskGenerationOutput
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
@@ -22,26 +23,14 @@ Current system reality:
 - Do not reason about hypothetical future executors.
 - Do not optimize for a future multi-executor platform.
 - Optimize for the executor list that is explicitly provided in the prompt.
+- You must reason from the actual execution-engine subagents and tools listed in the prompt.
 
-What the execution engine CAN do with its current subagents and tools:
-- read repository context already available inside the project workspace
-- inspect existing code files in the repository
-- decide which files are relevant
-- plan file edits
-- create or modify project files
-- update tests or test-related files
-- produce repository-based deliverables that can be validated from file changes and workspace evidence
-- write documentation files only when the documentation itself is a concrete repository deliverable
-
-What the execution engine CANNOT be expected to do as the core of an atomic task:
-- perform manual human investigation
-- gather external real-world information
-- validate behavior through human observation outside its execution contract
-- perform business/product decisions that require stakeholder judgment
-- do open-ended research as the main deliverable
-- execute tasks whose main output is “analyze”, “investigate”, “assess”, or “validate manually” without a concrete repository artifact
-- execute tasks whose only meaningful result would come from running manual checks outside the repo
-- produce a task that depends primarily on unavailable tools, humans, or future executors
+Task design rules:
+- Prefer tasks that end in a concrete repository deliverable.
+- Prefer tasks whose result can be validated from changed files, command output, and workspace evidence.
+- Keep manual investigation, external research, human-only validation, and stakeholder judgment out of the core deliverable.
+- A task may span multiple related files when they belong to one coherent implementation slice.
+- Bootstrap from an empty repository is allowed only when the task objective clearly implies a minimal initial structure.
 
 Hard executor-oriented rule:
 - If the parent task mixes executable repository work with non-executable research/manual work, do NOT keep them mixed in one atomic task.
@@ -95,36 +84,11 @@ Self-check before finalizing each atomic task:
 
 
 def _build_executor_capabilities_text(available_executors: list[str]) -> str:
-    sections: list[str] = []
-
+    blocks: list[str] = []
     for executor in available_executors:
-        normalized_executor = normalize_executor_type(executor)
-
-        if normalized_executor == EXECUTION_ENGINE:
-            sections.append(
-                "\n".join(
-                    [
-                        f"- {EXECUTION_ENGINE}",
-                        "  - can inspect repository files and existing code structure",
-                        "  - can plan and apply file edits inside the project workspace",
-                        "  - can create/modify source code, tests, configs, and repository documentation files",
-                        "  - should receive tasks with concrete repo/file deliverables",
-                        "  - should NOT receive tasks whose core deliverable is manual investigation, external research, or human-only validation",
-                    ]
-                )
-            )
-        else:
-            sections.append(
-                "\n".join(
-                    [
-                        f"- {normalized_executor}",
-                        "  - no explicit capability profile was provided",
-                        "  - use it only if the prompt explicitly includes it in the available executor list",
-                    ]
-                )
-            )
-
-    return "\n".join(sections)
+        normalized_executor = normalize_executor_type(executor) or executor
+        blocks.append(render_executor_capabilities_for_prompt(normalized_executor))
+    return "\n\n".join(blocks)
 
 
 def build_atomic_user_prompt(
@@ -173,7 +137,7 @@ Parent task to atomize:
 Available executors:
 {executors_text}
 
-Executor capability profiles:
+Executor capability catalogs:
 {capability_text}
 
 Mandatory instructions:
@@ -187,6 +151,7 @@ Mandatory instructions:
   2) real executor capability compatibility
 - Prefer the smallest number of tasks that remain truly executable.
 - Avoid overlap.
+- For the execution engine, rely on the listed subagents and tools instead of generic assumptions.
 
 For the execution engine specifically:
 - Prefer tasks that end in a concrete repository deliverable.
@@ -215,9 +180,9 @@ Important:
 
 def build_atomic_retry_prompt(
     *,
+    validation_error: str,
     project_name: str,
     parent_task_title: str,
-    validation_error: str,
     available_executors: list[str],
 ) -> str:
     normalized_executors = [
@@ -238,7 +203,7 @@ Validation error:
 
 Available executors: {executors_text}
 
-Executor capability profiles:
+Executor capability catalogs:
 {capability_text}
 
 You must correct the output and return valid JSON matching the schema.
@@ -251,6 +216,7 @@ Important corrections:
 - each atomic task must be compatible with the REAL capabilities of the assigned executor
 - do not invent future executors or hypothetical capabilities
 - for the execution engine, require a concrete repository/file deliverable
+- use the listed execution-engine subagents and tools as the source of truth for what is realistically doable
 - do not make manual investigation, external research, or manual validation the core of an execution engine task
 - avoid overlap
 - do not over-fragment
@@ -310,9 +276,9 @@ def call_atomic_task_generator_model(
         return AtomicTaskGenerationOutput.model_validate(raw)
     except ValidationError as exc:
         retry_user_prompt = build_atomic_retry_prompt(
+            validation_error=str(exc),
             project_name=project_name,
             parent_task_title=parent_task_title,
-            validation_error=str(exc),
             available_executors=available_executors,
         )
 
