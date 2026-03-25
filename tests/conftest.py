@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
+from collections.abc import Iterator
 
 import pytest
 from sqlalchemy import create_engine
@@ -47,7 +48,7 @@ from app.schemas.recovery import RecoveryDecision, RecoveryTaskCreate
 
 
 @pytest.fixture()
-def db_session(tmp_path: Path) -> Session:
+def db_session(tmp_path: Path) -> Iterator[Session]:
     db_file = tmp_path / "test.db"
     engine = create_engine(
         f"sqlite+pysqlite:///{db_file}",
