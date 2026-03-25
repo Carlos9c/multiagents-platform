@@ -47,7 +47,7 @@ Hard rules:
 - Prefer the minimum next useful action.
 - Use inspect_context when more repository context is needed.
 - Use resolve_file_operations before apply_file_operations.
-- Use run_command when operational evidence is needed.
+- Use run_command only when a concrete command is actually necessary.
 - Use finish when the current operational pass is sufficient for handing off to external validation.
 - Use reject only when no safe operational route exists.
 - Risk flags should inform caution, not automatically block progress.
@@ -104,13 +104,14 @@ Current state:
 Important:
 - Select exactly one next action.
 - Prefer progress over premature blocking.
-- Respect the current phase of execution.
+- Completion phase should normally finish unless a concrete command is truly necessary.
 """.strip()
 
 
 def _allowed_actions(
     request: ExecutionRequest,
     state: ResolutionState,
+    runtime_state: ExecutionState,
 ) -> list[str]:
     caps = get_executor_capabilities(request.executor_type)
 
@@ -128,7 +129,11 @@ def _allowed_actions(
         return [ACTION_FINISH, ACTION_REJECT]
 
     if state.phase == "completion":
-        return [ACTION_RUN_COMMAND, ACTION_FINISH, ACTION_REJECT]
+        # Completion should be narrow.
+        # At most one optional command execution, then finish/reject only.
+        if runtime_state.command_run_count == 0:
+            return [ACTION_FINISH, ACTION_RUN_COMMAND, ACTION_REJECT]
+        return [ACTION_FINISH, ACTION_REJECT]
 
     return [ACTION_REJECT]
 
@@ -136,9 +141,46 @@ def _allowed_actions(
 def _normalize_decision(
     request: ExecutionRequest,
     state: ResolutionState,
+    runtime_state: ExecutionState,
     decision: NextActionDecision,
 ) -> NextActionDecision:
-    allowed = _allowed_actions(request, state)
+    allowed = _allowed_actions(request, state, runtime_state)
+
+    # Extra guard: run_command without a concrete command is invalid.
+    if decision.action == ACTION_RUN_COMMAND and not (decision.command and decision.command.strip()):
+        return NextActionDecision(
+            action=ACTION_FINISH,
+            rationale=(
+                "Completion phase received run_command without a concrete command. "
+                "Finish the operational pass instead."
+            ),
+            target_paths=[],
+            command=None,
+            expected_outcome="Hand off to external validation.",
+            risk_flags=list(decision.risk_flags) + [
+                "run_command_missing_command_overridden_to_finish"
+            ],
+        )
+
+    # Extra guard: after one command attempt in completion, force finish.
+    if (
+        state.phase == "completion"
+        and decision.action == ACTION_RUN_COMMAND
+        and runtime_state.command_run_count >= 1
+    ):
+        return NextActionDecision(
+            action=ACTION_FINISH,
+            rationale=(
+                "A completion-phase command was already attempted. "
+                "Avoid open-ended command looping and finish the operational pass."
+            ),
+            target_paths=[],
+            command=None,
+            expected_outcome="Hand off to external validation.",
+            risk_flags=list(decision.risk_flags) + [
+                "completion_run_command_capped_overridden_to_finish"
+            ],
+        )
 
     if decision.action in allowed:
         return decision
@@ -149,8 +191,8 @@ def _normalize_decision(
         ACTION_INSPECT_CONTEXT: "Current phase requires repository/context inspection first.",
         ACTION_RESOLVE_FILE_OPERATIONS: "Current phase requires resolving artifact operations before any other action.",
         ACTION_APPLY_FILE_OPERATIONS: "Current phase requires applying the planned file operations before any other action.",
-        ACTION_RUN_COMMAND: "Current phase allows command execution before completion.",
-        ACTION_FINISH: "Current phase allows finishing the operational pass.",
+        ACTION_RUN_COMMAND: "Current phase allows one concrete command execution before completion.",
+        ACTION_FINISH: "Current phase should finish the operational pass.",
         ACTION_REJECT: "No safe operational route is available in the current phase.",
     }
 
@@ -213,10 +255,14 @@ class ExecutionOrchestrator:
             decision = _normalize_decision(
                 request=request,
                 state=resolution_state,
+                runtime_state=runtime_state,
                 decision=raw_decision,
             )
 
-            if decision.action != raw_decision.action:
+            if (
+                decision.action != raw_decision.action
+                or decision.command != raw_decision.command
+            ):
                 logger.warning(
                     "execution_orchestrator_action_overridden task_id=%s phase=%s original=%s normalized=%s",
                     request.task_id,
@@ -232,6 +278,8 @@ class ExecutionOrchestrator:
                         "phase": resolution_state.phase,
                         "original_action": raw_decision.action,
                         "normalized_action": decision.action,
+                        "original_command": raw_decision.command,
+                        "normalized_command": decision.command,
                     },
                 )
 
