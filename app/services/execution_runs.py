@@ -63,6 +63,7 @@ def mark_execution_run_started(db: Session, run_id: int) -> ExecutionRun | None:
     run.output_snapshot = None
     run.work_summary = None
     run.work_details = None
+    run.execution_agent_sequence = None
     run.artifacts_created = None
     run.completed_scope = None
     run.remaining_scope = None
@@ -80,6 +81,7 @@ def mark_execution_run_succeeded(
     output_snapshot: str | None = None,
     work_summary: str | None = None,
     work_details: str | None = None,
+    execution_agent_sequence: str | None = None,
     artifacts_created: str | None = None,
     completed_scope: str | None = None,
     validation_notes: str | None = None,
@@ -96,6 +98,7 @@ def mark_execution_run_succeeded(
     run.recovery_action = RECOVERY_ACTION_NONE
     run.work_summary = work_summary
     run.work_details = work_details
+    run.execution_agent_sequence = execution_agent_sequence
     run.artifacts_created = artifacts_created
     run.completed_scope = completed_scope
     run.remaining_scope = None
@@ -113,6 +116,7 @@ def mark_execution_run_partial(
     output_snapshot: str | None = None,
     work_summary: str | None = None,
     work_details: str | None = None,
+    execution_agent_sequence: str | None = None,
     artifacts_created: str | None = None,
     completed_scope: str | None = None,
     remaining_scope: str | None = None,
@@ -138,6 +142,7 @@ def mark_execution_run_partial(
     run.recovery_action = recovery_action
     run.work_summary = work_summary
     run.work_details = work_details
+    run.execution_agent_sequence = execution_agent_sequence
     run.artifacts_created = artifacts_created
     run.completed_scope = completed_scope
     run.remaining_scope = remaining_scope
@@ -158,6 +163,7 @@ def mark_execution_run_failed(
     recovery_action: str = RECOVERY_ACTION_MANUAL_REVIEW,
     work_summary: str | None = None,
     work_details: str | None = None,
+    execution_agent_sequence: str | None = None,
     artifacts_created: str | None = None,
     completed_scope: str | None = None,
     remaining_scope: str | None = None,
@@ -187,6 +193,7 @@ def mark_execution_run_failed(
     run.recovery_action = recovery_action
     run.work_summary = work_summary
     run.work_details = work_details
+    run.execution_agent_sequence = execution_agent_sequence
     run.artifacts_created = artifacts_created
     run.completed_scope = completed_scope
     run.remaining_scope = remaining_scope
@@ -206,6 +213,7 @@ def mark_execution_run_rejected(
     recovery_action: str,
     work_summary: str | None = None,
     work_details: str | None = None,
+    execution_agent_sequence: str | None = None,
     blockers_found: str | None = None,
     validation_notes: str | None = None,
 ) -> ExecutionRun | None:
@@ -226,6 +234,7 @@ def mark_execution_run_rejected(
     run.recovery_action = recovery_action
     run.work_summary = work_summary
     run.work_details = work_details
+    run.execution_agent_sequence = execution_agent_sequence
     run.artifacts_created = None
     run.completed_scope = None
     run.remaining_scope = None

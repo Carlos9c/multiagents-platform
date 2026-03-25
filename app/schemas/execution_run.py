@@ -30,6 +30,7 @@ class ExecutionRunBase(BaseModel):
     recovery_action: str | None = None
     work_summary: str | None = None
     work_details: str | None = None
+    execution_agent_sequence: str | None = None
     artifacts_created: str | None = None
     completed_scope: str | None = None
     remaining_scope: str | None = None

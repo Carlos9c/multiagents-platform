@@ -88,6 +88,7 @@ class ExecutionRun(Base):
 
     work_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     work_details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_agent_sequence: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifacts_created: Mapped[str | None] = mapped_column(Text, nullable=True)
     completed_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
     remaining_scope: Mapped[str | None] = mapped_column(Text, nullable=True)

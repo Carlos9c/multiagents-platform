@@ -98,4 +98,5 @@ class ExecutionResult(BaseModel):
     blockers_found: list[str] = Field(default_factory=list)
     validation_notes: list[str] = Field(default_factory=list)
     output_snapshot: str | None = None
+    execution_agent_sequence: list[str] = Field(default_factory=list)
     evidence: ExecutionEvidence = Field(default_factory=ExecutionEvidence)

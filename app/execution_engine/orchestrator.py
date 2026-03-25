@@ -227,6 +227,7 @@ class ExecutionOrchestrator:
         resolution_state = ResolutionState(
             orchestrator_trace=OrchestratorTrace(task_id=request.task_id)
         )
+        executed_subagents: list[str] = []
 
         resolution_state.orchestrator_trace.add_event(
             event_type="orchestrator_started",
@@ -316,6 +317,7 @@ class ExecutionOrchestrator:
                         validation_notes=[
                             "Execution orchestrator detected finish without outputs."
                         ],
+                        execution_agent_sequence=list(executed_subagents),
                         evidence=resolution_state.evidence,
                     )
 
@@ -369,6 +371,7 @@ class ExecutionOrchestrator:
                         "Execution orchestrator finished normally.",
                         *resolution_state.risk_flags,
                     ],
+                    execution_agent_sequence=list(executed_subagents),
                     evidence=resolution_state.evidence,
                 )
 
@@ -404,6 +407,7 @@ class ExecutionOrchestrator:
                 )
 
                 subagent = self.registry.get(step.subagent_name)
+                executed_subagents.append(subagent.name)
                 runtime_state.register_agent_call(subagent.name)
                 resolution_state = subagent.execute_step(
                     request=request,
@@ -451,6 +455,7 @@ class ExecutionOrchestrator:
                     remaining_scope=request.task_description or request.task_title,
                     blockers_found=[str(exc)],
                     validation_notes=["Registry misconfiguration in orchestrator loop."],
+                    execution_agent_sequence=list(executed_subagents),
                     evidence=resolution_state.evidence,
                 )
 
@@ -483,6 +488,7 @@ class ExecutionOrchestrator:
                     remaining_scope=request.task_description or request.task_title,
                     blockers_found=[str(exc)],
                     validation_notes=["Unexpected orchestrator loop exception."],
+                    execution_agent_sequence=list(executed_subagents),
                     evidence=resolution_state.evidence,
                 )
 
@@ -504,6 +510,7 @@ class ExecutionOrchestrator:
             remaining_scope=request.task_description or request.task_title,
             blockers_found=["max_steps exceeded"],
             validation_notes=["Execution orchestrator exceeded its budget."],
+            execution_agent_sequence=list(executed_subagents),
             evidence=resolution_state.evidence,
         )
 

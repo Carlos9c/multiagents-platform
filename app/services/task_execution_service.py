@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import json
 
 from sqlalchemy.orm import Session
 
@@ -165,7 +166,7 @@ def _create_execution_run_for_task(db: Session, task: Task) -> ExecutionRun:
     return create_execution_run(
         db=db,
         task_id=task.id,
-        agent_name="executor_agent",
+        agent_name="execution_engine",
         input_snapshot=f"Executing task {task.id}: {task.title}",
     )
 
@@ -191,6 +192,22 @@ def _build_sync_result(
         final_task_status=final_task_status,
         validation_decision=validation_decision,
     )
+
+
+def _serialize_execution_agent_sequence(execution_agent_sequence: list[str] | None) -> str:
+    return json.dumps(execution_agent_sequence or [], ensure_ascii=False)
+
+
+def _store_task_execution_agent_sequence(
+    db: Session,
+    *,
+    task: Task,
+    execution_agent_sequence_json: str,
+) -> None:
+    task.last_execution_agent_sequence = execution_agent_sequence_json
+    db.add(task)
+    db.commit()
+    db.refresh(task)
 
 
 def _extract_artifacts_created(executor_result: CodeExecutorResult) -> str | None:
@@ -675,6 +692,9 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         )
 
         engine_result = execution_engine.execute(execution_request)
+        execution_agent_sequence_json = _serialize_execution_agent_sequence(
+            engine_result.execution_agent_sequence
+        )        
 
         logger.info(
             "execution_engine_completed task_id=%s run_id=%s decision=%s summary=%s",
@@ -703,9 +723,15 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 output_snapshot=executor_result.output_snapshot,
                 work_summary=executor_result.journal.summary,
                 work_details=executor_result.edit_plan.summary,
+                execution_agent_sequence=execution_agent_sequence_json,
                 artifacts_created=_extract_artifacts_created(executor_result),
                 completed_scope=executor_result.journal.claimed_completed_scope,
                 validation_notes="; ".join(executor_result.journal.notes_for_validator),
+            )
+            _store_task_execution_agent_sequence(
+                db=db,
+                task=task,
+                execution_agent_sequence_json=execution_agent_sequence_json,
             )
 
             return _validate_after_execution(
@@ -732,11 +758,17 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
                 work_summary=executor_result.journal.summary,
                 work_details=executor_result.edit_plan.summary,
+                execution_agent_sequence=execution_agent_sequence_json,
                 artifacts_created=_extract_artifacts_created(executor_result),
                 completed_scope=executor_result.journal.claimed_completed_scope,
                 remaining_scope=executor_result.journal.claimed_remaining_scope,
                 blockers_found=blockers_found,
                 validation_notes="; ".join(executor_result.journal.notes_for_validator),
+            )
+            _store_task_execution_agent_sequence(
+                db=db,
+                task=task,
+                execution_agent_sequence_json=execution_agent_sequence_json,
             )
             mark_task_failed(db, task.id)
 
@@ -765,8 +797,14 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 recovery_action=RECOVERY_ACTION_REATOMIZE,
                 work_summary=executor_result.journal.summary,
                 work_details=executor_result.edit_plan.summary,
+                execution_agent_sequence=execution_agent_sequence_json,
                 blockers_found=blockers_found,
                 validation_notes="; ".join(executor_result.journal.notes_for_validator),
+            )
+            _store_task_execution_agent_sequence(
+                db=db,
+                task=task,
+                execution_agent_sequence_json=execution_agent_sequence_json,
             )
             mark_task_failed(db, task.id)
 
@@ -788,6 +826,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         raise
 
     except ExecutionEngineRejectedError as exc:
+        execution_agent_sequence_json = _serialize_execution_agent_sequence([])
         blockers_found = "; ".join(exc.blockers_found) if exc.blockers_found else None
 
         mark_execution_run_rejected(
@@ -798,10 +837,16 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             recovery_action=RECOVERY_ACTION_REATOMIZE,
             work_summary=exc.message,
             work_details="The execution engine deliberately rejected the task before execution.",
+            execution_agent_sequence=execution_agent_sequence_json,
             blockers_found=blockers_found,
             validation_notes="; ".join(
                 exc.validation_notes or ["Execution was rejected at the execution engine boundary."]
             ),
+        )
+        _store_task_execution_agent_sequence(
+            db=db,
+            task=task,
+            execution_agent_sequence_json=execution_agent_sequence_json,
         )
         mark_task_failed(db, task.id)
 
@@ -831,6 +876,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         )
 
     except ExecutionEngineError as exc:
+        execution_agent_sequence_json = _serialize_execution_agent_sequence([])
         mark_execution_run_failed(
             db=db,
             run_id=run_id,
@@ -838,7 +884,13 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             failure_type=FAILURE_TYPE_INTERNAL,
             failure_code="execution_engine_error",
             recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
+            execution_agent_sequence=execution_agent_sequence_json,
             validation_notes="Execution engine internal failure.",
+        )
+        _store_task_execution_agent_sequence(
+            db=db,
+            task=task,
+            execution_agent_sequence_json=execution_agent_sequence_json,
         )
         mark_task_failed(db, task.id)
 
@@ -867,6 +919,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         )
 
     except Exception as exc:
+        execution_agent_sequence_json = _serialize_execution_agent_sequence([])
         mark_execution_run_failed(
             db=db,
             run_id=run_id,
@@ -874,6 +927,12 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             failure_type=FAILURE_TYPE_INTERNAL,
             failure_code="task_execution_service_error",
             recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
+            execution_agent_sequence=execution_agent_sequence_json,
+        )
+        _store_task_execution_agent_sequence(
+            db=db,
+            task=task,
+            execution_agent_sequence_json=execution_agent_sequence_json,
         )
         mark_task_failed(db, task.id)
 

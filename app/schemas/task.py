@@ -81,6 +81,7 @@ class TaskRead(BaseModel):
     task_type: str
     planning_level: str
     executor_type: str
+    last_execution_agent_sequence: str | None = None
     sequence_order: int | None = None
     status: str
     is_blocked: bool

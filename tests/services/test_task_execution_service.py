@@ -1,3 +1,4 @@
+import json
 import types
 
 import pytest
@@ -9,6 +10,7 @@ from app.execution_engine.contracts import (
     ExecutionEvidence,
     ExecutionResult,
 )
+from app.models.execution_run import ExecutionRun
 from app.models.task import (
     CODE_EXECUTOR,
     PENDING_ENGINE_ROUTING_EXECUTOR,
@@ -29,7 +31,13 @@ from app.services.task_execution_service import (
 )
 
 
-def _build_engine_result(*, task_id: int, decision: str, summary: str = "Execution summary.") -> ExecutionResult:
+def _build_engine_result(
+    *,
+    task_id: int,
+    decision: str,
+    summary: str = "Execution summary.",
+    execution_agent_sequence: list[str] | None = None,
+) -> ExecutionResult:
     return ExecutionResult(
         task_id=task_id,
         decision=decision,
@@ -40,6 +48,7 @@ def _build_engine_result(*, task_id: int, decision: str, summary: str = "Executi
         blockers_found=[],
         validation_notes=[],
         output_snapshot="executor output",
+        execution_agent_sequence=execution_agent_sequence or [],
         evidence=ExecutionEvidence(
             changed_files=[],
             commands=[],
@@ -121,6 +130,17 @@ def _patch_workspace_runtime(monkeypatch, *, promoted_state: dict | None = None)
     )
 
 
+def _get_latest_run_for_task(db, task_id: int) -> ExecutionRun:
+    run = (
+        db.query(ExecutionRun)
+        .filter(ExecutionRun.task_id == task_id)
+        .order_by(ExecutionRun.id.desc())
+        .first()
+    )
+    assert run is not None
+    return run
+
+
 def test_execute_task_sync_rejects_non_atomic_task(
     db_session,
     make_project,
@@ -154,6 +174,7 @@ def test_execute_task_sync_resolves_pending_executor_at_runtime(
     )
 
     captured = {}
+    expected_sequence = ["context_selection_agent", "code_change_agent"]
 
     _patch_engine(
         monkeypatch,
@@ -161,6 +182,7 @@ def test_execute_task_sync_resolves_pending_executor_at_runtime(
             task_id=atomic_task.id,
             decision=EXECUTION_DECISION_PARTIAL,
             summary="Execution finished successfully.",
+            execution_agent_sequence=expected_sequence,
         ),
         captured_request=captured,
     )
@@ -184,8 +206,13 @@ def test_execute_task_sync_resolves_pending_executor_at_runtime(
 
     assert captured["request"].executor_type == CODE_EXECUTOR
     assert result.executor_type == CODE_EXECUTOR
+
     db_session.refresh(atomic_task)
+    latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
+
     assert atomic_task.executor_type == PENDING_ENGINE_ROUTING_EXECUTOR
+    assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence
+    assert json.loads(latest_run.execution_agent_sequence) == expected_sequence
 
 
 def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
@@ -203,6 +230,7 @@ def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
     )
 
     captured = {}
+    expected_sequence = ["code_change_agent"]
 
     _patch_engine(
         monkeypatch,
@@ -210,6 +238,7 @@ def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
             task_id=atomic_task.id,
             decision=EXECUTION_DECISION_PARTIAL,
             summary="Execution finished successfully.",
+            execution_agent_sequence=expected_sequence,
         ),
         captured_request=captured,
     )
@@ -233,6 +262,12 @@ def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
 
     assert captured["request"].executor_type == CODE_EXECUTOR
     assert result.executor_type == CODE_EXECUTOR
+
+    db_session.refresh(atomic_task)
+    latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
+
+    assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence
+    assert json.loads(latest_run.execution_agent_sequence) == expected_sequence
 
 
 def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
@@ -259,6 +294,7 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
     )
 
     promoted = {"called": False}
+    expected_sequence = ["context_selection_agent", "placement_resolver_agent", "code_change_agent"]
 
     _patch_engine(
         monkeypatch,
@@ -266,6 +302,7 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
             task_id=atomic_task.id,
             decision=EXECUTION_DECISION_PARTIAL,
             summary="Execution finished successfully.",
+            execution_agent_sequence=expected_sequence,
         ),
     )
     _patch_workspace_runtime(monkeypatch, promoted_state=promoted)
@@ -288,6 +325,7 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
 
     db_session.refresh(atomic_task)
     db_session.refresh(parent)
+    latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
 
     assert result.run_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION
     assert result.final_task_status == TASK_STATUS_COMPLETED
@@ -296,6 +334,8 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
     assert atomic_task.status == TASK_STATUS_COMPLETED
     assert parent.status == TASK_STATUS_COMPLETED
     assert promoted["called"] is True
+    assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence
+    assert json.loads(latest_run.execution_agent_sequence) == expected_sequence
 
 
 def test_execute_task_sync_partial_reconciles_parent_to_partial(
@@ -321,12 +361,15 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
         executor_type=CODE_EXECUTOR,
     )
 
+    expected_sequence = ["context_selection_agent", "command_runner_agent"]
+
     _patch_engine(
         monkeypatch,
         _build_engine_result(
             task_id=atomic_task.id,
             decision=EXECUTION_DECISION_PARTIAL,
             summary="Execution finished but validation will be partial.",
+            execution_agent_sequence=expected_sequence,
         ),
     )
     _patch_workspace_runtime(monkeypatch)
@@ -349,6 +392,7 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
 
     db_session.refresh(atomic_task)
     db_session.refresh(parent)
+    latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
 
     assert result.run_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION
     assert result.final_task_status == TASK_STATUS_PARTIAL
@@ -356,6 +400,8 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
     assert result.executor_type == CODE_EXECUTOR
     assert atomic_task.status == TASK_STATUS_PARTIAL
     assert parent.status == TASK_STATUS_PARTIAL
+    assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence
+    assert json.loads(latest_run.execution_agent_sequence) == expected_sequence
 
 
 def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
@@ -381,12 +427,15 @@ def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
         executor_type=CODE_EXECUTOR,
     )
 
+    expected_sequence = ["context_selection_agent", "code_change_agent"]
+
     _patch_engine(
         monkeypatch,
         _build_engine_result(
             task_id=atomic_task.id,
             decision=EXECUTION_DECISION_FAILED,
             summary="Execution engine reported a failed execution.",
+            execution_agent_sequence=expected_sequence,
         ),
     )
     _patch_workspace_runtime(monkeypatch)
@@ -405,12 +454,15 @@ def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
 
     db_session.refresh(atomic_task)
     db_session.refresh(parent)
+    latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
 
     assert result.final_task_status == TASK_STATUS_FAILED
     assert result.validation_decision == "failed"
     assert result.executor_type == CODE_EXECUTOR
     assert atomic_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_FAILED
+    assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence
+    assert json.loads(latest_run.execution_agent_sequence) == expected_sequence
 
 
 def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
@@ -436,12 +488,15 @@ def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
         executor_type=CODE_EXECUTOR,
     )
 
+    expected_sequence = ["context_selection_agent", "command_runner_agent"]
+
     _patch_engine(
         monkeypatch,
         _build_engine_result(
             task_id=atomic_task.id,
             decision=EXECUTION_DECISION_REJECTED,
             summary="Execution engine rejected the task.",
+            execution_agent_sequence=expected_sequence,
         ),
     )
     _patch_workspace_runtime(monkeypatch)
@@ -460,9 +515,12 @@ def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
 
     db_session.refresh(atomic_task)
     db_session.refresh(parent)
+    latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
 
     assert result.run_status == CODE_EXECUTION_STATUS_REJECTED
     assert result.final_task_status == TASK_STATUS_FAILED
     assert result.executor_type == CODE_EXECUTOR
     assert atomic_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_FAILED
+    assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence
+    assert json.loads(latest_run.execution_agent_sequence) == expected_sequence

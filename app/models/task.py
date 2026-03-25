@@ -109,6 +109,11 @@ class Task(Base):
         default=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
 
+    last_execution_agent_sequence: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     sequence_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     status: Mapped[str] = mapped_column(
