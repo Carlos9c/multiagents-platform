@@ -205,6 +205,8 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
                 command,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=120,
                 check=False,
             )
@@ -213,14 +215,30 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         except subprocess.TimeoutExpired:
             return "Diff generation timed out."
 
-        # git diff --no-index returns exit code 1 when differences are found.
-        if result.returncode not in {0, 1}:
+        # git diff --no-index semantics:
+        # 0 => no differences
+        # 1 => differences found
+        # >1 => actual failure
+        if result.returncode == 0:
+            return result.stdout.strip()
+
+        if result.returncode == 1:
+            return result.stdout.strip()
+
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+
+        if stderr:
             return (
-                f"Diff generation failed with exit code {result.returncode}: "
-                f"{result.stderr.strip()}"
+                f"Diff generation failed with exit code {result.returncode}: {stderr}"
             )
 
-        return result.stdout.strip()
+        if stdout:
+            return (
+                f"Diff generation failed with exit code {result.returncode}: {stdout}"
+            )
+
+        return f"Diff generation failed with exit code {result.returncode}."
 
     def promote_workspace_to_source(
         self,
@@ -269,6 +287,8 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
                 cwd=workspace,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
                 check=False,
             )
@@ -284,15 +304,15 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         command_result = CommandResult(
             command=command,
             exit_code=result.returncode,
-            stdout=result.stdout,
-            stderr=result.stderr,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
         )
 
         if result.returncode not in allowed_exit_codes:
             raise WorkspaceRuntimeError(
                 "Command execution failed. "
                 f"exit_code={result.returncode}, command={' '.join(command)}, "
-                f"stderr={result.stderr.strip()}"
+                f"stderr={(result.stderr or '').strip()}"
             )
 
         return command_result

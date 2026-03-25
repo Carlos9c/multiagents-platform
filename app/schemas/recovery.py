@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field, model_validator
 
 
 RecoveryAction = Literal[
-    "retry",
     "reatomize",
     "insert_followup",
     "manual_review",
@@ -108,35 +107,26 @@ class RecoveryDecision(BaseModel):
         if self.execution_guidance is not None:
             self.execution_guidance = self.execution_guidance.strip() or None
 
-        if self.action == "retry":
-            if self.created_tasks:
-                raise ValueError("created_tasks must be empty when action='retry'.")
-            if not self.retry_same_task:
-                raise ValueError("retry_same_task must be true when action='retry'.")
-            if self.requires_manual_review:
-                raise ValueError("action='retry' cannot require manual review.")
+        if self.retry_same_task:
+            raise ValueError(
+                "retry_same_task is not supported in the current workflow and must be false."
+            )
 
-        elif self.action == "reatomize":
+        if self.action == "reatomize":
             if not self.created_tasks:
                 raise ValueError("created_tasks must not be empty when action='reatomize'.")
-            if self.retry_same_task:
-                raise ValueError("retry_same_task must be false when action='reatomize'.")
             if self.requires_manual_review:
                 raise ValueError("action='reatomize' cannot require manual review.")
 
         elif self.action == "insert_followup":
             if not self.created_tasks:
                 raise ValueError("created_tasks must not be empty when action='insert_followup'.")
-            if self.retry_same_task:
-                raise ValueError("retry_same_task must be false when action='insert_followup'.")
             if self.requires_manual_review:
                 raise ValueError("action='insert_followup' cannot require manual review.")
 
         elif self.action == "manual_review":
             if self.created_tasks:
                 raise ValueError("created_tasks must be empty when action='manual_review'.")
-            if self.retry_same_task:
-                raise ValueError("retry_same_task must be false when action='manual_review'.")
             if not self.requires_manual_review:
                 raise ValueError("requires_manual_review must be true when action='manual_review'.")
             if not self.still_blocks_progress:

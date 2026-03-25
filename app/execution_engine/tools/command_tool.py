@@ -23,6 +23,8 @@ def run_command(
         capture_output=True,
         text=True,
         timeout=timeout_seconds,
+        encoding="utf-8",
+        errors="replace",
     )
 
     return CommandExecution(

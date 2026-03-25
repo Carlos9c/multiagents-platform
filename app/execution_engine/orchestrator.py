@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from pydantic import ValidationError
 
 from app.execution_engine.agent_runtime import BaseAgentRuntime
 from app.execution_engine.base import ExecutionEngineRejectedError
 from app.execution_engine.budget import LoopBudget
+from app.execution_engine.capabilities import get_executor_capabilities
 from app.execution_engine.contracts import (
     EXECUTION_DECISION_FAILED,
     EXECUTION_DECISION_PARTIAL,
@@ -29,8 +31,11 @@ from app.execution_engine.execution_plan import ExecutionStep
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 
+logger = logging.getLogger(__name__)
+
+
 ORCHESTRATOR_SYSTEM_PROMPT = """
-You are the execution orchestrator for one already-atomic software task.
+You are the execution orchestrator for one already-atomic task.
 
 Your responsibility is to decide the next best operational action.
 You must not modify the task itself.
@@ -46,8 +51,6 @@ Hard rules:
 - Use finish when the current operational pass is sufficient for handing off to external validation.
 - Use reject only when no safe operational route exists.
 - Risk flags should inform caution, not automatically block progress.
-- Multi-file tasks are valid.
-- Do not finish early if clearly necessary file operations are still pending.
 """.strip()
 
 
@@ -56,6 +59,8 @@ def _build_orchestrator_prompt(
     runtime_state: ExecutionState,
     resolution_state: ResolutionState,
 ) -> str:
+    capabilities = get_executor_capabilities(request.executor_type)
+
     return f"""
 Task:
 - task_id: {request.task_id}
@@ -65,6 +70,12 @@ Task:
 - acceptance_criteria: {request.acceptance_criteria}
 - technical_constraints: {request.technical_constraints}
 - out_of_scope: {request.out_of_scope}
+- executor_type: {request.executor_type}
+
+Executor capabilities:
+- supports_artifact_creation: {capabilities.supports_artifact_creation}
+- supports_artifact_modification: {capabilities.supports_artifact_modification}
+- supports_bootstrap_from_empty_workspace: {capabilities.supports_bootstrap_from_empty_workspace}
 
 Runtime counters:
 - step_count: {runtime_state.step_count}
@@ -74,10 +85,13 @@ Runtime counters:
 - repair_attempt_count: {runtime_state.repair_attempt_count}
 
 Current state:
+- phase: {resolution_state.phase}
 - observed_repo_summary_present: {bool(resolution_state.observed_repo_summary)}
 - context_selected: {resolution_state.context_selection is not None}
 - selected_paths: {resolution_state.selected_paths}
 - planned_file_operations_present: {resolution_state.planned_file_operations is not None}
+- file_planning_attempt_count: {resolution_state.file_planning_attempt_count}
+- materialization_attempt_count: {resolution_state.materialization_attempt_count}
 - pending_operation_paths: {resolution_state.pending_operation_paths}
 - applied_operation_paths: {resolution_state.applied_operation_paths}
 - failed_operation_paths: {resolution_state.failed_operation_paths}
@@ -85,13 +99,73 @@ Current state:
 - executed_commands: {[item.model_dump() for item in resolution_state.evidence.commands]}
 - risk_flags: {resolution_state.risk_flags}
 - step_notes: {resolution_state.step_notes}
-- validation_notes: {resolution_state.evidence.notes}
+- evidence_notes: {resolution_state.evidence.notes}
 
 Important:
 - Select exactly one next action.
 - Prefer progress over premature blocking.
-- Finish only when the current operational pass is actually sufficient.
+- Respect the current phase of execution.
 """.strip()
+
+
+def _allowed_actions(
+    request: ExecutionRequest,
+    state: ResolutionState,
+) -> list[str]:
+    caps = get_executor_capabilities(request.executor_type)
+
+    if state.phase == "discovery":
+        return [ACTION_INSPECT_CONTEXT, ACTION_REJECT]
+
+    if state.phase == "planning":
+        if caps.supports_artifact_creation:
+            return [ACTION_RESOLVE_FILE_OPERATIONS, ACTION_REJECT]
+        return [ACTION_REJECT]
+
+    if state.phase == "materialization":
+        if state.has_pending_operations():
+            return [ACTION_APPLY_FILE_OPERATIONS, ACTION_REJECT]
+        return [ACTION_FINISH, ACTION_REJECT]
+
+    if state.phase == "completion":
+        return [ACTION_RUN_COMMAND, ACTION_FINISH, ACTION_REJECT]
+
+    return [ACTION_REJECT]
+
+
+def _normalize_decision(
+    request: ExecutionRequest,
+    state: ResolutionState,
+    decision: NextActionDecision,
+) -> NextActionDecision:
+    allowed = _allowed_actions(request, state)
+
+    if decision.action in allowed:
+        return decision
+
+    fallback_action = allowed[0]
+
+    rationale_map = {
+        ACTION_INSPECT_CONTEXT: "Current phase requires repository/context inspection first.",
+        ACTION_RESOLVE_FILE_OPERATIONS: "Current phase requires resolving artifact operations before any other action.",
+        ACTION_APPLY_FILE_OPERATIONS: "Current phase requires applying the planned file operations before any other action.",
+        ACTION_RUN_COMMAND: "Current phase allows command execution before completion.",
+        ACTION_FINISH: "Current phase allows finishing the operational pass.",
+        ACTION_REJECT: "No safe operational route is available in the current phase.",
+    }
+
+    return NextActionDecision(
+        action=fallback_action,
+        rationale=rationale_map[fallback_action],
+        target_paths=list(state.pending_operation_paths)
+        if fallback_action == ACTION_APPLY_FILE_OPERATIONS
+        else [],
+        command=None,
+        expected_outcome=None,
+        risk_flags=list(decision.risk_flags) + [
+            "action_overridden_by_phase_policy"
+        ],
+    )
 
 
 class ExecutionOrchestrator:
@@ -123,12 +197,43 @@ class ExecutionOrchestrator:
             },
         )
 
+        logger.info(
+            "execution_orchestrator_started task_id=%s executor_type=%s max_steps=%s",
+            request.task_id,
+            request.executor_type,
+            self.budget.max_steps,
+        )
+
         while runtime_state.step_count < self.budget.max_steps:
-            decision = self._decide_next_action(
+            raw_decision = self._decide_next_action(
                 request=request,
                 runtime_state=runtime_state,
                 resolution_state=resolution_state,
             )
+            decision = _normalize_decision(
+                request=request,
+                state=resolution_state,
+                decision=raw_decision,
+            )
+
+            if decision.action != raw_decision.action:
+                logger.warning(
+                    "execution_orchestrator_action_overridden task_id=%s phase=%s original=%s normalized=%s",
+                    request.task_id,
+                    resolution_state.phase,
+                    raw_decision.action,
+                    decision.action,
+                )
+                resolution_state.orchestrator_trace.add_event(
+                    event_type="action_overridden_by_phase_policy",
+                    step_count=runtime_state.step_count,
+                    task_id=request.task_id,
+                    payload={
+                        "phase": resolution_state.phase,
+                        "original_action": raw_decision.action,
+                        "normalized_action": decision.action,
+                    },
+                )
 
             resolution_state.orchestrator_trace.add_event(
                 event_type="next_action_decided",
@@ -137,10 +242,35 @@ class ExecutionOrchestrator:
                 payload=decision.model_dump(),
             )
 
+            logger.info(
+                "execution_orchestrator_next_action task_id=%s step=%s phase=%s action=%s",
+                request.task_id,
+                runtime_state.step_count,
+                resolution_state.phase,
+                decision.action,
+            )
+
             runtime_state.register_step()
             resolution_state.add_risk_flags(decision.risk_flags)
 
             if decision.action == ACTION_FINISH:
+                if not resolution_state.has_outputs():
+                    resolution_state.evidence.notes.extend(
+                        resolution_state.orchestrator_trace.to_notes()
+                    )
+                    return ExecutionResult(
+                        task_id=request.task_id,
+                        decision=EXECUTION_DECISION_FAILED,
+                        summary="Execution reached finish without materialized outputs.",
+                        details="The orchestrator refused to finish because no outputs were produced.",
+                        remaining_scope=request.task_description or request.task_title,
+                        blockers_found=["no_materialized_output"],
+                        validation_notes=[
+                            "Execution orchestrator detected finish without outputs."
+                        ],
+                        evidence=resolution_state.evidence,
+                    )
+
                 remaining_scope = (
                     "Some planned file operations remain pending."
                     if resolution_state.has_pending_operations()
@@ -170,6 +300,13 @@ class ExecutionOrchestrator:
 
                 resolution_state.evidence.notes.extend(
                     resolution_state.orchestrator_trace.to_notes()
+                )
+
+                logger.info(
+                    "execution_orchestrator_finished task_id=%s pending=%s applied=%s",
+                    request.task_id,
+                    len(resolution_state.pending_operation_paths),
+                    len(resolution_state.applied_operation_paths),
                 )
 
                 return ExecutionResult(
@@ -237,6 +374,7 @@ class ExecutionOrchestrator:
                     payload={
                         "subagent_name": step.subagent_name,
                         "kind": step.kind,
+                        "phase": resolution_state.phase,
                         "pending_operation_paths": list(
                             resolution_state.pending_operation_paths
                         ),
@@ -275,10 +413,7 @@ class ExecutionOrchestrator:
                     event_type="subagent_rejected_step",
                     step_count=runtime_state.step_count,
                     task_id=request.task_id,
-                    payload={
-                        "action": decision.action,
-                        "error": str(exc),
-                    },
+                    payload={"action": decision.action, "error": str(exc)},
                 )
 
             except Exception as exc:
@@ -287,10 +422,7 @@ class ExecutionOrchestrator:
                     event_type="subagent_unexpected_error",
                     step_count=runtime_state.step_count,
                     task_id=request.task_id,
-                    payload={
-                        "action": decision.action,
-                        "error": str(exc),
-                    },
+                    payload={"action": decision.action, "error": str(exc)},
                 )
                 resolution_state.evidence.notes.extend(
                     resolution_state.orchestrator_trace.to_notes()

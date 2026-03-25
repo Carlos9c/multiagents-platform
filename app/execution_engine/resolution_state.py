@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.execution_engine.context_selection import ContextSelectionResult
@@ -8,9 +10,19 @@ from app.execution_engine.file_operations import FileOperationPlan
 from app.execution_engine.monitoring import OrchestratorTrace
 
 
+ExecutionPhase = Literal[
+    "discovery",
+    "planning",
+    "materialization",
+    "completion",
+]
+
+
 class ResolutionState(BaseModel):
     selected_strategy: str | None = None
     active_step_id: str | None = None
+
+    phase: ExecutionPhase = "discovery"
 
     observed_repo_summary: str | None = None
     candidate_paths: list[str] = Field(default_factory=list)
@@ -23,6 +35,9 @@ class ResolutionState(BaseModel):
     pending_operation_paths: list[str] = Field(default_factory=list)
     applied_operation_paths: list[str] = Field(default_factory=list)
     failed_operation_paths: list[str] = Field(default_factory=list)
+
+    file_planning_attempt_count: int = 0
+    materialization_attempt_count: int = 0
 
     completed_steps: list[str] = Field(default_factory=list)
     failed_steps: list[str] = Field(default_factory=list)
@@ -58,11 +73,18 @@ class ResolutionState(BaseModel):
             if risk not in self.risk_flags:
                 self.risk_flags.append(risk)
 
+    def increment_file_planning_attempts(self) -> None:
+        self.file_planning_attempt_count += 1
+
+    def increment_materialization_attempts(self) -> None:
+        self.materialization_attempt_count += 1
+
     def set_planned_file_operations(self, plan: FileOperationPlan) -> None:
         self.planned_file_operations = plan
         self.pending_operation_paths = [item.path for item in plan.sorted_operations()]
         self.applied_operation_paths = []
         self.failed_operation_paths = []
+        self.phase = "materialization"
 
     def mark_operation_applied(self, path: str) -> None:
         if path in self.pending_operation_paths:
@@ -74,6 +96,9 @@ class ResolutionState(BaseModel):
         if path not in self.applied_operation_paths:
             self.applied_operation_paths.append(path)
 
+        if not self.pending_operation_paths:
+            self.phase = "completion"
+
     def mark_operation_failed(self, path: str) -> None:
         if path in self.pending_operation_paths:
             self.pending_operation_paths.remove(path)
@@ -81,8 +106,14 @@ class ResolutionState(BaseModel):
         if path not in self.failed_operation_paths:
             self.failed_operation_paths.append(path)
 
+    def mark_context_selected(self) -> None:
+        self.phase = "planning"
+
     def has_pending_operations(self) -> bool:
         return len(self.pending_operation_paths) > 0
+
+    def has_outputs(self) -> bool:
+        return bool(self.evidence.changed_files or self.evidence.commands)
 
     def get_pending_plan_subset(self) -> FileOperationPlan | None:
         if self.planned_file_operations is None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import ValidationError
 
 from app.execution_engine.agent_runtime import BaseAgentRuntime
+from app.execution_engine.capabilities import get_executor_capabilities
 from app.execution_engine.contracts import ExecutionRequest
 from app.execution_engine.execution_plan import (
     STEP_KIND_RESOLVE_FILE_OPERATIONS,
@@ -15,31 +16,39 @@ from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 
 PLACEMENT_RESOLVER_SYSTEM_PROMPT = """
-You are a senior software integration and placement agent.
+You are a senior artifact placement and integration agent.
 
-Your job is to decide which project-relative files should be created or modified
-to execute ONE already-atomic code task safely.
+Your job is to decide which repository-relative artifacts should be created or modified
+to execute ONE already-atomic task safely.
 
 Return ONLY JSON matching the provided schema.
 
 Hard rules:
 - Do not change the task.
 - Do not expand scope beyond the atomic task.
-- Prefer the smallest coherent file surface.
-- Use project-relative paths only.
-- If a file already likely exists and is the natural integration point, prefer modify.
-- Create new files only when truly justified.
-- Multi-file changes are allowed when they are necessary for correct integration.
+- Prefer the smallest coherent artifact surface.
+- Use repository-relative paths only.
+- If an existing artifact is the natural integration point, prefer modify.
+- Create new artifacts when necessary.
+- Multi-artifact changes are allowed when required for correct integration.
 - Use sequence to express a sensible application order.
 - Use depends_on_paths when one operation logically depends on another.
-- Include integration notes when additional wiring is needed.
+- Include integration notes when wiring or placement constraints matter.
 - Do not validate completion. Validation happens outside the execution engine.
 - Do not invent broad refactors.
-- Do not reject just because there is uncertainty; reject only when safe placement is genuinely not possible.
+- Do not reject just because there is uncertainty.
+
+Critical rule:
+- If the workspace is effectively empty BUT the executor supports artifact creation
+  and bootstrap from an empty workspace, you must still produce a minimal valid
+  artifact plan inferred from the task intent and executor capabilities.
+- The absence of repository conventions is not, by itself, a valid reason to stop.
 """.strip()
 
 
 def _build_user_prompt(request: ExecutionRequest, state: ResolutionState) -> str:
+    capabilities = get_executor_capabilities(request.executor_type)
+
     return f"""
 Task:
 - task_id: {request.task_id}
@@ -51,6 +60,11 @@ Task:
 - technical_constraints: {request.technical_constraints}
 - out_of_scope: {request.out_of_scope}
 - executor_type: {request.executor_type}
+
+Executor capabilities:
+- supports_artifact_creation: {capabilities.supports_artifact_creation}
+- supports_artifact_modification: {capabilities.supports_artifact_modification}
+- supports_bootstrap_from_empty_workspace: {capabilities.supports_bootstrap_from_empty_workspace}
 
 Execution context:
 - workspace_path: {request.context.workspace_path}
@@ -68,12 +82,10 @@ Selected file context:
 {state.selected_file_context or "[no selected file context available]"}
 
 Important:
-- Return a minimal but sufficient multi-file operation plan when needed.
-- Use create when a file should be newly introduced.
-- Use modify when the task should integrate into an existing file.
-- Use category to distinguish source/test/config/integration/docs.
-- Use sequence for execution order.
-- If safe placement is not possible, explain why using rejection_reason.
+- Return a minimal but sufficient artifact plan.
+- If the workspace is empty and bootstrap is supported, infer a sensible initial artifact set from the task objective.
+- Do not stop just because no conventions are visible yet.
+- If safe placement is genuinely impossible, explain why using rejection_reason.
 """.strip()
 
 
@@ -97,6 +109,8 @@ class PlacementResolverAgent(BaseSubagent):
             raise SubagentRejectedStepError(
                 f"{self.name} does not support step kind '{step.kind}'"
             )
+
+        state.increment_file_planning_attempts()
 
         schema = to_openai_strict_json_schema(FileOperationPlan.model_json_schema())
         raw = self.runtime.generate_structured(

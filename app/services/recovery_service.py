@@ -242,12 +242,36 @@ def materialize_recovery_decision(
 
         return []
 
-    if decision.action == "retry":
+    normalized_action = decision.action
+
+    # Defensive normalization for legacy artifacts or stale model outputs.
+    # The active workflow no longer supports retry because the source atomic
+    # task must remain terminal. Degrade it gracefully instead of crashing.
+    if normalized_action == "retry":
+        if decision.created_tasks:
+            normalized_action = "insert_followup"
+        else:
+            normalized_action = "manual_review"
+
+    if normalized_action not in {"reatomize", "insert_followup", "manual_review"}:
+        raise RecoveryServiceError(f"Unsupported recovery action '{normalized_action}'.")
+
+    if normalized_action == "manual_review":
+        db.refresh(source_task)
+        if source_task.status != original_status:
+            raise RecoveryServiceError(
+                f"Recovery integrity error: source task {source_task.id} changed status from "
+                f"'{original_status}' to '{source_task.status}' during manual_review materialization."
+            )
+        return []
+
+    if not decision.created_tasks:
         raise RecoveryServiceError(
-            "Recovery action 'retry' is not supported in the current workflow. "
-            "The source atomic task must remain terminal. Use 'reatomize' or "
-            "'insert_followup' to create new tasks instead."
+            f"Recovery action '{normalized_action}' requires created_tasks."
         )
+
+    if decision.action not in {"reatomize", "insert_followup"}:
+        raise RecoveryServiceError(f"Unsupported recovery action '{decision.action}'.")
 
     if decision.action not in {"reatomize", "insert_followup"}:
         raise RecoveryServiceError(f"Unsupported recovery action '{decision.action}'.")

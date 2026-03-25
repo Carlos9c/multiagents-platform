@@ -111,4 +111,5 @@ class ContextSelectionAgent(BaseSubagent):
         )
 
         state.add_note("LLM-based context selection completed.")
+        state.mark_context_selected()
         return state

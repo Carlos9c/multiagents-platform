@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -73,6 +74,9 @@ from app.services.tasks import (
     mark_task_failed,
     mark_task_running,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 SUPPORTED_EXECUTORS = {
@@ -199,6 +203,44 @@ def _split_blockers(blockers_found: str | None) -> list[str]:
     return [item.strip() for item in blockers_found.split(";") if item.strip()]
 
 
+def _prepare_execution_workspace(
+    *,
+    task: Task,
+    run_id: int,
+) -> None:
+    """
+    Prepare the isolated execution workspace for this execution run.
+
+    This must happen before building the execution request and before the
+    execution engine starts, so that:
+    - the workspace path exists
+    - source baseline is copied into the run workspace
+    - validation can later inspect the same isolated workspace
+    """
+    try:
+        storage_service = ProjectStorageService()
+        workspace_runtime = LocalWorkspaceRuntime(storage_service=storage_service)
+
+        prepared = workspace_runtime.prepare_workspace(
+            project_id=task.project_id,
+            execution_run_id=run_id,
+            domain_name=CODE_DOMAIN,
+        )
+
+        logger.info(
+            "execution_workspace_prepared task_id=%s run_id=%s project_id=%s workspace=%s source=%s",
+            task.id,
+            run_id,
+            task.project_id,
+            str(prepared.workspace_dir),
+            str(prepared.source_dir) if prepared.source_dir else "",
+        )
+    except Exception as exc:
+        raise TaskExecutionServiceError(
+            f"Could not prepare execution workspace for task {task.id}, run {run_id}: {str(exc)}"
+        ) from exc
+
+
 def _build_synthetic_executor_result(
     *,
     task: Task,
@@ -286,7 +328,6 @@ def _build_synthetic_executor_result(
 
 def _map_engine_decision_to_execution_status(decision: str) -> str:
     if decision in {EXECUTION_DECISION_PARTIAL, EXECUTION_DECISION_COMPLETED}:
-        # El engine termina su resolución operativa, pero el cierre real sigue perteneciendo al validator.
         return CODE_EXECUTION_STATUS_AWAITING_VALIDATION
     if decision == EXECUTION_DECISION_FAILED:
         return CODE_EXECUTION_STATUS_FAILED
@@ -583,13 +624,50 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         mark_execution_run_started(db, run_id)
         mark_task_running(db, task.id)
 
+        logger.info(
+            "execution_engine_starting task_id=%s run_id=%s project_id=%s executor_type=%s",
+            task.id,
+            run_id,
+            task.project_id,
+            task.executor_type,
+        )
+
+        _prepare_execution_workspace(
+            task=task,
+            run_id=run_id,
+        )
+
         execution_request = build_execution_request(
             db=db,
             task=task,
             execution_run_id=run_id,
         )
+
+        logger.info(
+            "execution_request_built task_id=%s run_id=%s workspace=%s source=%s",
+            task.id,
+            run_id,
+            execution_request.context.workspace_path,
+            execution_request.context.source_path,
+        )
+
         execution_engine = get_execution_engine(db)
+        logger.info(
+            "execution_engine_selected task_id=%s run_id=%s backend=%s",
+            task.id,
+            run_id,
+            getattr(execution_engine, "backend_name", execution_engine.__class__.__name__),
+        )
+
         engine_result = execution_engine.execute(execution_request)
+
+        logger.info(
+            "execution_engine_completed task_id=%s run_id=%s decision=%s summary=%s",
+            task.id,
+            run_id,
+            engine_result.decision,
+            engine_result.summary,
+        )
 
         executor_result = _build_executor_result_from_engine_result(
             task=task,

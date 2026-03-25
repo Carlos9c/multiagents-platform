@@ -15,6 +15,15 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 
+logging.getLogger("app.execution_engine").setLevel(logging.INFO)
+logging.getLogger("app.execution_engine.orchestrator").setLevel(logging.INFO)
+logging.getLogger("app.services.task_execution_service").setLevel(logging.INFO)
+logging.getLogger("sqlalchemy.engine.Engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.dialects").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy").propagate = False
+
 app = FastAPI(title="Agente Desarrollador")
 
 app.include_router(projects_router)

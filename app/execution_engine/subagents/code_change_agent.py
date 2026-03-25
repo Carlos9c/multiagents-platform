@@ -31,22 +31,20 @@ from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 
 CODE_CHANGE_AGENT_SYSTEM_PROMPT = """
-You are a senior software implementation agent.
+You are a senior artifact implementation agent.
 
-Your job is to materialize the approved PENDING file operation plan for ONE already-atomic code task.
+Your job is to materialize the approved pending artifact operation plan for ONE already-atomic task.
 Return ONLY JSON matching the provided schema.
 
 Hard rules:
 - Do not change the task.
-- Generate exactly the files in the provided pending operation plan.
-- For operation=create, return the full final file content.
-- For operation=modify, return the full updated file content.
-- Do not invent extra files.
-- Multi-file implementation is allowed and expected when present in the pending plan.
+- Generate exactly the artifacts in the provided pending operation plan.
+- For operation=create, return the full final artifact content.
+- For operation=modify, return the full updated artifact content.
+- Do not invent extra artifacts.
 - Respect sequence, dependencies, repository structure, and integration notes.
 - Keep the implementation as small and coherent as possible.
 - Do not validate final completion. Validation happens outside the execution engine.
-- Modifying an existing file is allowed when the approved plan says modify.
 """.strip()
 
 
@@ -113,7 +111,7 @@ Repository summary:
 Selected file context:
 {state.selected_file_context or "[no selected file context available]"}
 
-Approved pending file operation plan:
+Approved pending artifact operation plan:
 {pending_plan.model_dump_json(indent=2)}
 
 Current operation tracking:
@@ -125,8 +123,8 @@ Existing file context:
 {files_context}
 
 Important:
-- Generate exactly the files in the pending plan.
-- Return full file content for each file.
+- Generate exactly the artifacts in the pending plan.
+- Return full final content for each artifact.
 - Respect operation order and dependencies.
 - Keep the implementation conservative and scoped.
 """.strip()
@@ -163,6 +161,8 @@ class CodeChangeAgent(BaseSubagent):
             raise SubagentRejectedStepError(
                 "There are no pending file operations to materialize."
             )
+
+        state.increment_materialization_attempts()
 
         schema = to_openai_strict_json_schema(
             FileMaterializationResult.model_json_schema()
@@ -256,7 +256,7 @@ class CodeChangeAgent(BaseSubagent):
         state.evidence.notes.extend(materialization.notes)
         state.add_risk_flags(materialization.warnings)
         state.add_note(
-            f"LLM-based file materialization completed for {len(ordered_generated_files)} pending operations."
+            f"Artifact materialization completed for {len(ordered_generated_files)} pending operations."
         )
 
         return state

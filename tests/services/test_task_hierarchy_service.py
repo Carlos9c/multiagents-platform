@@ -1,4 +1,7 @@
 import pytest
+from pydantic import ValidationError
+
+from app.schemas.recovery import RecoveryDecision
 
 from app.models.task import (
     TASK_STATUS_FAILED,
@@ -117,34 +120,18 @@ def test_manual_review_keeps_source_partial_and_creates_no_tasks(
     assert source_task.status == TASK_STATUS_PARTIAL
 
 
-def test_retry_action_is_rejected_in_current_workflow(
-    db_session,
-    make_project,
-    make_task,
-    make_execution_run,
-    make_recovery_decision,
-):
-    project = make_project()
-    source_task = make_task(
-        project_id=project.id,
-        title="Failed atomic task",
-        status=TASK_STATUS_FAILED,
-    )
-    run = make_execution_run(task_id=source_task.id, status="failed")
-
-    decision = make_recovery_decision(
-        source_task_id=source_task.id,
-        source_run_id=run.id,
-        action="retry",
-        retry_same_task=True,
-        created_tasks=[],
-        reason="The same task could theoretically be retried.",
-        covered_gap_summary="This would reopen the same task rather than creating follow-up work.",
-    )
-
-    with pytest.raises(RecoveryServiceError, match="retry"):
-        materialize_recovery_decision(
-            db_session,
-            project_id=project.id,
-            decision=decision,
+def test_retry_action_is_rejected_in_current_workflow():
+    with pytest.raises(ValidationError, match="Input should be 'reatomize', 'insert_followup' or 'manual_review'"):
+        RecoveryDecision(
+            source_task_id=1,
+            source_run_id=1,
+            action="retry",
+            confidence="medium",
+            reason="Retry should no longer be allowed.",
+            covered_gap_summary="Legacy retry is not supported anymore.",
+            retry_same_task=False,
+            requires_manual_review=False,
+            still_blocks_progress=True,
+            created_tasks=[],
+            decision_origin="post_batch_recovery",
         )

@@ -21,8 +21,8 @@ Current workflow reality:
   - replace_atomic_task
   - re_atomize_from_parent
   - mark_obsolete
-- The only valid recovery actions are:
   - retry
+- The only valid recovery actions are:
   - reatomize
   - insert_followup
   - manual_review
@@ -34,10 +34,6 @@ Critical recovery principle:
 - A context-selection failure does NOT automatically mean the task was wrong.
 
 Action semantics:
-- retry
-  - use only when the same task is still valid as-is
-  - use only when the failure appears transient, local, environment-related, or caused by context resolution / orchestration rather than task scope
-  - do not create new tasks
 - reatomize
   - use when the current task was badly scoped, not executable as one unit, too broad,
     mixed incompatible work, or should be split into better atomic tasks
@@ -57,14 +53,13 @@ Special rule for context-selection failures:
 - If the failure is mainly about code context selection, missing useful existing context, or the model selecting non-existing paths,
   assume first that this is a context-resolution problem, not an intent-change problem.
 - In that case, strongly prefer:
-  - retry, if the same task should still be attempted with corrected context handling
-  - or conservative reatomize, if the original task is too broad but the same intent should be preserved
+  - conservative reatomize, if the original task is too broad or should be split while preserving intent
+  - or manual_review, if automated next steps are not trustworthy enough
 - Do NOT change a documentation task into a bootstrap or implementation task just because context resolution failed.
 - Do NOT change a requirements/scope task into runtime implementation work just because context resolution failed.
 
 Decision rules:
 - Prefer the narrowest sufficient action.
-- Prefer retry over reatomize only when the task itself is still structurally sound.
 - Prefer reatomize over insert_followup when the original task definition is the real problem.
 - Prefer insert_followup only when the task was mostly valid and the remaining work is additive.
 - Use manual_review for ambiguity, conflict, unsafe state, or lack of reliable automated next steps.
@@ -101,13 +96,13 @@ Reasoning rules:
 - execution_guidance may explain constraints or expectations for the executor
 
 Self-check before finalizing:
-- Is this action one of the four valid actions?
+- Is this action one of the three valid actions?
 - Is it the narrowest reliable action?
 - Am I preserving the original task intent?
-- If action=retry, are created_tasks empty and retry_same_task=true?
 - If action=reatomize or insert_followup, are created_tasks present and still faithful to the original task objective?
 - If action=manual_review, are created_tasks empty and requires_manual_review=true?
 - Are all created tasks compatible with code_executor and repository-based validation?
+- retry is not supported in this workflow and must never be returned.
 """.strip()
 
 
@@ -138,12 +133,13 @@ Remaining plan summary:
 Instructions:
 - Choose the narrowest reliable recovery action.
 - Preserve the original task intent unless there is strong evidence that the task itself is structurally wrong.
-- Use retry only if the same task should be attempted again without changing its structure.
 - Use reatomize if the task itself is structurally wrong as one atomic unit, but keep the same workstream intent.
 - Use insert_followup only if the original task was still valid but additional atomic work is needed.
 - Use manual_review if automated recovery is not trustworthy enough.
 
 Important:
+- Valid actions are only: reatomize, insert_followup, manual_review.
+- Do not use retry.
 - Do not use refined-level recovery.
 - Do not propose legacy recovery actions.
 - Any created tasks must be atomic, executor-compatible, and repository/file-oriented.
@@ -175,14 +171,12 @@ Execution context summary:
 You must correct the output and return valid JSON matching the schema.
 
 Critical corrections:
-- valid actions are only: retry, reatomize, insert_followup, manual_review
+- valid actions are only: reatomize, insert_followup, manual_review
+- retry is not allowed in the current workflow
 - do not use refined-level or legacy recovery actions
 - preserve the original task intent and workstream
 - do not silently change documentation/scope work into implementation/bootstrap work
-- if the failure is mainly about context selection, prefer retry or conservative reatomize over domain-changing recovery
-- if action=retry:
-  - retry_same_task must be true
-  - created_tasks must be empty
+- if the failure is mainly about context selection, prefer conservative reatomize or manual_review over domain-changing recovery
 - if action=reatomize or action=insert_followup:
   - created_tasks must not be empty
   - created tasks must be concrete atomic tasks compatible with code_executor

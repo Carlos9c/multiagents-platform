@@ -5,8 +5,18 @@ from pathlib import Path
 import pytest
 
 from app.execution_engine.agent_runtime.base import BaseAgentRuntime
-from app.execution_engine.contracts import ExecutionRequest, ProjectExecutionContext
-from app.execution_engine.file_operations import FileMaterializationResult, FileOperation, FileOperationPlan, MaterializedFile
+from app.execution_engine.budget import LoopBudget
+from app.execution_engine.contracts import (
+    ChangedFile,
+    ExecutionRequest,
+    ProjectExecutionContext,
+)
+from app.execution_engine.file_operations import (
+    FileMaterializationResult,
+    FileOperation,
+    FileOperationPlan,
+    MaterializedFile,
+)
 from app.execution_engine.monitoring import OrchestratorTrace
 from app.execution_engine.next_action import (
     ACTION_FINISH,
@@ -15,7 +25,6 @@ from app.execution_engine.next_action import (
 )
 from app.execution_engine.orchestrator import ExecutionOrchestrator
 from app.execution_engine.resolution_state import ResolutionState
-from app.execution_engine.budget import LoopBudget
 from app.execution_engine.subagent_registry import SubagentRegistry
 from app.execution_engine.subagents.base import BaseSubagent
 from app.execution_engine.subagents.code_change_agent import CodeChangeAgent
@@ -54,7 +63,52 @@ class StubContextSelectionAgent(BaseSubagent):
 
     def execute_step(self, *, request, step, state):
         state.selected_file_context = "selected context"
+        state.mark_context_selected()
         state.add_note("stub context selection executed")
+        return state
+
+
+class StubPlacementResolverAgent(BaseSubagent):
+    name = "placement_resolver_agent"
+
+    def supports_step_kind(self, step_kind: str) -> bool:
+        return step_kind == "resolve_file_operations"
+
+    def execute_step(self, *, request, step, state):
+        state.set_planned_file_operations(
+            FileOperationPlan(
+                summary="stub plan",
+                operations=[
+                    FileOperation(
+                        operation="create",
+                        path="docs/notes-api-contract.md",
+                        reason="Create the required repository artifact.",
+                        purpose="Contract artifact",
+                        category="docs",
+                        sequence=1,
+                    )
+                ],
+            )
+        )
+        state.add_note("stub placement resolver executed")
+        return state
+
+
+class StubCodeChangeAgent(BaseSubagent):
+    name = "code_change_agent"
+
+    def supports_step_kind(self, step_kind: str) -> bool:
+        return step_kind == "apply_file_operations"
+
+    def execute_step(self, *, request, step, state):
+        state.mark_operation_applied("docs/notes-api-contract.md")
+        state.evidence.changed_files.append(
+            ChangedFile(
+                path="docs/notes-api-contract.md",
+                change_type="created",
+            )
+        )
+        state.evidence.notes.append("stub code change executed")
         return state
 
 
@@ -66,6 +120,7 @@ def _make_request(workspace_path: Path) -> ExecutionRequest:
         task_title="Implement notes API",
         task_description="Create API and related files.",
         task_summary="Implement notes API.",
+        task_type="implementation",
         objective="Create a working notes API.",
         acceptance_criteria="The API exists and tests pass.",
         technical_constraints="Use FastAPI.",
@@ -124,7 +179,7 @@ def test_file_operation_plan_sorted_operations_orders_by_sequence_category_and_p
     ]
 
 
-def test_resolution_state_tracks_pending_operations(make_project, tmp_path):
+def test_resolution_state_tracks_pending_operations(tmp_path):
     state = ResolutionState(
         orchestrator_trace=OrchestratorTrace(task_id=1),
     )
@@ -153,6 +208,7 @@ def test_resolution_state_tracks_pending_operations(make_project, tmp_path):
 
     state.set_planned_file_operations(plan)
 
+    assert state.phase == "materialization"
     assert state.pending_operation_paths == [
         "app/api/notes.py",
         "app/main.py",
@@ -163,10 +219,15 @@ def test_resolution_state_tracks_pending_operations(make_project, tmp_path):
     state.mark_operation_applied("app/api/notes.py")
     assert state.pending_operation_paths == ["app/main.py"]
     assert state.applied_operation_paths == ["app/api/notes.py"]
+    assert state.phase == "materialization"
 
-    state.mark_operation_failed("app/main.py")
+    state.mark_operation_applied("app/main.py")
     assert state.pending_operation_paths == []
-    assert state.failed_operation_paths == ["app/main.py"]
+    assert sorted(state.applied_operation_paths) == [
+        "app/api/notes.py",
+        "app/main.py",
+    ]
+    assert state.phase == "completion"
     assert state.has_pending_operations() is False
 
 
@@ -184,6 +245,7 @@ def test_code_change_agent_applies_pending_operations_and_marks_applied(tmp_path
         orchestrator_trace=OrchestratorTrace(task_id=request.task_id),
         observed_repo_summary="repo summary",
         selected_file_context="selected file context",
+        phase="materialization",
     )
     state.set_planned_file_operations(
         FileOperationPlan(
@@ -263,6 +325,7 @@ def test_code_change_agent_applies_pending_operations_and_marks_applied(tmp_path
         "app/main.py",
     ]
     assert next_state.failed_operation_paths == []
+    assert next_state.phase == "completion"
     assert sorted(item.path for item in next_state.evidence.changed_files) == [
         "app/api/notes.py",
         "app/main.py",
@@ -284,6 +347,7 @@ def test_code_change_agent_rolls_back_if_write_fails(tmp_path, monkeypatch):
         orchestrator_trace=OrchestratorTrace(task_id=request.task_id),
         observed_repo_summary="repo summary",
         selected_file_context="selected file context",
+        phase="materialization",
     )
     state.set_planned_file_operations(
         FileOperationPlan(
@@ -371,6 +435,7 @@ def test_code_change_agent_rolls_back_if_write_fails(tmp_path, monkeypatch):
     assert "app/api/notes.py" in state.pending_operation_paths
     assert "app/main.py" in state.pending_operation_paths
     assert state.applied_operation_paths == []
+    assert state.phase == "materialization"
 
 
 def test_orchestrator_records_trace_and_finishes(tmp_path):
@@ -390,6 +455,22 @@ def test_orchestrator_records_trace_and_finishes(tmp_path):
                 risk_flags=[],
             ).model_dump(),
             NextActionDecision(
+                action="resolve_file_operations",
+                rationale="Need a file operation plan before finishing.",
+                target_paths=[],
+                command=None,
+                expected_outcome="Artifact plan available.",
+                risk_flags=[],
+            ).model_dump(),
+            NextActionDecision(
+                action="apply_file_operations",
+                rationale="Need to materialize the planned artifact.",
+                target_paths=["docs/notes-api-contract.md"],
+                command=None,
+                expected_outcome="Artifact written to workspace.",
+                risk_flags=[],
+            ).model_dump(),
+            NextActionDecision(
                 action=ACTION_FINISH,
                 rationale="Current operational pass is sufficient.",
                 target_paths=[],
@@ -403,19 +484,22 @@ def test_orchestrator_records_trace_and_finishes(tmp_path):
     registry = SubagentRegistry(
         subagents=[
             StubContextSelectionAgent(),
+            StubPlacementResolverAgent(),
+            StubCodeChangeAgent(),
         ]
     )
 
     orchestrator = ExecutionOrchestrator(
         runtime=runtime,
         registry=registry,
-        budget=LoopBudget(max_steps=5),
+        budget=LoopBudget(max_steps=6),
     )
 
     result = orchestrator.run(request)
 
     assert result.decision == "partial"
     assert "Current operational pass is sufficient." in (result.details or "")
+    assert result.evidence.changed_files
     joined_notes = "\n".join(result.evidence.notes)
     assert "orchestrator_started" in joined_notes
     assert "next_action_decided" in joined_notes
@@ -424,7 +508,7 @@ def test_orchestrator_records_trace_and_finishes(tmp_path):
     assert "orchestrator_finished" in joined_notes
 
 
-def test_orchestrator_finish_with_pending_operations_reports_blocker(tmp_path):
+def test_orchestrator_phase_policy_prevents_return_to_context_after_planning(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -433,41 +517,90 @@ def test_orchestrator_finish_with_pending_operations_reports_blocker(tmp_path):
     runtime = FakeRuntime(
         responses=[
             NextActionDecision(
-                action=ACTION_FINISH,
-                rationale="Stop here and hand off.",
+                action=ACTION_INSPECT_CONTEXT,
+                rationale="Need context first.",
                 target_paths=[],
                 command=None,
-                expected_outcome="External validation handles the rest.",
+                expected_outcome="Selected file context available.",
+                risk_flags=[],
+            ).model_dump(),
+            NextActionDecision(
+                action="resolve_file_operations",
+                rationale="Need planning next.",
+                target_paths=[],
+                command=None,
+                expected_outcome="Plan available.",
+                risk_flags=[],
+            ).model_dump(),
+            NextActionDecision(
+                action=ACTION_INSPECT_CONTEXT,
+                rationale="Let's inspect again even though a plan exists.",
+                target_paths=[],
+                command=None,
+                expected_outcome="More context.",
+                risk_flags=[],
+            ).model_dump(),
+            NextActionDecision(
+                action=ACTION_FINISH,
+                rationale="Now finish.",
+                target_paths=[],
+                command=None,
+                expected_outcome="Done.",
                 risk_flags=[],
             ).model_dump(),
         ]
     )
 
-    registry = SubagentRegistry(subagents=[StubContextSelectionAgent()])
+    registry = SubagentRegistry(
+        subagents=[
+            StubContextSelectionAgent(),
+            StubPlacementResolverAgent(),
+            StubCodeChangeAgent(),
+        ]
+    )
 
     orchestrator = ExecutionOrchestrator(
         runtime=runtime,
         registry=registry,
-        budget=LoopBudget(max_steps=3),
+        budget=LoopBudget(max_steps=6),
     )
 
     result = orchestrator.run(request)
 
     assert result.decision == "partial"
-    assert result.remaining_scope == "External task validation remains pending."
-    assert result.blockers_found == []
+    assert any(item.path == "docs/notes-api-contract.md" for item in result.evidence.changed_files)
+    joined_notes = "\n".join(result.evidence.notes)
+    assert "action_overridden_by_phase_policy" in joined_notes
 
-    # Ahora simulamos estado con operaciones pendientes a través de una subclase mínima.
+
+def test_orchestrator_finish_with_pending_operations_reports_blocker(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    request = _make_request(workspace)
+
     class PendingFirstOrchestrator(ExecutionOrchestrator):
         def run(self, request):
+            from app.execution_engine.monitoring import OrchestratorTrace
             from app.execution_engine.resolution_state import ResolutionState
             from app.execution_engine.state import ExecutionState
 
             runtime_state = ExecutionState()
             resolution_state = ResolutionState(
-                orchestrator_trace=OrchestratorTrace(task_id=request.task_id)
+                orchestrator_trace=OrchestratorTrace(task_id=request.task_id),
+                phase="completion",
             )
-            resolution_state.pending_operation_paths = ["app/main.py", "tests/test_notes.py"]
+            resolution_state.pending_operation_paths = [
+                "app/main.py",
+                "tests/test_notes.py",
+            ]
+            resolution_state.applied_operation_paths = ["docs/bootstrap.md"]
+            resolution_state.evidence.changed_files.append(
+                ChangedFile(
+                    path="docs/bootstrap.md",
+                    change_type="created",
+                )
+            )
 
             decision = self._decide_next_action(
                 request=request,
@@ -497,7 +630,7 @@ def test_orchestrator_finish_with_pending_operations_reports_blocker(tmp_path):
                 },
             )()
 
-    runtime_with_pending = FakeRuntime(
+    runtime = FakeRuntime(
         responses=[
             NextActionDecision(
                 action=ACTION_FINISH,
@@ -510,16 +643,18 @@ def test_orchestrator_finish_with_pending_operations_reports_blocker(tmp_path):
         ]
     )
 
-    pending_orchestrator = PendingFirstOrchestrator(
-        runtime=runtime_with_pending,
+    registry = SubagentRegistry(subagents=[StubContextSelectionAgent()])
+
+    orchestrator = PendingFirstOrchestrator(
+        runtime=runtime,
         registry=registry,
         budget=LoopBudget(max_steps=3),
     )
 
-    pending_result = pending_orchestrator.run(request)
+    result = orchestrator.run(request)
 
-    assert pending_result.decision == "partial"
-    assert pending_result.remaining_scope == "Some planned file operations remain pending."
-    assert pending_result.blockers_found == [
+    assert result.decision == "partial"
+    assert result.remaining_scope == "Some planned file operations remain pending."
+    assert result.blockers_found == [
         "pending_operations=app/main.py,tests/test_notes.py"
     ]
