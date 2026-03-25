@@ -4,17 +4,15 @@
 
 Este proyecto implementa una **plataforma backend multiagente** cuyo objetivo es:
 
-> Transformar una idea de software en un sistema ejecutable de forma progresiva, trazable y cada vez más autónoma.
+> Transformar una idea de proyecto en un sistema ejecutable de forma progresiva y autónoma.
 
-El sistema está diseñado para evolucionar hacia proyectos complejos mediante:
+El sistema está diseñado para escalar hacia proyectos complejos mediante:
 
 - planificación jerárquica
-- refinamiento progresivo
-- ejecución aislada por workspace
-- validación estructurada
-- recuperación controlada
-- evaluación por checkpoints
-- trazabilidad completa por proyecto y por run
+- descomposición progresiva
+- ejecución orquestada
+- validación iterativa
+- trazabilidad completa por proyecto
 
 ---
 
@@ -25,639 +23,285 @@ El sistema está diseñado para evolucionar hacia proyectos complejos mediante:
 ### 📦 Projects
 
 - Multi-tenant por `project_id`
-- Aislamiento completo por proyecto
-- Estructura de storage persistente por proyecto
-- Base para ejecución concurrente y runs aislados
+- Configuración inicial del proyecto (incluyendo `enable_technical_refinement`)
+- Aislamiento completo por workspace
 
 ---
 
 ### 📋 Tasks
 
-Modelo jerárquico persistido y ya estabilizado:
+Modelo avanzado con soporte para:
 
-- `high_level`
-- `technical`
-- `atomic`
-
-Cada task mantiene:
-
-- relación parent-child
-- estado persistente
-- prioridad
-- tipo de task
-- tipo de ejecutor
-- historial de ejecución y validación
-
-Estados operativos relevantes:
-
-- `pending`
-- `running`
-- `awaiting_validation`
-- `completed`
-- `partial`
-- `failed`
-
-Regla clave ya fijada:
-
-> **solo las tasks atómicas llegan al executor**
-
-Las tasks padre no se ejecutan directamente; se resuelven por consolidación jerárquica a partir del estado de sus hijas.
+- `planning_level`: high_level / refined / atomic
+- `status`: pending, completed, failed, partial, etc.
+- `executor_type`: ahora resuelto dinámicamente por el orchestration engine
+- jerarquía padre-hijo
+- control de bloqueo (`is_blocked`)
 
 ---
 
-### 🔄 Consolidación jerárquica
+### 🧠 Planner
 
-Implementada y validada mediante `task_hierarchy_service`.
-
-Reglas actuales:
-
-- un parent pasa a `completed` si todas sus hijas están `completed`
-- un parent pasa a `pending` si existe al menos una hija no terminal
-- un parent pasa a `failed` si todas sus hijas son terminales y al menos una está `failed`
-- un parent pasa a `partial` si todas sus hijas son terminales, ninguna está `failed` y alguna está `partial`
-
-Además:
-
-- recovery puede reabrir el parent creando nuevas tasks hijas
-- la task original recuperada debe permanecer terminal
-- no se recicla silenciosamente la misma task como si no hubiera pasado nada
+- Generación de tareas high-level a partir del objetivo del proyecto
+- Replanning automático en función de evaluación
+- Iterativo y compatible con checkpoints
 
 ---
 
-## 🧠 Planning pipeline
+### 🧩 Technical Task Refiner (opcional)
 
-### Implementado
-
-El pipeline de planificación ya existe de extremo a extremo:
-
-1. `Planner`
-2. `Technical Task Refiner`
-3. `Atomic Task Generator`
-4. `Execution Plan Generator`
-
-### Resultado actual
-
-Las atomic tasks ya salen con suficiente estructura para ejecución real:
-
-- título
-- descripción
-- objetivo
-- criterios de aceptación
-- restricciones técnicas
-- out of scope
-- tipo de tarea
-- executor esperado
-
-Esto permite que la ejecución opere sobre contratos mucho más claros que al inicio del proyecto.
+- Activado mediante `project.enable_technical_refinement`
+- Introduce capa intermedia entre high-level y atomic
+- Permite mayor control en proyectos complejos
+- Totalmente integrado en el workflow sin romper compatibilidad
 
 ---
 
-## ⚙️ Execution Plan
+### ⚙️ Atomic Task Generation
 
-El proyecto ya soporta generación de `ExecutionPlan` con:
-
-- batches
-- dependencias inferidas
-- checkpoints por batch
-- secuenciación de tareas
-- rationale de orden
-- detección de bloqueos
-- plan versionado
-
-Capacidades actuales:
-
-- varios batches por iteración
-- reevaluación tras checkpoints
-- nueva versión de plan cuando procede
-- resecuenciación del trabajo restante
-- continuación o parada controlada del workflow
+- Generación de tareas ejecutables reales
+- Garantiza compatibilidad con capacidades del sistema
+- Evita tareas imposibles (ej: ejecutar código si no hay executor)
 
 ---
 
-# ▶️ Execution Engine
+### 🧪 Execution Engine (Orchestrated)
 
-## Estado actual
-
-El mayor salto reciente del proyecto ha sido la incorporación de un **Execution Engine orquestado**, separado del executor local heredado.
-
-Hoy conviven dos engines:
-
-- `legacy_local_engine`
-- `orchestrated_engine`
-
-La factoría ya permite seleccionar el engine, y el workflow ya está alineado con el nuevo camino orquestado.
+- Sustituye completamente al sistema legacy
+- Arquitectura basada en:
+  - orquestador
+  - subagentes
+  - tools
+- Controlado por budget (`LoopBudget`)
+- Ejecución paso a paso con trazabilidad completa
 
 ---
 
-## 🧩 Arquitectura del Execution Engine
+### 🔁 Task Execution Service
 
-El engine nuevo está organizado como un módulo propio y escalable:
-
-- `contracts.py`
-- `capabilities.py`
-- `orchestrator.py`
-- `subagent_registry.py`
-- `agent_runtime/`
-- `subagents/`
-- `tools/`
-- `request_adapter.py`
-- `factory.py`
-- `engines/`
-
-### Componentes principales
-
-#### `ExecutionOrchestrator`
-
-Es el corazón del runtime operativo.
-
-Responsabilidades:
-
-- recibir una atomic task ya cerrada
-- respetar su contrato sin modificarla
-- decidir el siguiente paso operativo
-- delegar en subagentes especializados
-- aplicar una política de progresión por fases
-- impedir loops absurdos
-- producir un `ExecutionResult` trazable
-
-#### `StructuredLLMRuntime`
-
-Runtime basado en LLM estructurado para:
-
-- siguiente acción
-- selección de contexto
-- plan de operaciones de fichero
-- materialización de artefactos
-
-#### `SubagentRegistry`
-
-Registro explícito de subagentes disponibles.
-
-#### Subagentes actuales
-
-- `context_selection_agent`
-- `placement_resolver_agent`
-- `code_change_agent`
-- `command_runner_agent`
-- `repo_inspector_agent` / piezas auxiliares equivalentes según módulo actual
+- Punto central de ejecución de tareas
+- Resolución dinámica del executor
+- Reconciliación de estados:
+  - atomic → high-level
+- Integración con validation y recovery
 
 ---
 
-## 🧭 Flujo operativo del engine
+### 🔍 Validation
 
-El comportamiento actual del engine ya no es un bucle completamente libre. Ahora sigue una lógica de fases.
-
-### Fases actuales
-
-- `discovery`
-- `planning`
-- `materialization`
-- `completion`
-
-### Política actual por fases
-
-#### `discovery`
-Se permite inspección inicial del contexto.
-
-#### `planning`
-Se resuelven operaciones de fichero necesarias para cumplir la task.
-
-#### `materialization`
-Se materializan cambios reales en el workspace.
-
-#### `completion`
-Se cierra el pass operativo y se delega la evaluación final al validator externo.
+- Evaluación estructurada de resultados
+- Decisiones:
+  - completed
+  - partial
+  - failed
+  - rejected
+- Basada en evidencia real (diff, logs, outputs)
 
 ---
 
-## ✅ Mejoras recientes ya incorporadas en el engine
+### 🛠️ Recovery Service
 
-### 1. Transición por fases
-Se evitó que el orquestador se quedara indefinidamente en `inspect_context`.
-
-### 2. Override determinista de acciones inválidas
-Si el modelo pide una acción incoherente con la fase, el orquestador la normaliza.
-
-Ejemplo real ya corregido:
-
-- pedir `inspect_context` cuando ya existe `planned_file_operations`
-- pedir más inspección cuando lo correcto es `apply_file_operations`
-
-### 3. Detección de estancamiento
-Se introdujo detección de repetición sin progreso real.
-
-Esto evita:
-
-- consumir presupuesto en bucles vacíos
-- gastar tokens en la misma acción sin cambio operativo
-- terminar en failure opaco por presupuesto sin señal útil
-
-### 4. Capabilities por executor
-Se introdujo una capa de capacidades para dejar de razonar solo por tipo de tarea y empezar a razonar por lo que el ejecutor puede hacer.
-
-### 5. Workspace aislado por run
-Cada ejecución opera sobre:
-
-`projects/{project_id}/executions/{run_id}/workspace`
-
-y solo tras validación satisfactoria se promociona a:
-
-`projects/{project_id}/domain_data/code/source`
-
-### 6. Promoción segura a source
-La promoción al source ya se hace únicamente cuando la validación devuelve `completed`.
-
-### 7. Compatibilidad con validator heredado
-El engine adapta su `ExecutionResult` al contrato que aún consume validación.
+- Actúa ante fallos o resultados parciales
+- Estrategias:
+  - retry
+  - follow-up tasks
+  - reatomization
+- No rompe el plan global (recuperación local)
 
 ---
 
-## 📁 Workspace runtime y storage
+### 📦 Execution Plan
 
-Ya existe una separación operativa clara entre:
-
-- `source`
-- `workspace aislado por ejecución`
-- artefactos/logs/outputs del run
-
-### Capacidades actuales
-
-- preparar workspace por run
-- copiar baseline desde source
-- leer y escribir ficheros dentro del workspace
-- recoger cambios respecto a source
-- generar diff
-- promocionar workspace validado a source
-- limpiar workspace cuando proceda
-
-### Correcciones recientes
-
-Se corrigieron problemas reales de integración en Windows:
-
-- ejecución de comandos con `encoding="utf-8"` y `errors="replace"`
-- generación de diff con `git diff --no-index` usando el mismo tratamiento
-- eliminación del fallo por `cp1252` durante lectura de stdout/stderr
+- Generación de batches secuenciales
+- Checkpoints tras cada batch
+- Permite:
+  - replan
+  - resequencing
+  - introducción de nuevas tareas
 
 ---
 
-# 🔍 Task Execution Service
+### 🔄 Project Workflow
 
-## Estado actual
+Pipeline completo end-to-end:
 
-`task_execution_service` ya está adaptado al engine nuevo.
-
-Flujo actual:
-
-1. validar que la task es ejecutable
-2. crear `ExecutionRun`
-3. preparar workspace aislado
-4. construir `ExecutionRequest`
-5. seleccionar engine
-6. ejecutar
-7. persistir run
-8. validar resultado
-9. promocionar workspace si corresponde
-10. reconciliar jerarquía
-
-### Rutas ya soportadas
-
-- `completed`
-- `partial`
-- `failed`
-- `rejected`
-
-### Mejoras recientes
-
-- preparación explícita del workspace antes de ejecutar
-- promoción a source solo tras validación `completed`
-- persistencia de artefacto terminal incluso en fallos tempranos
-- adaptación a resultados sintéticos cuando el engine falla antes de una salida normal
-- mayor trazabilidad en logs
+1. Planner
+2. (Opcional) Technical refinement
+3. Atomic generation
+4. Execution plan
+5. Execution batches
+6. Recovery / replan si aplica
+7. Post-batch evaluation
 
 ---
 
-# ✅ Validación
+## 🧪 Testing
 
-## Estado actual
-
-La validación sigue fuera del engine, y de momento esa separación se mantiene de forma intencionada.
-
-Esto permite:
-
-- mantener un juez externo al runtime operativo
-- inspeccionar workspace real
-- comparar contra source
-- usar snapshots finales
-- decidir `completed`, `partial` o `failed`
-
-### Evidencias que ya usa
-
-- diff de workspace
-- archivos creados / modificados
-- snapshots finales
-- notas del journal del executor
-- contexto resuelto de ejecución
-- working set
-
-### Estado de integración
-
-La integración executor → validator sigue funcionando, pero ya se ha confirmado algo importante:
-
-> la validación hoy depende mucho de que la ejecución produzca artefactos reales y observables en workspace
-
-Esto ha ayudado a detectar varios no-ops del engine que antes podían pasar más desapercibidos.
+- Tests unitarios y de integración cubriendo:
+  - execution engine
+  - task execution service
+  - project workflow
+  - post-batch logic
+- Fixtures completas con base de datos temporal
+- Sistema estable tras eliminación de legacy
 
 ---
 
-# 🔁 Recovery Service
+# ⚠️ Problemas detectados recientes
 
-## Capacidades actuales
+## 1. Identidad de batches incorrecta
 
-Recovery soporta:
+- `batch-1` se reutiliza en múltiples iteraciones
+- Provoca:
+  - duplicados en `completed_batches`
+  - trazabilidad incorrecta
+  - ambigüedad en logs
 
-- `reatomize`
-- `insert_followup`
-- `manual_review`
-
-### Invariantes ya fijadas
-
-- la task original debe permanecer terminal
-- recovery no debe hacer `retry` silencioso de la misma task
-- si hace falta más trabajo, se crean nuevas tasks
-- el parent se reabre por consolidación jerárquica, no por reactivar artificialmente la source task
-
-### Cambio importante
-
-El camino `retry` quedó rechazado en el workflow actual y ya se trató como contrato inválido para evitar inconsistencias.
+👉 Necesario introducir identidad compuesta (ej: `plan_version + batch_id`)
 
 ---
 
-# 🧪 Post-batch y evaluación
+## 2. Semántica residual de ejecutores
 
-## Post-batch
+- `code_executor` ya no es real (legacy)
+- El orquestador decide ejecución
 
-Ya existe la capa encargada de:
-
-- confirmar que el batch terminó realmente
-- verificar terminalidad de tasks y runs
-- disparar recovery si hace falta
-- reconciliar jerarquía tras recovery
-- ejecutar evaluación del checkpoint
-
-## Evaluación de etapas
-
-Soporta ya decisiones como:
-
-- `continue`
-- `stage_incomplete`
-- `project_complete`
-- `manual_review`
-
-Y se corrigió la normalización para no bloquear el workflow en estados ambiguos cuando la etapa no estaba completa pero podía continuar.
+👉 Necesario:
+- redefinir naming
+- limpiar referencias en prompts y código
 
 ---
 
-# 🔄 Workflow end-to-end
+## 3. Restos de constantes legacy
 
-## Pipeline actual
+- Strings duplicados (`pending`, `high_level`, etc.)
+- Posibles inconsistencias
 
-El workflow ya recorre:
-
-Planning → Technical Refinement → Atomic Generation → Execution Plan → Batch Execution → Post-Batch → Evaluation → Continuation / Stop
-
-### Lo que ya hace bien
-
-- ejecutar batches
-- iterar sobre nuevas versiones de `ExecutionPlan`
-- parar en `manual_review` cuando corresponde
-- crear y validar workspaces por task
-- encadenar ejecución y validación
-- reabrir el plan tras recovery cuando procede
-
-### Lo que ha quedado demostrado
-
-El backend ya no es una maqueta conceptual.  
-Ya existe un sistema que realmente:
-
-- planifica
-- atomiza
-- ejecuta
-- valida
-- recupera
-- reevalúa
-- replanifica
+👉 Centralizar en modelos
 
 ---
 
-# 🧪 Testing
+## 4. Artefactos y naming legacy
 
-La suite de tests se ha ampliado y ya cubre partes críticas del sistema.
-
-## Cobertura destacada
-
-### `task_hierarchy_service`
-- consolidación de estados
-- reapertura del parent por nuevas hijas
-- invariantes jerárquicas
-
-### `recovery_service`
-- follow-up tasks
-- terminalidad de la source task
-- rechazo del camino `retry`
-- manual review
-
-### `post_batch_service`
-- integración recovery + evaluación
-- detección de estados inválidos
-- continuación correcta del workflow
-
-### `project_workflow_service`
-- batches
-- iteraciones
-- protección frente a tasks no atómicas
-- flujo E2E controlado
-
-### `task_execution_service`
-- preparación de workspace
-- integración con execution engine
-- promoción de workspace validado
-- reconciliación jerárquica
-- rutas terminales y de validación
-
-### `execution_engine`
-- resolución de operaciones de fichero
-- materialización multiarchivo
-- rollback si falla una escritura
-- trazabilidad del orquestador
-- política por fases
-- override de acciones incoherentes
+- Posibles referencias a:
+  - `code_executor_*`
+- Necesario transición progresiva
 
 ---
 
-# 📚 Documentación interna del engine
+## 5. Prompts desalineados
 
-Ya existe documentación específica del módulo:
-
-- `app/execution_engine/execution_engine_documentation.md`
-
-Esa documentación recoge:
-
-- arquitectura del módulo
-- contratos
-- subagentes
-- tools
-- flujo
-- extensibilidad
-- pasos para añadir nuevos subagentes o nuevas tools
+- Algunas instrucciones aún asumen modelo antiguo de ejecución
 
 ---
 
-# ⚠️ Problemas actuales reales
+# 🧹 Limpieza realizada recientemente
 
-## 1. Completion phase todavía necesita endurecerse
-Ya se corrigió gran parte del loop, pero se ha observado que el modelo puede intentar abusar de `run_command` en fase de completion.
-
-La política actual ya se ha endurecido, pero es un área que todavía requiere vigilancia.
-
-## 2. `file_materialization` es el cuello de botella principal
-Los pasos de materialización están devolviendo respuestas grandes y lentas.
-
-Síntomas observados:
-
-- prompts grandes
-- salidas largas
-- tiempos de 30s–40s
-- consumo fuerte de tokens
-
-Conclusión:
-- el sistema ya materializa
-- pero la granularidad de materialización todavía es demasiado gruesa
-
-## 3. Algunas tasks siguen generando superficies demasiado amplias
-Especialmente en implementación, donde el plan de operaciones puede crecer mucho si el contexto resuelto o el working set no se limita bien.
-
-## 4. La validación sigue cargando mucho contexto
-En runs fallidos o complejos, recovery + stage evaluation + execution plan vuelven a cargar bastante contexto. Funciona, pero es costoso.
-
-## 5. El modelo del engine exige más disciplina que el resto
-En la práctica actual:
-
-- `gpt-5.4-mini` funciona bien en planning, recovery y evaluación
-- `gpt-5.2` se está comportando de forma más estable en el execution engine
-
-Esto sugiere que el engine debe seguir teniendo configuración de modelo independiente.
+- Eliminación completa del `legacy_local_engine`
+- Refactor del execution engine a modelo orquestado
+- Eliminación de dependencia de executor en atomic tasks
+- Corrección de tests y compatibilidad total
+- Introducción de `enable_technical_refinement` en Project
+- Refactor completo del workflow para soportar refinamiento opcional
 
 ---
 
-# 🧭 Decisiones de diseño recientes
+# 🚧 Siguientes pasos
 
-## 1. El validator sigue fuera del engine
-No se ha mezclado todavía ejecución y validación.
+## 🔥 Prioridad alta
 
-## 2. El engine ya no debe razonar solo por `task_type`
-Se ha empezado a mover hacia capacidades del ejecutor.
+### 1. Corregir identidad de batches
 
-## 3. La transición operativa debe estar gobernada por política, no solo por LLM
-Este ha sido uno de los aprendizajes más importantes.
-
-## 4. El workspace temporal no debe contaminar source
-Solo se promociona tras validación satisfactoria.
-
-## 5. El sistema debe fallar de forma honesta antes que terminar en no-op silencioso
-Esto ya ha guiado varias correcciones recientes.
+- Introducir `batch_key` único:
+  - opción: `{plan_version}:{batch_id}`
+- Ajustar:
+  - `completed_batches`
+  - `blocked_batches`
+  - `iterations`
 
 ---
 
-# 🔧 Próximos pasos priorizados
+### 2. Limpiar constantes globales
 
-## Corto plazo
-
-### 1. Endurecer la fase de completion
-- permitir `run_command` solo cuando realmente tenga sentido
-- limitarlo todavía más o hacerlo opcional por política
-- evitar cualquier nuevo loop de verificación operativa
-
-### 2. Reducir el tamaño de `file_materialization`
-- dividir mejor planes multiarchivo
-- acotar el contexto enviado al materializer
-- reducir el contenido innecesario en prompts
-
-### 3. Mejorar el `placement_resolver`
-- generar planes más pequeños
-- reducir superficie de cambios
-- evitar sobreplanificación en tasks simples
-
-### 4. Revisar cuándo merece la pena ejecutar comandos
-- no todo cambio necesita `run_command`
-- especialmente cuando existe validator externo
-
-### 5. Añadir más tests sobre completion phase
-- `run_command` repetido
-- override a `finish`
-- materialización correcta sin verificación redundante
+- Centralizar en `models.task`
+- Eliminar duplicados en services
+- Evitar strings hardcodeados
 
 ---
 
-## Medio plazo
+### 3. Redefinir executor_type
 
-### 6. Refinar la selección de contexto
-- menos ruido
-- mejor working set
-- mejor selección de archivos y rutas candidatas
-
-### 7. Hacer el engine menos caro
-- prompts más compactos
-- mejor reutilización de estado
-- menos rondas LLM por task
-
-### 8. Revisar granularidad de atomic tasks
-- evitar tasks atómicas que sigan siendo demasiado anchas para materialización en un solo paso
-
-### 9. Fortalecer el contrato entre engine y validator
-- menos adaptación heredada
-- contrato más nativo del engine nuevo
+- Opciones:
+  - mantener `code_executor` como alias temporal
+  - o renombrar a algo más realista (`workspace_executor`, etc.)
 
 ---
 
-## Largo plazo
+### 4. Limpiar execution_plan_service
 
-### 10. Extender subagentes más allá de código
-La arquitectura ya debe pensarse para otros outputs:
-
-- documentación
-- imágenes
-- audio
-- presentaciones
-- otros artefactos
-
-### 11. Diseñar herramientas verdaderamente multimodales
-Para no seguir pensando el engine únicamente como escritura de `.py`.
-
-### 12. Sustituir completamente el executor heredado
-Cuando el engine orquestado esté suficientemente estable.
+- Eliminar lógica dependiente de executor legacy
+- Asegurar que el plan es agnóstico del ejecutor
 
 ---
 
-# 📌 Conclusión
+## 🧠 Prioridad media
 
-El proyecto ha dado un salto importante.
+### 5. Revisar capabilities
 
-A día de hoy ya existe una plataforma backend que:
+- Alinear con nuevo modelo de ejecución
+- Eliminar dependencias implícitas de nombres legacy
 
-- planifica de forma jerárquica
-- atomiza trabajo
-- genera batches y checkpoints
-- ejecuta tasks atómicas en workspaces aislados
-- valida resultados reales
-- recupera fallos creando nuevo trabajo
-- reevalúa el plan y continúa iterando
+---
 
-El mayor avance reciente ha sido dejar de tratar la ejecución como un bloque opaco y convertirla en un **runtime orquestado por fases**, con subagentes, tools, trazabilidad y políticas explícitas.
+### 6. Actualizar prompts
 
-El principal reto ya no es “cómo planificar más”.
+- Planner
+- Atomic generator
+- Recovery
 
-El principal reto ahora es este:
+👉 Objetivo: que el LLM entienda el sistema actual
 
-> **cómo materializar cambios útiles, pequeños y verificables de forma consistente, sin abrir loops de contexto ni inflar innecesariamente los pasos de escritura y verificación.**
+---
 
-Ese es el punto exacto en el que está hoy el proyecto.
+### 7. Transición de artefactos
+
+- Mantener compatibilidad de lectura
+- Empezar a emitir nuevo formato
+- Eliminar legacy progresivamente
+
+---
+
+## 🧩 Prioridad baja
+
+### 8. Documentación interna
+
+- Execution engine
+- Workflow real
+- Capas del sistema
+
+---
+
+# 🧭 Dirección futura
+
+El sistema ya no es un simple pipeline:
+
+👉 Es un **runtime de agentes orquestados con planificación adaptativa**
+
+Los siguientes pasos van hacia:
+
+- mejor trazabilidad
+- mayor control del flujo
+- eliminación total de legacy
+- preparación para proyectos complejos reales
+
+---
+
+# ✅ Estado general
+
+- Core funcional: ✔️
+- Tests: ✔️
+- Orquestación: ✔️
+- Validación + recovery: ✔️
+- Refinamiento opcional: ✔️
+
+👉 **Sistema listo para fase de hardening y simplificación**

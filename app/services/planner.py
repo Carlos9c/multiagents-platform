@@ -3,13 +3,15 @@ import json
 from sqlalchemy.orm import Session
 
 from app.models.project import Project
-from app.models.task import Task
+from app.models.task import (
+    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PLANNING_LEVEL_HIGH_LEVEL,
+    TASK_STATUS_PENDING,
+    Task,
+)
 from app.schemas.planner import PlannerOutput
 from app.services.artifacts import create_artifact
 from app.services.planner_client import call_planner_model
-
-
-PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
 
 
 def validate_task_quality(tasks: list[Task]) -> None:
@@ -78,10 +80,10 @@ def generate_project_plan(db: Session, project_id: int) -> dict:
             out_of_scope=planned_task.out_of_scope,
             priority=planned_task.priority,
             task_type=planned_task.task_type,
-            planning_level="high_level",
+            planning_level=PLANNING_LEVEL_HIGH_LEVEL,
             executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
             sequence_order=index,
-            status="pending",
+            status=TASK_STATUS_PENDING,
             is_blocked=False,
             blocking_reason=None,
         )

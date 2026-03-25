@@ -2,6 +2,7 @@ import types
 
 import pytest
 
+from app.models.project import Project
 from app.models.task import (
     PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     PLANNING_LEVEL_HIGH_LEVEL,
@@ -20,7 +21,14 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
     make_task,
     make_execution_plan,
 ):
-    project = make_project()
+    project = make_project(
+        name="Proyecto workflow",
+        description="Proyecto de prueba",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
 
     task_1 = make_task(
         project_id=project.id,
@@ -63,11 +71,11 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -90,7 +98,14 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
         _fake_execute_task_sync,
     )
 
-    def _fake_post_batch(*, db, project_id, plan, batch_id, current_finalization_iteration_count, max_finalization_iterations):
+    def _fake_post_batch(
+        db,
+        project_id,
+        plan,
+        batch_id,
+        current_finalization_iteration_count,
+        max_finalization_iterations,
+    ):
         if batch_id == "batch_1":
             return types.SimpleNamespace(
                 status="completed_with_evaluation",
@@ -122,7 +137,6 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
         project_id=project.id,
         max_workflow_iterations=2,
         max_finalization_iterations=2,
-        enable_technical_refinement=False,
     )
 
     assert result.final_stage_closed is True
@@ -138,7 +152,15 @@ def test_workflow_rejects_non_atomic_task_inside_execution_batch(
     make_task,
     make_execution_plan,
 ):
-    project = make_project()
+    project = make_project(
+        name="Proyecto workflow",
+        description="Proyecto de prueba",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
     non_atomic_task = make_task(
         project_id=project.id,
         title="High-level task incorrectly inserted into batch",
@@ -167,11 +189,11 @@ def test_workflow_rejects_non_atomic_task_inside_execution_batch(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -196,5 +218,164 @@ def test_workflow_rejects_non_atomic_task_inside_execution_batch(
             project_id=project.id,
             max_workflow_iterations=1,
             max_finalization_iterations=1,
-            enable_technical_refinement=False,
         )
+
+
+def test_workflow_uses_project_enable_technical_refinement_flag(
+    db_session,
+    monkeypatch,
+    make_project,
+):
+    project = make_project(
+        name="Proyecto con refinement",
+        description="Proyecto de prueba",
+    )
+    project.enable_technical_refinement = True
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    captured = {
+        "refinement_flag_in_refiner_phase": None,
+        "refinement_flag_in_atomic_phase": None,
+    }
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+
+    def _fake_run_optional_technical_refinement_phase(
+        db,
+        project_id,
+        *,
+        enable_technical_refinement,
+    ):
+        captured["refinement_flag_in_refiner_phase"] = enable_technical_refinement
+        return True
+
+    def _fake_run_atomic_generation_phase(
+        db,
+        project_id,
+        *,
+        enable_technical_refinement,
+    ):
+        captured["refinement_flag_in_atomic_phase"] = enable_technical_refinement
+        return True
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        _fake_run_optional_technical_refinement_phase,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        _fake_run_atomic_generation_phase,
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        lambda db, project_id: types.SimpleNamespace(
+            plan_version=1,
+            execution_batches=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=1,
+        max_finalization_iterations=1,
+    )
+
+    assert captured["refinement_flag_in_refiner_phase"] is True
+    assert captured["refinement_flag_in_atomic_phase"] is True
+    assert result.refinement_completed is True
+    assert result.atomic_generation_completed is True
+
+
+def test_workflow_bypasses_refinement_when_project_flag_is_false(
+    db_session,
+    monkeypatch,
+    make_project,
+):
+    project = make_project(
+        name="Proyecto sin refinement",
+        description="Proyecto de prueba",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    captured = {
+        "refinement_flag_in_refiner_phase": None,
+        "refinement_flag_in_atomic_phase": None,
+    }
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+
+    def _fake_run_optional_technical_refinement_phase(
+        db,
+        project_id,
+        *,
+        enable_technical_refinement,
+    ):
+        captured["refinement_flag_in_refiner_phase"] = enable_technical_refinement
+        return True
+
+    def _fake_run_atomic_generation_phase(
+        db,
+        project_id,
+        *,
+        enable_technical_refinement,
+    ):
+        captured["refinement_flag_in_atomic_phase"] = enable_technical_refinement
+        return True
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        _fake_run_optional_technical_refinement_phase,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        _fake_run_atomic_generation_phase,
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        lambda db, project_id: types.SimpleNamespace(
+            plan_version=1,
+            execution_batches=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=1,
+        max_finalization_iterations=1,
+    )
+
+    assert captured["refinement_flag_in_refiner_phase"] is False
+    assert captured["refinement_flag_in_atomic_phase"] is False
+    assert result.refinement_completed is True
+    assert result.atomic_generation_completed is True

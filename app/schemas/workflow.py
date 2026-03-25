@@ -1,18 +1,6 @@
 from pydantic import BaseModel, Field
 
 
-class RunProjectWorkflowRequest(BaseModel):
-    max_workflow_iterations: int = Field(default=5, ge=1, le=20)
-    max_finalization_iterations: int = Field(default=2, ge=1, le=10)
-    enable_technical_refinement: bool = Field(
-        default=False,
-        description=(
-            "When true, the workflow inserts an intermediate refinement phase "
-            "between high-level planning and atomic generation."
-        ),
-    )
-
-
 class WorkflowIterationSummary(BaseModel):
     iteration_number: int
     plan_version: int | None = None
