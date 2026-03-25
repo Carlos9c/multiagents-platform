@@ -7,6 +7,7 @@ from app.models.artifact import Artifact
 from app.models.execution_run import ExecutionRun
 from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
+    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
@@ -113,7 +114,7 @@ def _build_created_task_from_recovery(
         priority=task_create.priority,
         task_type=task_create.task_type,
         planning_level=PLANNING_LEVEL_ATOMIC,
-        executor_type=task_create.executor_type,
+        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
         sequence_order=sequence_order,
         status=TASK_STATUS_PENDING,
         is_blocked=False,

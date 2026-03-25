@@ -23,6 +23,7 @@ def build_execution_request(
     *,
     task: Task,
     execution_run_id: int,
+    resolved_executor_type: str,
 ) -> ExecutionRequest:
     storage_service = ProjectStorageService()
     workspace_runtime = LocalWorkspaceRuntime(storage_service=storage_service)
@@ -74,7 +75,7 @@ def build_execution_request(
         acceptance_criteria=task.acceptance_criteria,
         technical_constraints=task.technical_constraints,
         out_of_scope=task.out_of_scope,
-        executor_type=task.executor_type,
+        executor_type=resolved_executor_type,
         success_criteria=_split_multiline_text(task.acceptance_criteria),
         constraints=_split_multiline_text(task.technical_constraints),
         allowed_paths=[],

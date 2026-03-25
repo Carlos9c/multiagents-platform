@@ -79,8 +79,9 @@ Required output quality:
 - implementation_steps must be concrete and repository-oriented
 - tests_required must describe checks aligned with the deliverable
 - acceptance_criteria must be a single string
-- use only executor_type values from the provided executor list
-- never invent new executors
+- do not assign or emit a final executor in the output
+- atomic generation must judge executor compatibility, but executor routing is resolved later by orchestration
+- never invent new executors or future capabilities
 - do not include ids, dependencies, estimates, or metadata outside the schema
 
 Self-check before finalizing each atomic task:
@@ -171,7 +172,8 @@ Executor capability profiles:
 Mandatory instructions:
 - Generate atomic tasks only.
 - Each atomic task must be executable by exactly one available executor.
-- Choose executor_type only from the available executor list.
+- Do NOT output a final executor assignment.
+- Use the available executor list only to decide whether the task is truly executable by the current system.
 - Never invent executors.
 - Judge atomicity using BOTH:
   1) one primary deliverable and one validation boundary
@@ -232,8 +234,8 @@ You must correct the output and return valid JSON matching the schema.
 
 Important corrections:
 - output only atomic tasks
-- each atomic task must have exactly one executor_type
-- executor_type must be one of: {executors_text}
+- do not include executor_type in the output
+- use the available executor list only as a capability constraint for atomicity
 - each atomic task must have one primary deliverable and one validation boundary
 - each atomic task must be compatible with the REAL capabilities of the assigned executor
 - do not invent future executors or hypothetical capabilities

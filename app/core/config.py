@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     llm_provider: str = "openai"
     openai_api_key: str | None = None
     openai_model: str = "gpt-5.1"
-    execution_engine_model: str | None = None
 
     agents_projects_root: str = "E:/agents_projects"
 

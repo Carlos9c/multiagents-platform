@@ -17,10 +17,6 @@ RecoveryConfidence = Literal[
     "high",
 ]
 
-RecoveryExecutorType = Literal[
-    "code_executor",
-]
-
 RecoveryDecisionOrigin = Literal[
     "executor_failure",
     "validator_failure",
@@ -39,7 +35,6 @@ class RecoveryTaskCreate(BaseModel):
     out_of_scope: str | None = None
     task_type: str = Field(default="implementation", min_length=3)
     priority: str = Field(default="medium", min_length=3)
-    executor_type: RecoveryExecutorType = "code_executor"
 
     @model_validator(mode="after")
     def normalize_fields(self) -> "RecoveryTaskCreate":

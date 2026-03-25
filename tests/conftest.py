@@ -1,13 +1,11 @@
 import os
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
-
-import sys
-from pathlib import Path
 
 # Asegurar que el root del proyecto está en PYTHONPATH
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -23,7 +21,6 @@ from app.db.base import Base
 from app.models.artifact import Artifact
 from app.models.execution_run import (
     EXECUTION_RUN_STATUS_FAILED,
-    EXECUTION_RUN_STATUS_PENDING,
     EXECUTION_RUN_STATUS_SUCCEEDED,
     ExecutionRun,
 )
@@ -33,9 +30,6 @@ from app.models.task import (
     PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
-    TASK_STATUS_COMPLETED,
-    TASK_STATUS_FAILED,
-    TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
     Task,
 )
@@ -326,14 +320,22 @@ def make_execution_plan() -> Callable[..., ExecutionPlan]:
         execution_batches: list[ExecutionBatch] = []
         checkpoints: list[CheckpointDefinition] = []
 
+        total_batches = len(batches)
+
         for index, batch_data in enumerate(batches, start=1):
             batch_id = batch_data["batch_id"]
             checkpoint_id = batch_data.get("checkpoint_id", f"cp_{index}")
+
             evaluation_focus = batch_data.get("evaluation_focus")
             if evaluation_focus is None:
                 evaluation_focus = ["functional_coverage"]
-                if index == len(batches):
+                if index == total_batches:
                     evaluation_focus = ["functional_coverage", "stage_closure"]
+
+            checkpoint_reason = batch_data.get(
+                "checkpoint_reason",
+                f"Checkpoint after {batch_id}.",
+            )
 
             execution_batches.append(
                 ExecutionBatch(
@@ -341,15 +343,18 @@ def make_execution_plan() -> Callable[..., ExecutionPlan]:
                     name=batch_data.get("name", f"Batch {index}"),
                     goal=batch_data.get("goal", f"Goal for {batch_id}"),
                     task_ids=batch_data["task_ids"],
-                    entry_conditions=batch_data.get("entry_conditions", ["Prior dependencies resolved."]),
-                    expected_outputs=batch_data.get("expected_outputs", ["Expected output generated."]),
+                    entry_conditions=batch_data.get(
+                        "entry_conditions",
+                        ["Prior dependencies resolved."],
+                    ),
+                    expected_outputs=batch_data.get(
+                        "expected_outputs",
+                        ["Expected output generated."],
+                    ),
                     risk_level=batch_data.get("risk_level", "medium"),
                     checkpoint_after=True,
                     checkpoint_id=checkpoint_id,
-                    checkpoint_reason=batch_data.get(
-                        "checkpoint_reason",
-                        f"Checkpoint after {batch_id}.",
-                    ),
+                    checkpoint_reason=checkpoint_reason,
                 )
             )
 
@@ -357,7 +362,7 @@ def make_execution_plan() -> Callable[..., ExecutionPlan]:
                 CheckpointDefinition(
                     checkpoint_id=checkpoint_id,
                     name=batch_data.get("checkpoint_name", f"Checkpoint {index}"),
-                    reason=batch_data.get("checkpoint_reason", f"Checkpoint after {batch_id}."),
+                    reason=checkpoint_reason,
                     after_batch_id=batch_id,
                     evaluation_goal=batch_data.get(
                         "evaluation_goal",

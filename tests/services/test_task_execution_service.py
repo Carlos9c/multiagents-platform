@@ -10,6 +10,8 @@ from app.execution_engine.contracts import (
     ExecutionResult,
 )
 from app.models.task import (
+    CODE_EXECUTOR,
+    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     PLANNING_LEVEL_HIGH_LEVEL,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
@@ -56,10 +58,9 @@ def _set_task_status(db, task_id: int, status: str) -> str:
     return task.status
 
 
-def _patch_engine(monkeypatch, engine_result: ExecutionResult):
-    monkeypatch.setattr(
-        "app.services.task_execution_service.build_execution_request",
-        lambda db, task, execution_run_id: types.SimpleNamespace(
+def _patch_engine(monkeypatch, engine_result: ExecutionResult, *, captured_request: dict | None = None):
+    def _fake_build_execution_request(db, task, execution_run_id, resolved_executor_type):
+        request = types.SimpleNamespace(
             task_id=task.id,
             project_id=task.project_id,
             execution_run_id=execution_run_id,
@@ -70,7 +71,7 @@ def _patch_engine(monkeypatch, engine_result: ExecutionResult):
             acceptance_criteria=task.acceptance_criteria,
             technical_constraints=task.technical_constraints,
             out_of_scope=task.out_of_scope,
-            executor_type=task.executor_type,
+            executor_type=resolved_executor_type,
             context=types.SimpleNamespace(
                 workspace_path=".",
                 source_path=".",
@@ -80,7 +81,14 @@ def _patch_engine(monkeypatch, engine_result: ExecutionResult):
             ),
             allowed_paths=[],
             blocked_paths=[],
-        ),
+        )
+        if captured_request is not None:
+            captured_request["request"] = request
+        return request
+
+    monkeypatch.setattr(
+        "app.services.task_execution_service.build_execution_request",
+        _fake_build_execution_request,
     )
     monkeypatch.setattr(
         "app.services.task_execution_service.get_execution_engine",
@@ -124,11 +132,107 @@ def test_execute_task_sync_rejects_non_atomic_task(
         title="High-level task",
         planning_level=PLANNING_LEVEL_HIGH_LEVEL,
         status=TASK_STATUS_PENDING,
-        executor_type="pending_atomic_assignment",
+        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     )
 
     with pytest.raises(TaskExecutionServiceError, match="Only atomic tasks can be executed"):
         execute_task_sync(db_session, non_atomic_task.id)
+
+
+def test_execute_task_sync_resolves_pending_executor_at_runtime(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+):
+    project = make_project()
+    atomic_task = make_task(
+        project_id=project.id,
+        title="Atomic task with unresolved executor",
+        status=TASK_STATUS_PENDING,
+        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    )
+
+    captured = {}
+
+    _patch_engine(
+        monkeypatch,
+        _build_engine_result(
+            task_id=atomic_task.id,
+            decision=EXECUTION_DECISION_PARTIAL,
+            summary="Execution finished successfully.",
+        ),
+        captured_request=captured,
+    )
+    _patch_workspace_runtime(monkeypatch)
+
+    monkeypatch.setattr(
+        "app.services.task_execution_service.validate_code_task",
+        lambda **kwargs: types.SimpleNamespace(
+            validation_result=types.SimpleNamespace(
+                decision="completed",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        "app.services.task_execution_service.apply_validation_decision_to_task",
+        lambda db, task_id, decision: _set_task_status(db, task_id, TASK_STATUS_COMPLETED),
+    )
+
+    result = execute_task_sync(db_session, atomic_task.id)
+
+    assert captured["request"].executor_type == CODE_EXECUTOR
+    assert result.executor_type == CODE_EXECUTOR
+    db_session.refresh(atomic_task)
+    assert atomic_task.executor_type == PENDING_ATOMIC_ASSIGNMENT_EXECUTOR
+
+
+def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+):
+    project = make_project()
+    atomic_task = make_task(
+        project_id=project.id,
+        title="Atomic task with explicit executor",
+        status=TASK_STATUS_PENDING,
+        executor_type=CODE_EXECUTOR,
+    )
+
+    captured = {}
+
+    _patch_engine(
+        monkeypatch,
+        _build_engine_result(
+            task_id=atomic_task.id,
+            decision=EXECUTION_DECISION_PARTIAL,
+            summary="Execution finished successfully.",
+        ),
+        captured_request=captured,
+    )
+    _patch_workspace_runtime(monkeypatch)
+
+    monkeypatch.setattr(
+        "app.services.task_execution_service.validate_code_task",
+        lambda **kwargs: types.SimpleNamespace(
+            validation_result=types.SimpleNamespace(
+                decision="completed",
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        "app.services.task_execution_service.apply_validation_decision_to_task",
+        lambda db, task_id, decision: _set_task_status(db, task_id, TASK_STATUS_COMPLETED),
+    )
+
+    result = execute_task_sync(db_session, atomic_task.id)
+
+    assert captured["request"].executor_type == CODE_EXECUTOR
+    assert result.executor_type == CODE_EXECUTOR
 
 
 def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
@@ -144,13 +248,14 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type="pending_atomic_assignment",
+        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     )
     atomic_task = make_task(
         project_id=project.id,
         parent_task_id=parent.id,
         title="Atomic implementation task",
         status=TASK_STATUS_PENDING,
+        executor_type=CODE_EXECUTOR,
     )
 
     promoted = {"called": False}
@@ -188,6 +293,7 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
     assert result.run_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION
     assert result.final_task_status == TASK_STATUS_COMPLETED
     assert result.validation_decision == "completed"
+    assert result.executor_type == CODE_EXECUTOR
     assert atomic_task.status == TASK_STATUS_COMPLETED
     assert parent.status == TASK_STATUS_COMPLETED
     assert promoted["called"] is True
@@ -206,13 +312,14 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type="pending_atomic_assignment",
+        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     )
     atomic_task = make_task(
         project_id=project.id,
         parent_task_id=parent.id,
         title="Atomic implementation task",
         status=TASK_STATUS_PENDING,
+        executor_type=CODE_EXECUTOR,
     )
 
     _patch_engine(
@@ -248,6 +355,7 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
     assert result.run_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION
     assert result.final_task_status == TASK_STATUS_PARTIAL
     assert result.validation_decision == "partial"
+    assert result.executor_type == CODE_EXECUTOR
     assert atomic_task.status == TASK_STATUS_PARTIAL
     assert parent.status == TASK_STATUS_PARTIAL
 
@@ -265,13 +373,14 @@ def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type="pending_atomic_assignment",
+        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     )
     atomic_task = make_task(
         project_id=project.id,
         parent_task_id=parent.id,
         title="Atomic task that fails",
         status=TASK_STATUS_PENDING,
+        executor_type=CODE_EXECUTOR,
     )
 
     _patch_engine(
@@ -302,6 +411,7 @@ def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
 
     assert result.final_task_status == TASK_STATUS_FAILED
     assert result.validation_decision == "failed"
+    assert result.executor_type == CODE_EXECUTOR
     assert atomic_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_FAILED
 
@@ -319,13 +429,14 @@ def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type="pending_atomic_assignment",
+        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     )
     atomic_task = make_task(
         project_id=project.id,
         parent_task_id=parent.id,
         title="Atomic task rejected by executor",
         status=TASK_STATUS_PENDING,
+        executor_type=CODE_EXECUTOR,
     )
 
     _patch_engine(
@@ -356,5 +467,6 @@ def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
 
     assert result.run_status == CODE_EXECUTION_STATUS_REJECTED
     assert result.final_task_status == TASK_STATUS_FAILED
+    assert result.executor_type == CODE_EXECUTOR
     assert atomic_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_FAILED

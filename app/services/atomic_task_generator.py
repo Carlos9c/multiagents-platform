@@ -44,29 +44,19 @@ def _validate_parent_task(project: Project, task: Task) -> None:
             f"Received planning_level='{task.planning_level}'."
         )
 
-    if task.executor_type != PENDING_ATOMIC_ASSIGNMENT_EXECUTOR:
-        raise AtomicTaskGenerationError(
-            "Parent task must still be pending atomic executor assignment."
-        )
-
 
 def _implementation_steps_count(implementation_steps: str) -> int:
     lines = [line.strip() for line in implementation_steps.splitlines() if line.strip()]
     return sum(1 for line in lines if line.startswith("- "))
 
 
-def _validate_atomic_task_quality(tasks: list[Task], available_executors: list[str]) -> None:
+def _validate_atomic_task_quality(tasks: list[Task]) -> None:
     if not tasks:
         raise AtomicTaskGenerationError("Atomic generation produced no tasks.")
 
     seen_titles: set[str] = set()
 
     for task in tasks:
-        if task.executor_type not in available_executors:
-            raise AtomicTaskGenerationError(
-                f"Invalid executor_type in atomic task: {task.executor_type}"
-            )
-
         normalized_title = (task.title or "").strip().lower()
         if normalized_title in seen_titles:
             raise AtomicTaskGenerationError(
@@ -253,7 +243,7 @@ def generate_atomic_tasks(
             priority=atomic.priority,
             task_type=atomic.task_type,
             planning_level=PLANNING_LEVEL_ATOMIC,
-            executor_type=atomic.executor_type,
+            executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
             sequence_order=index,
             status="pending",
             is_blocked=False,
@@ -264,7 +254,7 @@ def generate_atomic_tasks(
 
     db.flush()
 
-    _validate_atomic_task_quality(created_tasks, AVAILABLE_EXECUTORS)
+    _validate_atomic_task_quality(created_tasks)
 
     artifact_payload = {
         "parent_task_id": parent_task.id,

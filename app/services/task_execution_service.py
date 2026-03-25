@@ -75,7 +75,6 @@ from app.services.tasks import (
     mark_task_running,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -130,20 +129,7 @@ def _validate_task_is_executable(task: Task) -> None:
 
     if task.planning_level != PLANNING_LEVEL_ATOMIC:
         raise TaskExecutionServiceError(
-            "Only atomic tasks can be executed. "
-            "Executor assignment must be resolved during the atomic stage."
-        )
-
-    if not task.executor_type or task.executor_type == PENDING_ATOMIC_ASSIGNMENT_EXECUTOR:
-        raise TaskExecutionServiceError(
-            "Task executor is not assigned yet. "
-            "Atomic task generation must assign a concrete executor before execution."
-        )
-
-    if task.executor_type not in SUPPORTED_EXECUTORS:
-        raise TaskExecutionServiceError(
-            f"Unsupported executor_type '{task.executor_type}'. "
-            f"Supported executors: {sorted(SUPPORTED_EXECUTORS)}"
+            "Only atomic tasks can be executed."
         )
 
     if task.status not in EXECUTABLE_TASK_STATUSES:
@@ -151,6 +137,28 @@ def _validate_task_is_executable(task: Task) -> None:
             f"Task status '{task.status}' is not executable. "
             f"Allowed statuses: {sorted(EXECUTABLE_TASK_STATUSES)}"
         )
+
+
+def _resolve_executor_type_for_task(task: Task) -> str:
+    """
+    Resolve the concrete executor/profile at execution time.
+
+    Atomic generation no longer owns the final executor assignment.
+    Unresolved atomic tasks route to the active supported executor.
+    """
+    if task.planning_level != PLANNING_LEVEL_ATOMIC:
+        raise TaskExecutionServiceError("Only atomic tasks can be executed.")
+
+    if not task.executor_type or task.executor_type == PENDING_ATOMIC_ASSIGNMENT_EXECUTOR:
+        return CODE_EXECUTOR
+
+    if task.executor_type in SUPPORTED_EXECUTORS:
+        return task.executor_type
+
+    raise TaskExecutionServiceError(
+        f"Unsupported executor_type '{task.executor_type}'. "
+        f"Supported executors: {sorted(SUPPORTED_EXECUTORS)}"
+    )
 
 
 def _create_execution_run_for_task(db: Session, task: Task) -> ExecutionRun:
@@ -166,6 +174,7 @@ def _build_sync_result(
     *,
     task: Task,
     run_id: int,
+    resolved_executor_type: str,
     run_status: str,
     output_snapshot: str | None,
     message: str,
@@ -176,7 +185,7 @@ def _build_sync_result(
         task_id=task.id,
         execution_run_id=run_id,
         run_status=run_status,
-        executor_type=task.executor_type,
+        executor_type=resolved_executor_type,
         output_snapshot=output_snapshot,
         message=message,
         final_task_status=final_task_status,
@@ -496,6 +505,7 @@ def _validate_after_execution(
     *,
     task: Task,
     run_id: int,
+    resolved_executor_type: str,
     executor_result: CodeExecutorResult,
 ) -> SyncTaskExecutionResult:
     try:
@@ -559,6 +569,7 @@ def _validate_after_execution(
     return _build_sync_result(
         task=refreshed_task,
         run_id=run_id,
+        resolved_executor_type=resolved_executor_type,
         run_status=CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
         output_snapshot=executor_result.output_snapshot,
         message=message,
@@ -572,6 +583,7 @@ def _finalize_prevalidation_terminal_outcome(
     *,
     task: Task,
     run_id: int,
+    resolved_executor_type: str,
     run_status: str,
     executor_result: CodeExecutorResult,
     message: str,
@@ -601,6 +613,7 @@ def _finalize_prevalidation_terminal_outcome(
     return _build_sync_result(
         task=refreshed_task,
         run_id=run_id,
+        resolved_executor_type=resolved_executor_type,
         run_status=run_status,
         output_snapshot=executor_result.output_snapshot,
         message=message,
@@ -620,6 +633,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
 
     try:
         _validate_task_is_executable(task)
+        resolved_executor_type = _resolve_executor_type_for_task(task)
 
         mark_execution_run_started(db, run_id)
         mark_task_running(db, task.id)
@@ -629,7 +643,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             task.id,
             run_id,
             task.project_id,
-            task.executor_type,
+            resolved_executor_type,
         )
 
         _prepare_execution_workspace(
@@ -641,6 +655,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             db=db,
             task=task,
             execution_run_id=run_id,
+            resolved_executor_type=resolved_executor_type,
         )
 
         logger.info(
@@ -697,6 +712,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 db=db,
                 task=task,
                 run_id=run_id,
+                resolved_executor_type=resolved_executor_type,
                 executor_result=executor_result,
             )
 
@@ -728,6 +744,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 db=db,
                 task=task,
                 run_id=run_id,
+                resolved_executor_type=resolved_executor_type,
                 run_status=CODE_EXECUTION_STATUS_FAILED,
                 executor_result=executor_result,
                 message="Execution failed before normal validation, but a terminal validation artifact was persisted.",
@@ -757,6 +774,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 db=db,
                 task=task,
                 run_id=run_id,
+                resolved_executor_type=resolved_executor_type,
                 run_status=CODE_EXECUTION_STATUS_REJECTED,
                 executor_result=executor_result,
                 message="Execution was rejected before normal validation, but a terminal validation artifact was persisted.",
@@ -806,6 +824,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             db=db,
             task=task,
             run_id=run_id,
+            resolved_executor_type=_resolve_executor_type_for_task(task),
             run_status=CODE_EXECUTION_STATUS_REJECTED,
             executor_result=synthetic_result,
             message="Execution was rejected before validation, and a synthetic terminal validation artifact was persisted.",
@@ -841,6 +860,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             db=db,
             task=task,
             run_id=run_id,
+            resolved_executor_type=_resolve_executor_type_for_task(task),
             run_status=CODE_EXECUTION_STATUS_FAILED,
             executor_result=synthetic_result,
             message="Execution failed before validation, and a synthetic terminal validation artifact was persisted.",
@@ -875,6 +895,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             db=db,
             task=task,
             run_id=run_id,
+            resolved_executor_type=_resolve_executor_type_for_task(task),
             run_status=CODE_EXECUTION_STATUS_FAILED,
             executor_result=synthetic_result,
             message="Execution failed before validation due to an unexpected service error, and a synthetic terminal validation artifact was persisted.",

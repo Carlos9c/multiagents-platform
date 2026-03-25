@@ -2,7 +2,11 @@ import types
 
 import pytest
 
-from app.models.task import PLANNING_LEVEL_HIGH_LEVEL, TASK_STATUS_PENDING
+from app.models.task import (
+    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    PLANNING_LEVEL_HIGH_LEVEL,
+    TASK_STATUS_PENDING,
+)
 from app.services.project_workflow_service import (
     ProjectWorkflowServiceError,
     run_project_workflow,
@@ -78,6 +82,7 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
         return types.SimpleNamespace(
             final_task_status="completed",
             validation_decision="completed",
+            executor_type="code_executor",
         )
 
     monkeypatch.setattr(
@@ -139,7 +144,7 @@ def test_workflow_rejects_non_atomic_task_inside_execution_batch(
         title="High-level task incorrectly inserted into batch",
         planning_level=PLANNING_LEVEL_HIGH_LEVEL,
         status=TASK_STATUS_PENDING,
-        executor_type="pending_atomic_assignment",
+        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     )
 
     plan = make_execution_plan(

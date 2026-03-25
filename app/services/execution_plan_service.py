@@ -202,7 +202,6 @@ def build_execution_plan_input(
             Task.planning_level == PLANNING_LEVEL_ATOMIC,
             Task.status == TASK_STATUS_PENDING,
             Task.is_blocked.is_(False),
-            Task.executor_type == CODE_EXECUTOR,
         )
         .order_by(Task.id.asc())
         .all()

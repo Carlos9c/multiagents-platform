@@ -21,6 +21,11 @@ TERMINAL_TASK_STATUSES = {
     TASK_STATUS_FAILED,
 }
 
+# IMPORTANTE:
+# executor_type ya no representa una decisión cerrada tomada por atomic.
+# En el estado persistido de la task, este campo debe interpretarse como:
+# - pending_atomic_assignment: routing pendiente / no resuelto todavía
+# - otro valor concreto: compatibilidad legacy o resolución persistida excepcional
 PENDING_ATOMIC_ASSIGNMENT_EXECUTOR = "pending_atomic_assignment"
 CODE_EXECUTOR = "code_executor"
 

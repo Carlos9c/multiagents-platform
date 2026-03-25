@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.execution_engine.base import BaseExecutionEngine
 from app.execution_engine.budget import LoopBudget
-from app.execution_engine.engines.legacy_local_engine import LegacyLocalExecutionEngine
 from app.execution_engine.engines.orchestrated_engine import OrchestratedExecutionEngine
 
 
@@ -23,13 +22,10 @@ def get_execution_engine(db: Session) -> BaseExecutionEngine:
     backend = settings.execution_engine_backend
     budget = build_default_loop_budget()
 
-    if backend == "legacy_local":
-        return LegacyLocalExecutionEngine(db=db, budget=budget)
-
     if backend == "orchestrated":
         return OrchestratedExecutionEngine(budget=budget)
 
     raise ValueError(
         f"Unsupported execution_engine_backend '{backend}'. "
-        "Supported backends: ['legacy_local', 'orchestrated']"
+        "Supported backends: ['orchestrated']"
     )

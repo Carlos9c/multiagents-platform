@@ -30,7 +30,6 @@ class AtomicTaskOutput(BaseModel):
     out_of_scope: str = Field(min_length=10)
     priority: Priority
     task_type: TaskType
-    executor_type: str = Field(min_length=3, max_length=100)
 
 
 class AtomicTaskGenerationOutput(BaseModel):

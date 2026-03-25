@@ -1,7 +1,11 @@
 import pytest
 
-from app.models.task import TASK_STATUS_COMPLETED, TASK_STATUS_FAILED, TASK_STATUS_PENDING
-from app.schemas.recovery import RecoveryContext
+from app.models.task import (
+    PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PENDING,
+)
 from app.services.post_batch_service import (
     PostBatchServiceError,
     process_batch_after_execution,
@@ -73,6 +77,7 @@ def test_post_batch_continues_on_successful_intermediate_checkpoint(
     assert result.continue_execution is True
     assert result.requires_manual_review is False
     assert result.executed_task_ids == [batch_1_task.id]
+    assert result.successful_task_ids == [batch_1_task.id]
     assert result.problematic_run_ids == []
 
 
@@ -174,7 +179,7 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
         title="Parent task",
         planning_level="high_level",
         status=TASK_STATUS_PENDING,
-        executor_type="pending_atomic_assignment",
+        executor_type=PENDING_ATOMIC_ASSIGNMENT_EXECUTOR,
     )
     failed_task = make_task(
         project_id=project.id,
@@ -183,7 +188,7 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
         status=TASK_STATUS_FAILED,
         sequence_order=1,
     )
-    make_execution_run(
+    run = make_execution_run(
         task_id=failed_task.id,
         status="failed",
         failure_type="internal",
@@ -208,7 +213,7 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
 
     decision = make_recovery_decision(
         source_task_id=failed_task.id,
-        source_run_id=failed_task.execution_runs[-1].id,
+        source_run_id=run.id,
         action="reatomize",
         created_tasks=[
             {
@@ -262,4 +267,4 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
     assert parent.status == TASK_STATUS_PENDING
     assert len(result.recovery_context.recovery_created_tasks) == 1
     assert result.recovery_context.recovery_created_tasks[0].source_task_id == failed_task.id
-    assert result.problematic_run_ids == [failed_task.execution_runs[-1].id]
+    assert result.problematic_run_ids == [run.id]
