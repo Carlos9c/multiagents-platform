@@ -381,3 +381,34 @@ def test_workflow_bypasses_refinement_when_project_flag_is_false(
     assert captured["refinement_flag_in_atomic_phase"] is False
     assert result.refinement_completed is True
     assert result.atomic_generation_completed is True
+
+def test_workflow_trace_keeps_batch_identity_stable_across_plan_versions(
+    db_session,
+    make_project,
+    make_execution_plan,
+):
+    project = make_project(plan_version=1)
+
+    plan_v1 = make_execution_plan(
+        plan_version=1,
+        supersedes_plan_version=None,
+        batches=[
+            {"task_ids": [1]},
+        ],
+    )
+    plan_v2 = make_execution_plan(
+        plan_version=2,
+        supersedes_plan_version=1,
+        batches=[
+            {"task_ids": [2]},
+        ],
+    )
+
+    batch_v1 = plan_v1.execution_batches[0]
+    batch_v2 = plan_v2.execution_batches[0]
+
+    assert batch_v1.batch_index == 1
+    assert batch_v2.batch_index == 1
+    assert batch_v1.batch_internal_id != batch_v2.batch_internal_id
+    assert batch_v1.plan_version == 1
+    assert batch_v2.plan_version == 2

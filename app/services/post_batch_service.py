@@ -24,6 +24,7 @@ from app.models.task import (
     TERMINAL_TASK_STATUSES,
     Task,
 )
+from app.schemas.workflow_iteration_trace import WorkflowIterationTrace
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.post_batch import PostBatchResult, PostBatchTaskRunSummary
 from app.schemas.recovery import RecoveryContext
@@ -73,6 +74,59 @@ class NormalizedEvaluationOutcome:
     is_stage_closed: bool
     reopened_finalization: bool
     notes: str
+
+def _serialize_workflow_iteration_trace(trace: WorkflowIterationTrace) -> str:
+    return json.dumps(trace.model_dump(mode="json"), ensure_ascii=False, indent=2)
+
+
+def _build_workflow_iteration_trace(
+    *,
+    project_id: int,
+    batch: ExecutionBatch,
+    checkpoint_id: str,
+    created_recovery_task_ids: list[int],
+    result: PostBatchResult,
+) -> WorkflowIterationTrace:
+    return WorkflowIterationTrace(
+        project_id=project_id,
+        plan_version=result.plan_version,
+        batch_internal_id=batch.batch_internal_id,
+        batch_id=batch.batch_id,
+        batch_index=batch.batch_index,
+        checkpoint_id=checkpoint_id,
+        executed_task_ids=list(result.executed_task_ids),
+        successful_task_ids=list(result.successful_task_ids),
+        problematic_run_ids=list(result.problematic_run_ids),
+        created_recovery_task_ids=list(created_recovery_task_ids),
+        resolved_action=result.resolved_action,
+        decision_signals_used=list(result.decision_signals_used),
+        continue_execution=result.continue_execution,
+        requires_resequencing=result.requires_resequencing,
+        requires_replanning=result.requires_replanning,
+        requires_manual_review=result.requires_manual_review,
+        is_final_batch=result.is_final_batch,
+        finalization_iteration_count=result.finalization_iteration_count,
+        max_finalization_iterations=result.max_finalization_iterations,
+        finalization_guard_triggered=result.finalization_guard_triggered,
+        notes=result.notes,
+    )
+
+
+def _persist_workflow_iteration_trace(
+    db: Session,
+    *,
+    project_id: int,
+    trace: WorkflowIterationTrace,
+    created_by: str = "post_batch_processor",
+):
+    return create_artifact(
+        db=db,
+        project_id=project_id,
+        task_id=None,
+        artifact_type="workflow_iteration_trace",
+        content=_serialize_workflow_iteration_trace(trace),
+        created_by=created_by,
+    )
 
 
 def _serialize_post_batch_result(result: PostBatchResult) -> str:
@@ -1017,7 +1071,20 @@ def process_batch_after_execution(
         notes=notes,
     )
 
+    workflow_iteration_trace = _build_workflow_iteration_trace(
+        project_id=project_id,
+        batch=batch,
+        checkpoint_id=checkpoint.checkpoint_id,
+        created_recovery_task_ids=created_recovery_task_ids,
+        result=result,
+    )
+
     if persist_result:
         _persist_post_batch_result(db=db, project_id=project_id, result=result)
+        _persist_workflow_iteration_trace(
+            db=db,
+            project_id=project_id,
+            trace=workflow_iteration_trace,
+        )
 
     return result

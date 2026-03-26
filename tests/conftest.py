@@ -544,12 +544,19 @@ def make_execution_plan() -> Callable[..., ExecutionPlan]:
                 f"Checkpoint after {batch_id}.",
             )
 
+            effective_plan_version = batch_data.get("plan_version", plan_version)
+            effective_batch_index = batch_data.get("batch_index", index)
+
             execution_batches.append(
                 ExecutionBatch(
+                    batch_internal_id=batch_data.get(
+                        "batch_internal_id",
+                        f"{effective_plan_version}_{effective_batch_index}",
+                    ),
                     batch_id=batch_id,
-                    batch_index=batch_data.get("batch_index", index),
-                    plan_version=batch_data.get("plan_version", plan_version),
-                    name=batch_data.get("name", f"Batch {index}"),
+                    batch_index=effective_batch_index,
+                    plan_version=effective_plan_version,
+                    name=batch_data.get("name", f"Plan {effective_plan_version} · Batch {effective_batch_index}"),
                     goal=batch_data.get("goal", f"Goal for {batch_id}"),
                     task_ids=batch_data["task_ids"],
                     entry_conditions=batch_data.get(

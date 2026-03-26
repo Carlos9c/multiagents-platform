@@ -192,6 +192,10 @@ def _build_batch_id(plan_version: int, batch_index: int) -> str:
     return f"plan_{plan_version}_batch_{batch_index}"
 
 
+def _build_batch_internal_id(plan_version: int, batch_index: int) -> str:
+    return f"{plan_version}_{batch_index}"
+
+
 def _build_checkpoint_id(plan_version: int, batch_index: int) -> str:
     return f"checkpoint_plan_{plan_version}_batch_{batch_index}"
 
@@ -245,10 +249,14 @@ def _normalize_execution_plan(
         )
 
         normalized_batch = ExecutionBatch(
+            batch_internal_id=_build_batch_internal_id(
+                plan_version=plan_version,
+                batch_index=batch_index,
+            ),
             batch_id=batch_id,
             batch_index=batch_index,
             plan_version=plan_version,
-            name=raw_batch.name,
+            name=f"Plan {plan_version} · Batch {batch_index}",
             goal=raw_batch.goal,
             task_ids=list(raw_batch.task_ids),
             entry_conditions=list(raw_batch.entry_conditions),

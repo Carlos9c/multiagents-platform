@@ -92,6 +92,7 @@ class ExecutionSequencingInstructions(BaseModel):
 
 
 class ExecutionBatch(BaseModel):
+    batch_internal_id: str
     batch_id: str
     batch_index: int
     plan_version: int
@@ -115,6 +116,8 @@ class ExecutionBatch(BaseModel):
             raise ValueError("ExecutionBatch.task_ids cannot be empty.")
         if not self.checkpoint_after:
             raise ValueError("Every execution batch must end with a checkpoint.")
+        if not self.batch_internal_id:
+            raise ValueError("ExecutionBatch.batch_internal_id is required.")
         if not self.batch_id:
             raise ValueError("ExecutionBatch.batch_id is required.")
         if not self.checkpoint_id:
@@ -122,7 +125,6 @@ class ExecutionBatch(BaseModel):
         if not self.checkpoint_reason:
             raise ValueError("ExecutionBatch.checkpoint_reason is required.")
         return self
-
 
 class CheckpointDefinition(BaseModel):
     checkpoint_id: str
