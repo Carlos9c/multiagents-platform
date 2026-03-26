@@ -549,3 +549,154 @@ def test_post_batch_uses_real_checkpoint_artifact_window_and_ignores_older_task_
     assert result.status == "project_stage_closed"
     assert captured_kwargs["checkpoint_artifact_window_ids"] == [new_artifact.id]
     assert old_artifact.id not in captured_kwargs["checkpoint_artifact_window_ids"]
+
+def test_post_batch_persists_resolved_action_and_decision_signals(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+    task = make_task(
+        project_id=project.id,
+        title="Batch task",
+        status=TASK_STATUS_COMPLETED,
+    )
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Task completed successfully.",
+    )
+
+    pending_followup = make_task(
+        project_id=project.id,
+        title="Pending follow-up",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "task_ids": [pending_followup.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ]
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="continue_current_plan",
+        recommended_next_action_reason="The remaining backlog already represents the correct next work.",
+        decision_signals=["remaining_plan_still_valid", "non_blocking_followup_work"],
+        completed_task_ids=[task.id],
+        notes=["Continue with the next batch."],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=False,
+    )
+
+    assert result.resolved_action == "continue_current_plan"
+    assert result.decision_signals_used == [
+        "remaining_plan_still_valid",
+        "non_blocking_followup_work",
+    ]
+    assert result.continue_execution is True
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+    assert result.requires_manual_review is False
+
+def test_post_batch_continues_when_only_new_recovery_tasks_exist_but_they_are_non_blocking(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+    task = make_task(
+        project_id=project.id,
+        title="Completed batch task",
+        status=TASK_STATUS_COMPLETED,
+    )
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Task completed successfully.",
+    )
+
+    plan = make_execution_plan(
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "task_ids": [9999],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ]
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="continue_current_plan",
+        recommended_next_action_reason="New recovery work is additive and does not block the pending plan.",
+        decision_signals=["remaining_plan_still_valid", "non_blocking_followup_work"],
+        new_recovery_tasks_blocking=False,
+        followup_atomic_tasks_required=False,
+        notes=["Continue without resequencing."],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=False,
+    )
+
+    assert result.resolved_action == "continue_current_plan"
+    assert result.continue_execution is True
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+    assert result.requires_manual_review is False

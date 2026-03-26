@@ -257,3 +257,47 @@ def test_resolve_post_batch_decision_does_not_replan_for_non_blocking_new_recove
 
     assert resolved.requires_replanning is False
     assert resolved.action == "continue_current_plan"
+
+def test_resolve_post_batch_decision_resequences_when_recovery_work_requires_precedence_without_structural_replan():
+    signals = make_signals(
+        remaining_plan_still_valid=True,
+        recommended_next_action="",
+        plan_change_scope="none",
+        replan_required=False,
+        new_recovery_tasks_created=True,
+        has_new_recovery_pending_tasks=True,
+        new_recovery_pending_task_count=1,
+        new_recovery_tasks_blocking=True,
+        followup_atomic_tasks_required=False,
+        has_preexisting_pending_valid_tasks=True,
+        preexisting_pending_valid_task_count=2,
+    )
+
+    resolved = resolve_post_batch_decision(signals)
+
+    assert resolved.action == "resequence_remaining_batches"
+    assert resolved.requires_resequencing is True
+    assert resolved.requires_replanning is False
+    assert resolved.continue_execution is False
+
+
+def test_resolve_post_batch_decision_does_not_resequence_when_new_recovery_work_is_non_blocking_and_plan_is_valid():
+    signals = make_signals(
+        remaining_plan_still_valid=True,
+        recommended_next_action="",
+        new_recovery_tasks_created=True,
+        has_new_recovery_pending_tasks=True,
+        new_recovery_pending_task_count=1,
+        new_recovery_tasks_blocking=False,
+        has_preexisting_pending_valid_tasks=False,
+        preexisting_pending_valid_task_count=0,
+        followup_atomic_tasks_required=False,
+        single_task_tail_risk=False,
+    )
+
+    resolved = resolve_post_batch_decision(signals)
+
+    assert resolved.action == "continue_current_plan"
+    assert resolved.continue_execution is True
+    assert resolved.requires_replanning is False
+    assert resolved.requires_resequencing is False
