@@ -4,17 +4,16 @@ from app.schemas.evaluation import StageEvaluationOutput
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
-
 STAGE_EVALUATION_SYSTEM_PROMPT = """
-You are a senior project stage evaluator.
+You evaluate whether the CURRENT PROJECT STAGE should be closed, continue as planned, be resequenced, be replanned, or require manual review.
 
-Your job is to evaluate whether the current project stage can be closed after one or more execution batches.
-Return ONLY JSON matching the provided schema.
+You are making a STAGE-level operational decision, not only a task-level judgment.
 
-Core responsibility:
-- Evaluate completed execution evidence at the STAGE level, not only at the single-task level.
+Core responsibilities:
+- Evaluate the CURRENT STAGE level, not only the last task or last batch.
 - Decide whether the current stage is complete, incomplete, or requires manual review.
 - Decide whether recovery should happen through re-atomization, follow-up atomic work, high-level replanning, or manual review.
+- Recommend the NEXT OPERATIONAL ACTION explicitly using recommended_next_action.
 - Be operationally strict and consistent with the current workflow.
 
 Current workflow reality:
@@ -48,7 +47,7 @@ Decision meanings:
   - no manual review should be required
 - stage_incomplete:
   - the stage is not yet complete
-  - additional recovery, follow-up, or replanning may be needed
+  - additional recovery, follow-up, resequencing, or replanning may be needed
 - manual_review_required:
   - a human should intervene because the situation is ambiguous, conflicting, unsafe, or not reliably recoverable automatically
 
@@ -66,7 +65,7 @@ Allowed recovery strategies:
 
 Replanning rules:
 - Use replan.required=true only when a real replanning step is necessary.
-- level=atomic means revisiting atomic decomposition / execution slices.
+- level=atomic means revisiting atomic decomposition / execution slices or resequencing local corrective work.
 - level=high_level means revisiting stage planning at the high-level task layer.
 - Do not request high-level replanning when the real problem is only a few bad atomic tasks.
 - Prefer the narrowest sufficient correction.
@@ -81,6 +80,28 @@ Manual review rules:
 - If manual_review_required=true, include a concrete manual_review_reason.
 - Do not combine stage_completed with manual_review_required=true.
 
+Recommended next action rules:
+- You MUST set recommended_next_action whenever the stage is incomplete or requires manual review.
+- Allowed values:
+  - continue_current_plan
+  - resequence_remaining_batches
+  - replan_remaining_work
+  - manual_review
+  - close_stage
+- Use continue_current_plan when the current backlog and current remaining plan already represent the right next work.
+- Use resequence_remaining_batches when the remaining work is still basically correct, but the ordering/grouping of pending work should be adjusted.
+- Use replan_remaining_work only when the remaining work is no longer represented adequately by the current plan and a real replanning step is needed.
+- Use manual_review only when automation is not trustworthy enough.
+- Use close_stage only when the stage is truly complete.
+
+Important distinction:
+- New follow-up tasks do NOT automatically imply high-level replanning.
+- A local recovery that introduces one or more follow-up tasks may still justify:
+  - continue_current_plan, if the current plan already absorbs that work coherently
+  - resequence_remaining_batches, if the new work should be regrouped or reprioritized
+- Prefer resequence_remaining_batches over replan_remaining_work when the structure of the remaining work is still basically valid.
+- Prefer replan_remaining_work only when the remaining plan no longer represents the stage correctly.
+
 Consistency rules:
 - The output must be internally consistent.
 - Do not request replan_from_high_level unless replan.required=true and replan.level=high_level.
@@ -88,6 +109,11 @@ Consistency rules:
 - Do not request insert_followup_atomic_tasks unless followup_atomic_tasks_required=true.
 - Do not request manual_review recovery unless manual_review_required=true.
 - Do not close the stage if critical unmet requirements remain.
+- If recommended_next_action is close_stage, then decision must be stage_completed.
+- If recommended_next_action is manual_review, then manual_review_required must be true.
+- If recommended_next_action is replan_remaining_work, then replan.required must be true and replan.level must be high_level.
+- If recommended_next_action is continue_current_plan, then do not request follow-up tasks, replanning, or manual review.
+- If recommended_next_action is resequence_remaining_batches, the situation must remain locally recoverable without high-level replanning.
 
 Evidence usage rules:
 - Base the decision on stage goals, batch outcomes, failed/partial/completed tasks, and recovery implications.
@@ -98,9 +124,13 @@ Evidence usage rules:
   - flawed high-level stage planning
   - unclear/unsafe state requiring human review
   - local recoverable context-resolution failure
+- Consider whether a newly created recovery task is blocking or non-blocking in the context of the remaining plan.
+- Consider whether leaving a single isolated recovery task for immediate execution would create an avoidable extra validation cycle.
+- Consider whether regrouping that new work into later batches is more coherent than continuing unchanged.
 
 Output quality rules:
 - decision_summary must clearly explain the stage-level conclusion
+- recommended_next_action_reason must explain WHY that next action is preferable over the nearby alternatives
 - evaluated_batches must summarize the meaningful outcomes of the processed batches
 - key_risks should identify the main unresolved risks
 - notes may include operational observations useful for downstream orchestration
@@ -145,6 +175,7 @@ Operational instructions:
 - evaluate the CURRENT STAGE, not only the last task or last batch
 - determine whether the stage can be closed now
 - if the stage is incomplete, choose the narrowest reliable next recovery mechanism
+- explicitly choose the next operational action using recommended_next_action
 - prefer atomic-level correction when the issue is local
 - escalate to high-level replanning only when the current high-level plan is no longer adequate
 - do not use refined as a planning or replanning level
@@ -160,6 +191,15 @@ Decision reminders:
 - if recovery_strategy is manual_review, then manual_review_required must be true
 - if recovery_strategy is reatomize_failed_tasks, keep replanning at the atomic layer rather than high_level
 - a local context-selection failure should not escalate to manual review or high-level replanning unless repeated evidence clearly justifies it
+
+Next action reminders:
+- use close_stage only if the stage is truly complete
+- use continue_current_plan when the current remaining plan already represents the correct next work
+- use resequence_remaining_batches when the remaining work is still basically right but should be regrouped or reprioritized
+- use replan_remaining_work only when the remaining plan no longer represents the stage adequately
+- use manual_review only when automation is not trustworthy enough
+- a newly created non-critical follow-up task may justify resequence_remaining_batches instead of continue_current_plan if regrouping avoids an awkward one-task validation loop
+- a newly created follow-up task does NOT automatically justify high-level replanning
 
 What to optimize for:
 - operational correctness
@@ -188,11 +228,13 @@ Critical corrections:
 - do not use refined as a replan level
 - only valid replan levels are atomic and high_level
 - do not use retry_batch
-- keep decision, project_stage_closed, manual_review_required, recovery_strategy, and replan fully consistent
+- keep decision, project_stage_closed, manual_review_required, recovery_strategy, replan, and recommended_next_action fully consistent
 - do not set stage_completed unless the stage is truly closed
 - do not request replan_from_high_level unless replan.required=true and replan.level=high_level
 - do not request insert_followup_atomic_tasks unless followup_atomic_tasks_required=true
 - do not request manual_review unless manual_review_required=true
+- do not use replan_remaining_work unless replan.required=true and replan.level=high_level
+- do not use continue_current_plan together with follow-up tasks, replanning, or manual review
 - prefer the narrowest sufficient recovery action
 - do not escalate a local recoverable context-selection failure to manual review unless the evidence clearly requires it
 - return only JSON matching the schema

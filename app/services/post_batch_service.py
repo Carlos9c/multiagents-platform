@@ -344,12 +344,40 @@ def _normalize_string(value: Any, default: str = "") -> str:
 
 
 def _is_new_stage_evaluation_output(evaluation_decision: Any) -> bool:
-    return hasattr(evaluation_decision, "decision") and hasattr(evaluation_decision, "project_stage_closed")
+    return hasattr(evaluation_decision, "decision") and hasattr(
+        evaluation_decision,
+        "project_stage_closed",
+    )
+
+
+def _build_notes(
+    *,
+    decision_summary: str,
+    recommended_next_action_reason: str,
+    notes_list: Any,
+    fallback: str,
+) -> str:
+    parts: list[str] = []
+
+    if decision_summary:
+        parts.append(decision_summary)
+
+    if recommended_next_action_reason:
+        parts.append(recommended_next_action_reason)
+
+    if isinstance(notes_list, list):
+        parts.extend(str(item).strip() for item in notes_list if str(item).strip())
+
+    notes = " ".join(parts).strip()
+    return notes or fallback
 
 
 def _normalize_legacy_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
     decision_type = _normalize_string(_read_attr(evaluation_decision, "decision_type"))
-    continue_execution = _normalize_bool(_read_attr(evaluation_decision, "continue_execution"), default=False)
+    continue_execution = _normalize_bool(
+        _read_attr(evaluation_decision, "continue_execution"),
+        default=False,
+    )
 
     requires_replanning = decision_type == "replan_from_level"
     requires_resequencing = (
@@ -386,6 +414,16 @@ def _normalize_legacy_evaluation_outcome(evaluation_decision: Any) -> Normalized
 
 
 def _normalize_new_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
+    """
+    Normalize the new stage evaluation output.
+
+    Primary source of truth:
+    - recommended_next_action
+
+    Compatibility fallback:
+    - if recommended_next_action is absent/empty, infer the operational action
+      from decision/replan/followup/manual_review flags.
+    """
     decision = _normalize_string(_read_attr(evaluation_decision, "decision"), "")
     decision_summary = _normalize_string(_read_attr(evaluation_decision, "decision_summary"), "")
     notes_list = _read_attr(evaluation_decision, "notes", None)
@@ -410,55 +448,110 @@ def _normalize_new_evaluation_outcome(evaluation_decision: Any) -> NormalizedEva
 
     replan = _read_attr(evaluation_decision, "replan", None)
     replan_required = False
+    replan_level = ""
     if replan is not None:
         replan_required = _normalize_bool(_read_attr(replan, "required"), False)
+        replan_level = _normalize_string(_read_attr(replan, "level"), "")
 
-    requires_replanning = replan_required
-    requires_resequencing = followup_atomic_tasks_required
-    reopened_finalization = False
+    recommended_next_action = _normalize_string(
+        _read_attr(evaluation_decision, "recommended_next_action"),
+        "",
+    )
+    recommended_next_action_reason = _normalize_string(
+        _read_attr(evaluation_decision, "recommended_next_action_reason"),
+        "",
+    )
 
     is_stage_closed = project_stage_closed
     requires_manual_review = manual_review_required
-
     continue_execution = False
+    requires_resequencing = False
+    requires_replanning = False
+    reopened_finalization = False
 
-    if decision == "continue":
-        continue_execution = True
-    elif decision == "stage_incomplete":
-        continue_execution = (
-            not is_stage_closed
-            and not requires_manual_review
-            and recovery_strategy == "none"
-            and not requires_replanning
-            and not requires_resequencing
-        )
-    elif decision == "project_complete":
+    if recommended_next_action == "close_stage":
         is_stage_closed = True
         continue_execution = False
-    elif decision == "manual_review":
+
+    elif recommended_next_action == "manual_review":
         requires_manual_review = True
         continue_execution = False
-    elif decision == "finalization_reopened":
-        reopened_finalization = True
-        continue_execution = False
 
-    if requires_replanning or requires_resequencing:
+    elif recommended_next_action == "continue_current_plan":
+        continue_execution = True
+        requires_replanning = False
+        requires_resequencing = False
+
+    elif recommended_next_action == "resequence_remaining_batches":
         continue_execution = False
+        requires_resequencing = True
+        requires_replanning = False
+        reopened_finalization = True
+
+    elif recommended_next_action == "replan_remaining_work":
+        continue_execution = False
+        requires_replanning = True
+        requires_resequencing = False
+        reopened_finalization = True
+
+    else:
+        # Defensive compatibility path for partially migrated outputs.
+        if decision == "stage_completed":
+            is_stage_closed = True
+            continue_execution = False
+
+        elif decision == "manual_review_required":
+            requires_manual_review = True
+            continue_execution = False
+
+        elif decision == "stage_incomplete":
+            if replan_required and replan_level == "high_level":
+                requires_replanning = True
+                continue_execution = False
+                reopened_finalization = True
+            elif (
+                followup_atomic_tasks_required
+                or recovery_strategy in {
+                    "insert_followup_atomic_tasks",
+                    "reatomize_failed_tasks",
+                }
+                or (replan_required and replan_level == "atomic")
+            ):
+                requires_resequencing = True
+                continue_execution = False
+                reopened_finalization = True
+            elif requires_manual_review:
+                continue_execution = False
+            else:
+                continue_execution = True
+
+        else:
+            raise PostBatchServiceError(
+                "Checkpoint evaluation produced an unsupported StageEvaluationOutput decision "
+                f"without a usable recommended_next_action. decision='{decision}'."
+            )
 
     if requires_manual_review:
         continue_execution = False
 
     if is_stage_closed:
         continue_execution = False
+        requires_replanning = False
+        requires_resequencing = False
+        reopened_finalization = False
 
-    notes_parts: list[str] = []
-    if decision_summary:
-        notes_parts.append(decision_summary)
+    if requires_replanning and requires_resequencing:
+        raise PostBatchServiceError(
+            "Checkpoint evaluation normalization produced both replanning and resequencing. "
+            "These actions must be mutually exclusive at post-batch orchestration time."
+        )
 
-    if isinstance(notes_list, list):
-        notes_parts.extend(str(item).strip() for item in notes_list if str(item).strip())
-
-    notes = " ".join(notes_parts).strip() or "Checkpoint evaluation completed."
+    notes = _build_notes(
+        decision_summary=decision_summary,
+        recommended_next_action_reason=recommended_next_action_reason,
+        notes_list=notes_list,
+        fallback="Checkpoint evaluation completed.",
+    )
 
     return NormalizedEvaluationOutcome(
         continue_execution=continue_execution,
@@ -509,9 +602,7 @@ def _reconcile_hierarchy_after_batch_changes(
     executed_task_ids: list[int],
     created_recovery_task_ids: list[int],
 ) -> None:
-    affected_task_ids = list(
-        dict.fromkeys(executed_task_ids + created_recovery_task_ids)
-    )
+    affected_task_ids = list(dict.fromkeys(executed_task_ids + created_recovery_task_ids))
 
     try:
         reconcile_task_hierarchy_after_changes(

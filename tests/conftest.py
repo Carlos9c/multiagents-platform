@@ -9,11 +9,9 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-# Asegurar que el root del proyecto está en PYTHONPATH
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR))
 
-# Variables mínimas para que app.core.config no falle al importar módulos.
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
@@ -159,6 +157,8 @@ def make_execution_run(db_session: Session) -> Callable[..., ExecutionRun]:
         error_message: str | None = None,
         input_snapshot: str | None = "input",
         output_snapshot: str | None = "output",
+        execution_agent_sequence: str | None = None,
+        artifacts_created: str | None = None,
     ) -> ExecutionRun:
         run = ExecutionRun(
             task_id=task_id,
@@ -169,6 +169,8 @@ def make_execution_run(db_session: Session) -> Callable[..., ExecutionRun]:
             recovery_action=recovery_action,
             work_summary=work_summary,
             work_details=work_details,
+            execution_agent_sequence=execution_agent_sequence,
+            artifacts_created=artifacts_created,
             completed_scope=completed_scope,
             remaining_scope=remaining_scope,
             blockers_found=blockers_found,
@@ -227,6 +229,8 @@ def make_stage_evaluation_output() -> Callable[..., StageEvaluationOutput]:
         followup_atomic_tasks_reason: str | None = None,
         manual_review_required: bool = False,
         manual_review_reason: str | None = None,
+        recommended_next_action: str | None = None,
+        recommended_next_action_reason: str | None = None,
         evaluated_batch_id: str = "batch_1",
         evaluated_outcome: str = "successful",
         completed_task_ids: list[int] | None = None,
@@ -252,6 +256,8 @@ def make_stage_evaluation_output() -> Callable[..., StageEvaluationOutput]:
             followup_atomic_tasks_reason=followup_atomic_tasks_reason,
             manual_review_required=manual_review_required,
             manual_review_reason=manual_review_reason,
+            recommended_next_action=recommended_next_action,
+            recommended_next_action_reason=recommended_next_action_reason,
             evaluated_batches=[
                 EvaluatedBatchSummary(
                     batch_id=evaluated_batch_id,

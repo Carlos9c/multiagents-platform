@@ -52,6 +52,8 @@ def test_post_batch_continues_on_successful_intermediate_checkpoint(
         decision="stage_incomplete",
         project_stage_closed=False,
         stage_goals_satisfied=False,
+        recommended_next_action="continue_current_plan",
+        recommended_next_action_reason="The remaining backlog already represents the correct next work.",
         completed_task_ids=[batch_1_task.id],
         notes=["Continue with the next batch."],
     )
@@ -75,10 +77,180 @@ def test_post_batch_continues_on_successful_intermediate_checkpoint(
 
     assert result.status == "completed_with_evaluation"
     assert result.continue_execution is True
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
     assert result.requires_manual_review is False
     assert result.executed_task_ids == [batch_1_task.id]
     assert result.successful_task_ids == [batch_1_task.id]
     assert result.problematic_run_ids == []
+
+def test_post_batch_requests_resequencing_when_evaluator_recommends_resequence_remaining_batches(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    completed_task = make_task(
+        project_id=project.id,
+        title="Completed task",
+        status=TASK_STATUS_COMPLETED,
+    )
+    make_execution_run(
+        task_id=completed_task.id,
+        status="succeeded",
+        work_summary="Task completed successfully.",
+    )
+
+    pending_followup = make_task(
+        project_id=project.id,
+        title="Pending follow-up",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [completed_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "task_ids": [pending_followup.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ]
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        followup_atomic_tasks_required=True,
+        followup_atomic_tasks_reason="A non-critical follow-up task should be regrouped with later work.",
+        recovery_strategy="insert_followup_atomic_tasks",
+        recovery_reason="Recovery introduced local follow-up work without invalidating the overall stage plan.",
+        recommended_next_action="resequence_remaining_batches",
+        recommended_next_action_reason=(
+            "The remaining work is still valid, but regrouping avoids an awkward one-task validation cycle."
+        ),
+        completed_task_ids=[completed_task.id],
+        notes=["Resequence the remaining work."],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=False,
+    )
+
+    assert result.status == "checkpoint_blocked"
+    assert result.continue_execution is False
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is True
+    assert result.requires_manual_review is False
+    assert result.finalization_guard_triggered is False
+
+
+def test_post_batch_requests_replanning_when_evaluator_recommends_replan_remaining_work(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    completed_task = make_task(
+        project_id=project.id,
+        title="Completed task",
+        status=TASK_STATUS_COMPLETED,
+    )
+    make_execution_run(
+        task_id=completed_task.id,
+        status="succeeded",
+        work_summary="Task completed successfully.",
+    )
+
+    pending_future_task = make_task(
+        project_id=project.id,
+        title="Pending future task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [completed_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "task_ids": [pending_future_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ]
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recovery_strategy="replan_from_high_level",
+        recovery_reason="The remaining work is no longer represented correctly by the current plan.",
+        replan_required=True,
+        replan_level="high_level",
+        replan_reason="A new structural dependency changes how the remaining stage should be organized.",
+        recommended_next_action="replan_remaining_work",
+        recommended_next_action_reason=(
+            "The remaining batches no longer reflect the correct structure of the work."
+        ),
+        completed_task_ids=[completed_task.id],
+        notes=["Replan the remaining work from the high-level stage layer."],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=False,
+    )
+
+    assert result.status == "checkpoint_blocked"
+    assert result.continue_execution is False
+    assert result.requires_replanning is True
+    assert result.requires_resequencing is False
+    assert result.requires_manual_review is False
+    assert result.finalization_guard_triggered is False
 
 
 def test_post_batch_raises_if_recovery_reopens_source_task_to_pending(
@@ -242,6 +414,8 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
             manual_review_reason="Recovered work is pending and requires human checkpoint review.",
             recovery_strategy="manual_review",
             recovery_reason="Recovered work still blocks progress.",
+            recommended_next_action="manual_review",
+            recommended_next_action_reason="Automatic progression is not trustworthy enough after this recovery step.",
             completed_task_ids=[],
             failed_task_ids=[failed_task.id],
             notes=["Recovery created follow-up tasks."],
