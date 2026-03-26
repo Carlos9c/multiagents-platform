@@ -35,6 +35,16 @@ Critical recovery principle:
 - A documentation task must not become an implementation/bootstrap task unless the evidence clearly proves the original task was mis-scoped.
 - A context-selection failure does NOT automatically mean the task was wrong.
 
+Execution-route rule:
+- Treat last_execution_agent_sequence as the primary signal of what actually happened during execution.
+- Use that route to distinguish:
+  - a task that was badly scoped as one atomic unit
+  - a task that was mostly valid but still needs additive follow-up work
+  - a task whose main problem was the execution route or context-resolution path
+- A multi-agent route or an unusual final route does NOT by itself prove the task intent was wrong.
+- Do not reatomize purely because multiple agents were involved.
+- Use the route as evidence, not as an automatic trigger.
+
 Action semantics:
 - reatomize
   - use when the current task was badly scoped, not executable as one unit, too broad,
@@ -102,6 +112,7 @@ Self-check before finalizing:
 - Is this action one of the three valid actions?
 - Is it the narrowest reliable action?
 - Am I preserving the original task intent?
+- Did I use last_execution_agent_sequence as contextual evidence without overreacting to it?
 - If action=reatomize or insert_followup, are created_tasks present and still faithful to the original task objective?
 - If action=manual_review, are created_tasks empty and requires_manual_review=true?
 - Are all created tasks compatible with the execution engine and repository-based validation?
@@ -112,6 +123,7 @@ Self-check before finalizing:
 def build_recovery_user_prompt(
     *,
     source_task_summary: str,
+    execution_trajectory_summary: str,
     execution_context_summary: str,
     validation_context_summary: str,
     next_batch_summary: str | None,
@@ -122,6 +134,9 @@ def build_recovery_user_prompt(
     return f"""
 Source task summary:
 {source_task_summary}
+
+Execution trajectory summary:
+{execution_trajectory_summary}
 
 Execution context summary:
 {execution_context_summary}
@@ -141,6 +156,7 @@ Execution engine capability catalog:
 Instructions:
 - Choose the narrowest reliable recovery action.
 - Preserve the original task intent unless there is strong evidence that the task itself is structurally wrong.
+- Use last_execution_agent_sequence as a primary clue for what actually happened during execution.
 - Use reatomize if the task itself is structurally wrong as one atomic unit, but keep the same workstream intent.
 - Use insert_followup only if the original task was still valid but additional atomic work is needed.
 - Use manual_review if automated recovery is not trustworthy enough.
@@ -155,6 +171,7 @@ Important:
 - Avoid vague or human-only tasks.
 - Do not change a documentation/scope/requirements task into implementation/bootstrap work unless the evidence clearly requires that.
 - If the failure is mainly about context selection, treat it first as a context-resolution problem rather than an intent-change problem.
+- Do not assume that a multi-agent execution route automatically means the task should be reatomized.
 - Be operational, strict, conservative, and concrete.
 """.strip()
 
@@ -163,6 +180,7 @@ def build_recovery_retry_prompt(
     *,
     validation_error: str,
     source_task_summary: str,
+    execution_trajectory_summary: str,
     execution_context_summary: str,
 ) -> str:
     capability_text = render_executor_capabilities_for_prompt(EXECUTION_ENGINE)
@@ -175,6 +193,9 @@ Validation error:
 
 Source task summary:
 {source_task_summary}
+
+Execution trajectory summary:
+{execution_trajectory_summary}
 
 Execution context summary:
 {execution_context_summary}
@@ -189,6 +210,7 @@ Critical corrections:
 - retry is not allowed in the current workflow
 - do not use refined-level or legacy recovery actions
 - preserve the original task intent and workstream
+- use last_execution_agent_sequence as contextual evidence, not as an automatic trigger
 - do not silently change documentation/scope work into implementation/bootstrap work
 - if the failure is mainly about context selection, prefer conservative reatomize or manual_review over domain-changing recovery
 - if action=reatomize or action=insert_followup:
@@ -206,6 +228,7 @@ Critical corrections:
 def call_recovery_model(
     *,
     source_task_summary: str,
+    execution_trajectory_summary: str,
     execution_context_summary: str,
     validation_context_summary: str,
     next_batch_summary: str | None = None,
@@ -218,6 +241,7 @@ def call_recovery_model(
 
     first_user_prompt = build_recovery_user_prompt(
         source_task_summary=source_task_summary,
+        execution_trajectory_summary=execution_trajectory_summary,
         execution_context_summary=execution_context_summary,
         validation_context_summary=validation_context_summary,
         next_batch_summary=next_batch_summary,
@@ -237,6 +261,7 @@ def call_recovery_model(
         retry_user_prompt = build_recovery_retry_prompt(
             validation_error=str(exc),
             source_task_summary=source_task_summary,
+            execution_trajectory_summary=execution_trajectory_summary,
             execution_context_summary=execution_context_summary,
         )
 

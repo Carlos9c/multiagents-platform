@@ -293,13 +293,15 @@ def make_recovery_decision() -> Callable[..., RecoveryDecision]:
         source_task_id: int,
         source_run_id: int,
         action: str = "reatomize",
+        confidence: str = "high",
         requires_manual_review: bool = False,
         still_blocks_progress: bool = True,
         created_tasks: list[dict[str, Any]] | None = None,
-        retry_same_task: bool = False,
         reason: str = "The original task needs recovery handling.",
         covered_gap_summary: str = "Recovery will address the uncovered work.",
         execution_guidance: str | None = "Use the recovery guidance to continue.",
+        evaluation_guidance: str | None = None,
+        decision_origin: str | None = "post_batch_recovery",
     ) -> RecoveryDecision:
         task_payloads = [
             RecoveryTaskCreate(**payload)
@@ -309,15 +311,15 @@ def make_recovery_decision() -> Callable[..., RecoveryDecision]:
             source_task_id=source_task_id,
             source_run_id=source_run_id,
             action=action,
-            confidence="high",
+            confidence=confidence,
             reason=reason,
             covered_gap_summary=covered_gap_summary,
             execution_guidance=execution_guidance,
-            retry_same_task=retry_same_task,
+            evaluation_guidance=evaluation_guidance,
             requires_manual_review=requires_manual_review,
             still_blocks_progress=still_blocks_progress,
             created_tasks=task_payloads,
-            decision_origin="post_batch_recovery",
+            decision_origin=decision_origin,
         )
 
     return _make_recovery_decision
