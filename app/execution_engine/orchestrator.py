@@ -49,6 +49,10 @@ Hard rules:
 - Use inspect_context when more repository context is needed.
 - Use resolve_file_operations before apply_file_operations.
 - Use run_command only when a concrete command is actually necessary.
+- run_command is for one narrow concrete command only, not shell scripting.
+- Do not use run_command for open-ended exploration.
+- Do not use shell chaining, pipes, redirection, or multi-command sequences.
+- Prefer finish over run_command unless the command has a clear and immediate purpose.
 - Use finish when the current operational pass is sufficient for handing off to external validation.
 - Use reject only when no safe operational route exists.
 - Risk flags should inform caution, not automatically block progress.
@@ -117,6 +121,8 @@ Decision discipline:
 - Respect phase policy and current state.
 - Completion phase should normally finish unless a concrete command is truly necessary.
 - Avoid recursive behavior such as repeatedly choosing the same class of action without new evidence.
+- A run_command decision must contain exactly one concrete command with a narrow purpose.
+- Do not use run_command to compensate for missing planning or missing context selection.
 """.strip()
 
 

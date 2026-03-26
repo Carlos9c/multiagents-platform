@@ -119,16 +119,17 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
             ),
             SubagentCapability(
                 name="command_runner_agent",
-                role="Runs a concrete shell command inside the workspace when the orchestrator explicitly decides it is necessary.",
+                role="Runs one narrow concrete command inside the workspace when the orchestrator explicitly decides it is necessary.",
                 step_kinds=["run_command"],
                 uses_tools=["run_command"],
                 strengths=[
                     "Captures stdout, stderr, and exit code as evidence.",
-                    "Useful for a narrow command-based completion check or generation step.",
+                    "Useful for one narrow command-based completion check or generation step.",
                 ],
                 limits=[
                     "Does not decide commands by itself; it only executes the provided command.",
                     "Should not become an open-ended loop of repeated commands.",
+                    "Should execute only one narrow command, not shell scripts or chained shell expressions.",
                 ],
             ),
         ],
@@ -165,8 +166,12 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
             ),
             ToolCapability(
                 name="run_command",
-                purpose="Execute a concrete shell command in the workspace and capture evidence.",
-                notes=["This is narrow and should be used sparingly."],
+                purpose="Execute one narrow concrete command in the workspace and capture evidence.",
+                notes=[
+                    "This is narrow and should be used sparingly.",
+                    "It is not for shell scripting, chaining, pipes, or redirection.",
+                    "It should only be used when one concrete command is genuinely necessary.",
+                ],
             ),
         ],
     )
