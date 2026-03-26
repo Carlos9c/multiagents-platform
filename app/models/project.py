@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, String
+from sqlalchemy import Boolean, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -14,4 +14,9 @@ class Project(Base):
         Boolean,
         nullable=False,
         default=False,
+    )
+    plan_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
     )

@@ -12,10 +12,7 @@ from app.models.project import Project
 @pytest.fixture()
 def client(db_session: Session) -> Iterator[TestClient]:
     def _override_get_db():
-        try:
-            yield db_session
-        finally:
-            pass
+        yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
     try:
@@ -44,6 +41,7 @@ def test_create_project_persists_enable_technical_refinement(
     assert payload["name"] == "Proyecto con refinement"
     assert payload["description"] == "Proyecto de prueba"
     assert payload["enable_technical_refinement"] is True
+    assert payload["plan_version"] == 1
     assert "id" in payload
 
     project = db_session.get(Project, payload["id"])
@@ -51,6 +49,7 @@ def test_create_project_persists_enable_technical_refinement(
     assert project.name == "Proyecto con refinement"
     assert project.description == "Proyecto de prueba"
     assert project.enable_technical_refinement is True
+    assert project.plan_version == 1
 
 
 def test_create_project_defaults_enable_technical_refinement_to_false(
@@ -71,22 +70,29 @@ def test_create_project_defaults_enable_technical_refinement_to_false(
     assert payload["name"] == "Proyecto sin refinement"
     assert payload["description"] == "Proyecto de prueba"
     assert payload["enable_technical_refinement"] is False
+    assert payload["plan_version"] == 1
     assert "id" in payload
 
     project = db_session.get(Project, payload["id"])
     assert project is not None
     assert project.enable_technical_refinement is False
+    assert project.plan_version == 1
 
 
 def test_get_project_returns_enable_technical_refinement_field(
     client: TestClient,
     make_project,
+    db_session: Session,
 ):
     project = make_project(
         name="Proyecto consultable",
         description="Proyecto de prueba",
     )
     project.enable_technical_refinement = True
+    project.plan_version = 3
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
 
     response = client.get(f"/projects/{project.id}")
 
@@ -97,23 +103,33 @@ def test_get_project_returns_enable_technical_refinement_field(
     assert payload["name"] == "Proyecto consultable"
     assert payload["description"] == "Proyecto de prueba"
     assert payload["enable_technical_refinement"] is True
+    assert payload["plan_version"] == 3
 
 
 def test_list_projects_includes_enable_technical_refinement_field(
     client: TestClient,
     make_project,
+    db_session: Session,
 ):
     project_a = make_project(
         name="Proyecto A",
         description="Desc A",
     )
     project_a.enable_technical_refinement = False
+    project_a.plan_version = 1
 
     project_b = make_project(
         name="Proyecto B",
         description="Desc B",
     )
     project_b.enable_technical_refinement = True
+    project_b.plan_version = 4
+
+    db_session.add(project_a)
+    db_session.add(project_b)
+    db_session.commit()
+    db_session.refresh(project_a)
+    db_session.refresh(project_b)
 
     response = client.get("/projects")
 
@@ -126,3 +142,5 @@ def test_list_projects_includes_enable_technical_refinement_field(
 
     assert by_id[project_a.id]["enable_technical_refinement"] is False
     assert by_id[project_b.id]["enable_technical_refinement"] is True
+    assert by_id[project_a.id]["plan_version"] == 1
+    assert by_id[project_b.id]["plan_version"] == 4

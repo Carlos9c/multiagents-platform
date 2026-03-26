@@ -4,7 +4,7 @@
 
 Este proyecto implementa una **plataforma backend multiagente** cuyo objetivo es:
 
-> Transformar una idea de software en un sistema ejecutable de forma progresiva, estructurada y autónoma.
+> Transformar una idea de proyecto en un sistema ejecutable de forma progresiva, estructurada y autónoma.
 
 El sistema se basa en:
 - planificación jerárquica

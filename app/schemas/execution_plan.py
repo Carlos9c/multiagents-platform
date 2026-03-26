@@ -93,6 +93,8 @@ class ExecutionSequencingInstructions(BaseModel):
 
 class ExecutionBatch(BaseModel):
     batch_id: str
+    batch_index: int
+    plan_version: int
     name: str
     goal: str
     task_ids: list[int] = Field(default_factory=list)
@@ -105,14 +107,20 @@ class ExecutionBatch(BaseModel):
 
     @model_validator(mode="after")
     def validate_batch(self):
+        if self.batch_index < 1:
+            raise ValueError("ExecutionBatch.batch_index must be >= 1.")
+        if self.plan_version < 1:
+            raise ValueError("ExecutionBatch.plan_version must be >= 1.")
         if not self.task_ids:
             raise ValueError("ExecutionBatch.task_ids cannot be empty.")
         if not self.checkpoint_after:
             raise ValueError("Every execution batch must end with a checkpoint.")
+        if not self.batch_id:
+            raise ValueError("ExecutionBatch.batch_id is required.")
         if not self.checkpoint_id:
-            raise ValueError("checkpoint_id is required for every batch.")
+            raise ValueError("ExecutionBatch.checkpoint_id is required.")
         if not self.checkpoint_reason:
-            raise ValueError("checkpoint_reason is required for every batch.")
+            raise ValueError("ExecutionBatch.checkpoint_reason is required.")
         return self
 
 
@@ -134,7 +142,7 @@ class InferredDependency(BaseModel):
 
 
 class ExecutionPlan(BaseModel):
-    plan_version: int = 1
+    plan_version: int
     supersedes_plan_version: int | None = None
     planning_scope: PlanningScope
     global_goal: str
@@ -148,11 +156,44 @@ class ExecutionPlan(BaseModel):
 
     @model_validator(mode="after")
     def validate_plan(self):
+        if self.plan_version < 1:
+            raise ValueError("ExecutionPlan.plan_version must be >= 1.")
+
+        if self.plan_version == 1:
+            if self.supersedes_plan_version is not None:
+                raise ValueError(
+                    "ExecutionPlan.plan_version=1 cannot supersede a previous plan."
+                )
+        else:
+            if self.supersedes_plan_version is None:
+                raise ValueError(
+                    "ExecutionPlan with plan_version > 1 must declare supersedes_plan_version."
+                )
+            if self.supersedes_plan_version != self.plan_version - 1:
+                raise ValueError(
+                    "ExecutionPlan.supersedes_plan_version must be exactly plan_version - 1."
+                )
+
         if not self.execution_batches:
             raise ValueError("ExecutionPlan.execution_batches cannot be empty.")
 
+        observed_batch_indexes = [batch.batch_index for batch in self.execution_batches]
+        expected_batch_indexes = list(range(1, len(self.execution_batches) + 1))
+        if observed_batch_indexes != expected_batch_indexes:
+            raise ValueError(
+                "ExecutionPlan.execution_batches must have consecutive batch_index values "
+                "starting at 1 and ordered by execution sequence."
+            )
+
         batch_ids = {batch.batch_id for batch in self.execution_batches}
         checkpoint_ids = {checkpoint.checkpoint_id for checkpoint in self.checkpoints}
+
+        for batch in self.execution_batches:
+            if batch.plan_version != self.plan_version:
+                raise ValueError(
+                    f"Batch '{batch.batch_id}' has plan_version={batch.plan_version}, "
+                    f"but parent plan has plan_version={self.plan_version}."
+                )
 
         for checkpoint in self.checkpoints:
             if checkpoint.after_batch_id not in batch_ids:
@@ -170,7 +211,11 @@ class ExecutionPlan(BaseModel):
 
         for checkpoint in self.checkpoints:
             batch = next(
-                (candidate for candidate in self.execution_batches if candidate.batch_id == checkpoint.after_batch_id),
+                (
+                    candidate
+                    for candidate in self.execution_batches
+                    if candidate.batch_id == checkpoint.after_batch_id
+                ),
                 None,
             )
             if batch is None:
@@ -185,7 +230,11 @@ class ExecutionPlan(BaseModel):
 
         final_batch = self.execution_batches[-1]
         final_checkpoint = next(
-            (checkpoint for checkpoint in self.checkpoints if checkpoint.checkpoint_id == final_batch.checkpoint_id),
+            (
+                checkpoint
+                for checkpoint in self.checkpoints
+                if checkpoint.checkpoint_id == final_batch.checkpoint_id
+            ),
             None,
         )
         if final_checkpoint is None:

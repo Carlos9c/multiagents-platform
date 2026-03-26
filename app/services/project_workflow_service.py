@@ -1,8 +1,10 @@
-from sqlalchemy.orm import Session
+import json
+
 from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from app.models.artifact import Artifact
-
+from app.models.execution_run import ExecutionRun
 from app.models.project import Project
 from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
@@ -11,11 +13,12 @@ from app.models.task import (
     TASK_STATUS_PENDING,
     Task,
 )
-from app.schemas.execution_plan import ExecutionPlan
+from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.workflow import (
     ProjectWorkflowResult,
     WorkflowIterationSummary,
 )
+from app.services.artifacts import create_artifact
 from app.services.atomic_task_generator import generate_atomic_tasks
 from app.services.execution_plan_service import (
     generate_execution_plan,
@@ -274,6 +277,100 @@ def _assert_batch_task_is_atomic(
     return task
 
 
+def _get_latest_project_artifact_id(
+    db: Session,
+    *,
+    project_id: int,
+) -> int:
+    latest_artifact_id = (
+        db.query(func.max(Artifact.id))
+        .filter(Artifact.project_id == project_id)
+        .scalar()
+    )
+    return int(latest_artifact_id or 0)
+
+
+def _get_latest_execution_run_for_task(
+    db: Session,
+    *,
+    task_id: int,
+) -> ExecutionRun | None:
+    return (
+        db.query(ExecutionRun)
+        .filter(ExecutionRun.task_id == task_id)
+        .order_by(ExecutionRun.id.desc())
+        .first()
+    )
+
+
+def _serialize_batch_trace(trace_payload: dict) -> str:
+    return json.dumps(trace_payload, ensure_ascii=False, indent=2)
+
+
+def _persist_workflow_batch_trace(
+    db: Session,
+    *,
+    project_id: int,
+    plan: ExecutionPlan,
+    batch: ExecutionBatch,
+    iteration_number: int,
+    task_ids: list[int],
+    post_batch_result,
+) -> None:
+    task_run_summaries: list[dict] = []
+
+    for task_id in task_ids:
+        last_run = _get_latest_execution_run_for_task(db=db, task_id=task_id)
+        task_run_summaries.append(
+            {
+                "task_id": task_id,
+                "run_id": last_run.id if last_run else None,
+                "run_status": last_run.status if last_run else None,
+                "failure_type": last_run.failure_type if last_run else None,
+                "failure_code": last_run.failure_code if last_run else None,
+                "completed_scope": last_run.completed_scope if last_run else None,
+                "remaining_scope": last_run.remaining_scope if last_run else None,
+                "validation_notes": last_run.validation_notes if last_run else None,
+            }
+        )
+
+    payload = {
+        "iteration_number": iteration_number,
+        "plan_version": plan.plan_version,
+        "supersedes_plan_version": plan.supersedes_plan_version,
+        "batch_index": batch.batch_index,
+        "batch_id": batch.batch_id,
+        "checkpoint_id": batch.checkpoint_id,
+        "task_ids": list(task_ids),
+        "task_run_summaries": task_run_summaries,
+        "post_batch_status": getattr(post_batch_result, "status", None),
+        "continue_execution": getattr(post_batch_result, "continue_execution", False),
+        "requires_replanning": getattr(post_batch_result, "requires_replanning", False),
+        "requires_resequencing": getattr(post_batch_result, "requires_resequencing", False),
+        "requires_manual_review": getattr(post_batch_result, "requires_manual_review", False),
+        "finalization_guard_triggered": getattr(
+            post_batch_result,
+            "finalization_guard_triggered",
+            False,
+        ),
+        "finalization_iteration_count": getattr(
+            post_batch_result,
+            "finalization_iteration_count",
+            0,
+        ),
+        "notes": getattr(post_batch_result, "notes", None),
+    }
+
+    create_artifact(
+        db=db,
+        project_id=project_id,
+        task_id=None,
+        artifact_type="workflow_batch_trace",
+        content=_serialize_batch_trace(payload),
+        created_by="project_workflow_service",
+    )
+
+
 def _execute_batch_tasks_synchronously(
     db: Session,
     batch_task_ids: list[int],
@@ -366,6 +463,16 @@ def _run_execution_iteration(
             checkpoint_artifact_window_start_exclusive=checkpoint_artifact_window_start_exclusive,
         )
 
+        _persist_workflow_batch_trace(
+            db=db,
+            project_id=project_id,
+            plan=plan,
+            batch=batch,
+            iteration_number=iteration_number,
+            task_ids=batch.task_ids,
+            post_batch_result=post_batch_result,
+        )
+
         processed_batch_ids.append(batch.batch_id)
         current_finalization_iteration_count = post_batch_result.finalization_iteration_count
 
@@ -413,18 +520,6 @@ def _run_execution_iteration(
     )
 
     return iteration_summary, resulting_status, current_finalization_iteration_count
-
-def _get_latest_project_artifact_id(
-    db: Session,
-    *,
-    project_id: int,
-) -> int:
-    latest_artifact_id = (
-        db.query(func.max(Artifact.id))
-        .filter(Artifact.project_id == project_id)
-        .scalar()
-    )
-    return int(latest_artifact_id or 0)
 
 
 def run_project_workflow(

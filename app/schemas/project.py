@@ -18,5 +18,6 @@ class ProjectRead(BaseModel):
     name: str
     description: str | None = None
     enable_technical_refinement: bool
+    plan_version: int
 
     model_config = {"from_attributes": True}

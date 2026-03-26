@@ -6,7 +6,6 @@ from app.models.artifact import Artifact
 from app.models.execution_run import ExecutionRun
 from app.models.project import Project
 from app.models.task import (
-    EXECUTION_ENGINE,
     PLANNING_LEVEL_ATOMIC,
     TASK_STATUS_AWAITING_VALIDATION,
     TASK_STATUS_COMPLETED,
@@ -15,11 +14,12 @@ from app.models.task import (
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
     Task,
-    normalize_executor_type
 )
 from app.schemas.execution_plan import (
     CandidateAtomicTask,
+    CheckpointDefinition,
     CompletedTaskSummary,
+    ExecutionBatch,
     ExecutionPlan,
     ExecutionPlanGenerationInput,
     ExecutionSequencingInstructions,
@@ -188,6 +188,121 @@ def _build_execution_state_summary(
     )
 
 
+def _build_batch_id(plan_version: int, batch_index: int) -> str:
+    return f"plan_{plan_version}_batch_{batch_index}"
+
+
+def _build_checkpoint_id(plan_version: int, batch_index: int) -> str:
+    return f"checkpoint_plan_{plan_version}_batch_{batch_index}"
+
+
+def _resolve_generated_plan_version(project: Project, has_persisted_plan: bool) -> int:
+    if has_persisted_plan:
+        return project.plan_version + 1
+    return project.plan_version
+
+
+def _normalize_execution_plan(
+    *,
+    raw_plan: ExecutionPlan,
+    plan_version: int,
+    supersedes_plan_version: int | None,
+) -> ExecutionPlan:
+    normalized_batches: list[ExecutionBatch] = []
+    normalized_checkpoints: list[CheckpointDefinition] = []
+
+    if not raw_plan.execution_batches:
+        raise ExecutionPlanServiceError(
+            "Execution plan generation returned no execution batches."
+        )
+
+    source_checkpoints_by_id = {
+        checkpoint.checkpoint_id: checkpoint for checkpoint in raw_plan.checkpoints
+    }
+    total_batches = len(raw_plan.execution_batches)
+
+    for batch_index, raw_batch in enumerate(raw_plan.execution_batches, start=1):
+        batch_id = _build_batch_id(plan_version=plan_version, batch_index=batch_index)
+        checkpoint_id = _build_checkpoint_id(
+            plan_version=plan_version,
+            batch_index=batch_index,
+        )
+
+        source_checkpoint = source_checkpoints_by_id.get(raw_batch.checkpoint_id)
+
+        evaluation_focus = (
+            list(source_checkpoint.evaluation_focus)
+            if source_checkpoint is not None
+            else ["functional_coverage"]
+        )
+        if batch_index == total_batches and "stage_closure" not in evaluation_focus:
+            evaluation_focus.append("stage_closure")
+
+        checkpoint_reason = (
+            source_checkpoint.reason
+            if source_checkpoint is not None and source_checkpoint.reason
+            else raw_batch.checkpoint_reason
+        )
+
+        normalized_batch = ExecutionBatch(
+            batch_id=batch_id,
+            batch_index=batch_index,
+            plan_version=plan_version,
+            name=raw_batch.name,
+            goal=raw_batch.goal,
+            task_ids=list(raw_batch.task_ids),
+            entry_conditions=list(raw_batch.entry_conditions),
+            expected_outputs=list(raw_batch.expected_outputs),
+            risk_level=raw_batch.risk_level,
+            checkpoint_after=True,
+            checkpoint_id=checkpoint_id,
+            checkpoint_reason=checkpoint_reason,
+        )
+        normalized_batches.append(normalized_batch)
+
+        normalized_checkpoint = CheckpointDefinition(
+            checkpoint_id=checkpoint_id,
+            name=(
+                source_checkpoint.name
+                if source_checkpoint is not None and source_checkpoint.name
+                else f"Checkpoint {batch_index}"
+            ),
+            reason=checkpoint_reason,
+            after_batch_id=batch_id,
+            evaluation_goal=(
+                source_checkpoint.evaluation_goal
+                if source_checkpoint is not None and source_checkpoint.evaluation_goal
+                else f"Evaluate whether {batch_id} achieved its intended goal."
+            ),
+            evaluation_focus=evaluation_focus,
+            can_introduce_new_tasks=(
+                source_checkpoint.can_introduce_new_tasks
+                if source_checkpoint is not None
+                else True
+            ),
+            can_resequence_remaining_work=(
+                source_checkpoint.can_resequence_remaining_work
+                if source_checkpoint is not None
+                else True
+            ),
+        )
+        normalized_checkpoints.append(normalized_checkpoint)
+
+    return ExecutionPlan(
+        plan_version=plan_version,
+        supersedes_plan_version=supersedes_plan_version,
+        planning_scope=raw_plan.planning_scope,
+        global_goal=raw_plan.global_goal,
+        execution_batches=normalized_batches,
+        checkpoints=normalized_checkpoints,
+        ready_task_ids=list(raw_plan.ready_task_ids),
+        blocked_task_ids=list(raw_plan.blocked_task_ids),
+        inferred_dependencies=list(raw_plan.inferred_dependencies),
+        sequencing_rationale=raw_plan.sequencing_rationale,
+        uncertainties=list(raw_plan.uncertainties),
+    )
+
+
 def build_execution_plan_input(
     db: Session,
     project_id: int,
@@ -247,12 +362,41 @@ def build_execution_plan_input(
     )
 
 
+def _project_has_persisted_execution_plan(db: Session, project_id: int) -> bool:
+    existing = (
+        db.query(Artifact.id)
+        .filter(
+            Artifact.project_id == project_id,
+            Artifact.artifact_type == "execution_plan",
+        )
+        .first()
+    )
+    return existing is not None
+
+
 def generate_execution_plan(
     db: Session,
     project_id: int,
 ) -> ExecutionPlan:
+    project = db.get(Project, project_id)
+    if not project:
+        raise ExecutionPlanServiceError(f"Project {project_id} not found")
+
     sequencing_input = build_execution_plan_input(db=db, project_id=project_id)
-    return call_execution_sequencer_model(sequencing_input)
+    raw_plan = call_execution_sequencer_model(sequencing_input)
+
+    has_persisted_plan = _project_has_persisted_execution_plan(db=db, project_id=project_id)
+    plan_version = _resolve_generated_plan_version(
+        project=project,
+        has_persisted_plan=has_persisted_plan,
+    )
+    supersedes_plan_version = project.plan_version if has_persisted_plan else None
+
+    return _normalize_execution_plan(
+        raw_plan=raw_plan,
+        plan_version=plan_version,
+        supersedes_plan_version=supersedes_plan_version,
+    )
 
 
 def persist_execution_plan(
@@ -265,8 +409,28 @@ def persist_execution_plan(
     if not project:
         raise ExecutionPlanServiceError(f"Project {project_id} not found")
 
+    has_persisted_plan = _project_has_persisted_execution_plan(db=db, project_id=project_id)
+    expected_plan_version = _resolve_generated_plan_version(
+        project=project,
+        has_persisted_plan=has_persisted_plan,
+    )
+    expected_supersedes = project.plan_version if has_persisted_plan else None
+
+    if plan.plan_version != expected_plan_version:
+        raise ExecutionPlanServiceError(
+            f"Execution plan version mismatch for project {project_id}: "
+            f"expected plan_version={expected_plan_version}, got plan_version={plan.plan_version}."
+        )
+
+    if plan.supersedes_plan_version != expected_supersedes:
+        raise ExecutionPlanServiceError(
+            f"Execution plan supersedes mismatch for project {project_id}: "
+            f"expected supersedes_plan_version={expected_supersedes}, "
+            f"got supersedes_plan_version={plan.supersedes_plan_version}."
+        )
+
     content = _serialize_execution_plan(plan)
-    return create_artifact(
+    artifact = create_artifact(
         db=db,
         project_id=project_id,
         task_id=None,
@@ -274,3 +438,11 @@ def persist_execution_plan(
         content=content,
         created_by=created_by,
     )
+
+    project.plan_version = plan.plan_version
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    db.refresh(artifact)
+
+    return artifact
