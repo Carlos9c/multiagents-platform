@@ -55,6 +55,8 @@ class PostBatchResult(BaseModel):
     requires_resequencing: bool
     requires_replanning: bool
     requires_manual_review: bool
+    resolved_action: str | None = None
+    decision_signals_used: list[str] = Field(default_factory=list)
 
     is_final_batch: bool
     finalization_iteration_count: int = Field(..., ge=0)

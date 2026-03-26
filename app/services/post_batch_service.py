@@ -17,6 +17,7 @@ from app.models.execution_run import (
 from app.models.project import Project
 from app.models.task import (
     TASK_STATUS_AWAITING_VALIDATION,
+    TASK_STATUS_PENDING,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
@@ -38,6 +39,10 @@ from app.services.recovery_service import (
 from app.services.task_hierarchy_reconciliation_service import (
     TaskHierarchyReconciliationServiceError,
     reconcile_task_hierarchy_after_changes,
+)
+from app.services.post_batch_decision_service import (
+    build_post_batch_decision_signals,
+    resolve_post_batch_decision,
 )
 
 TERMINAL_RUN_STATUSES = {
@@ -335,6 +340,59 @@ def _persist_post_batch_result(
     )
 
 
+def _count_valid_pending_tasks(
+    db: Session,
+    *,
+    project_id: int,
+    exclude_task_ids: list[int] | None = None,
+) -> int:
+    query = db.query(Task).filter(
+        Task.project_id == project_id,
+        Task.status == TASK_STATUS_PENDING,
+        Task.is_blocked.is_(False),
+    )
+
+    if exclude_task_ids:
+        query = query.filter(~Task.id.in_(exclude_task_ids))
+
+    return query.count()
+
+
+def _count_valid_pending_tasks_for_ids(
+    db: Session,
+    *,
+    project_id: int,
+    task_ids: list[int],
+) -> int:
+    if not task_ids:
+        return 0
+
+    return (
+        db.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.id.in_(task_ids),
+            Task.status == TASK_STATUS_PENDING,
+            Task.is_blocked.is_(False),
+        )
+        .count()
+    )
+
+
+def _count_preexisting_valid_pending_tasks(
+    db: Session,
+    *,
+    project_id: int,
+    executed_task_ids: list[int],
+    created_recovery_task_ids: list[int],
+) -> int:
+    exclude_ids = list(dict.fromkeys(executed_task_ids + created_recovery_task_ids))
+    return _count_valid_pending_tasks(
+        db=db,
+        project_id=project_id,
+        exclude_task_ids=exclude_ids,
+    )
+
 def _is_final_batch(plan: ExecutionPlan, batch_id: str) -> bool:
     if not plan.execution_batches:
         return False
@@ -361,11 +419,12 @@ def _normalize_string(value: Any, default: str = "") -> str:
 
 
 def _is_new_stage_evaluation_output(evaluation_decision: Any) -> bool:
-    return hasattr(evaluation_decision, "decision") and hasattr(
-        evaluation_decision,
-        "project_stage_closed",
+    return (
+        hasattr(evaluation_decision, "decision")
+        and hasattr(evaluation_decision, "project_stage_closed")
+        and hasattr(evaluation_decision, "remaining_plan_still_valid")
+        and hasattr(evaluation_decision, "recommended_next_action")
     )
-
 
 def _build_notes(
     *,
@@ -803,7 +862,73 @@ def process_batch_after_execution(
         decision=evaluation_decision,
     )
 
-    normalized = _normalize_evaluation_outcome(evaluation_decision)
+    resolved_action: str | None = None
+    resolved_decision_signals: list[str] = []
+
+    if _is_new_stage_evaluation_output(evaluation_decision):
+        current_batch_index = next(
+            index
+            for index, current_batch in enumerate(plan.execution_batches)
+            if current_batch.batch_id == batch_id
+        )
+        remaining_batch_count = len(plan.execution_batches) - (current_batch_index + 1)
+
+        preexisting_pending_valid_task_count = _count_preexisting_valid_pending_tasks(
+            db=db,
+            project_id=project_id,
+            executed_task_ids=executed_task_ids,
+            created_recovery_task_ids=created_recovery_task_ids,
+        )
+
+        new_recovery_pending_task_count = _count_valid_pending_tasks_for_ids(
+            db=db,
+            project_id=project_id,
+            task_ids=created_recovery_task_ids,
+        )
+
+        has_pending_valid_tasks = (
+            preexisting_pending_valid_task_count + new_recovery_pending_task_count
+        ) > 0
+
+        decision_signals = build_post_batch_decision_signals(
+            evaluation_decision=evaluation_decision,
+            recovery_context=aggregated_recovery_context,
+            has_pending_valid_tasks=has_pending_valid_tasks,
+            remaining_batch_count=remaining_batch_count,
+            is_final_batch=is_final_batch,
+        )
+
+        # Enriquecimiento determinista local: distingue backlog previo vs trabajo nuevo recovery
+        decision_signals.has_preexisting_pending_valid_tasks = (
+            preexisting_pending_valid_task_count > 0
+        )
+        decision_signals.preexisting_pending_valid_task_count = (
+            preexisting_pending_valid_task_count
+        )
+        decision_signals.has_new_recovery_pending_tasks = (
+            new_recovery_pending_task_count > 0
+        )
+        decision_signals.new_recovery_pending_task_count = (
+            new_recovery_pending_task_count
+        )
+
+        resolved = resolve_post_batch_decision(decision_signals)
+
+        resolved_action = resolved.action
+        resolved_decision_signals = list(getattr(decision_signals, "decision_signals", []) or [])
+
+        normalized = NormalizedEvaluationOutcome(
+            continue_execution=resolved.continue_execution,
+            requires_replanning=resolved.requires_replanning,
+            requires_resequencing=resolved.requires_resequencing,
+            requires_manual_review=resolved.requires_manual_review,
+            is_stage_closed=resolved.is_stage_closed,
+            reopened_finalization=resolved.reopened_finalization,
+            notes=resolved.notes,
+        )
+    else:
+        normalized = _normalize_evaluation_outcome(evaluation_decision)
+
     normalized = _degrade_illegal_stage_closure_for_non_final_batch(
         normalized=normalized,
         is_final_batch=is_final_batch,
@@ -822,6 +947,12 @@ def process_batch_after_execution(
         status = "checkpoint_blocked"
 
     notes = normalized.notes or "Post-batch processing completed with explicit checkpoint evaluation."
+
+    if resolved_action:
+        signal_suffix = ""
+        if resolved_decision_signals:
+            signal_suffix = f" Signals: {', '.join(resolved_decision_signals)}."
+        notes = f"[resolved_action={resolved_action}] {notes}{signal_suffix}"
 
     if is_final_batch:
         if normalized.is_stage_closed:
@@ -877,6 +1008,8 @@ def process_batch_after_execution(
         requires_resequencing=requires_resequencing,
         requires_replanning=requires_replanning,
         requires_manual_review=requires_manual_review,
+        resolved_action=resolved_action,
+        decision_signals_used=resolved_decision_signals,
         is_final_batch=is_final_batch,
         finalization_iteration_count=finalization_iteration_count,
         max_finalization_iterations=max_finalization_iterations,

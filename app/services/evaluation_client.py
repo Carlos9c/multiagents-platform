@@ -89,9 +89,11 @@ Recommended next action rules:
   - replan_remaining_work
   - manual_review
   - close_stage
-- Use continue_current_plan when the current backlog and current remaining plan already represent the right next work.
-- Use resequence_remaining_batches when the remaining work is still basically correct, but the ordering/grouping of pending work should be adjusted.
-- Use replan_remaining_work only when the remaining work is no longer represented adequately by the current plan and a real replanning step is needed.
+- Treat recommended_next_action as an OPERATIONAL SIGNAL, not as the final orchestrator command.
+- Prefer simple truthful signaling over aggressive escalation.
+- Use continue_current_plan when the remaining work is still valid and no newly created recovery work must run before continuing.
+- Use resequence_remaining_batches when the remaining work is still valid, but newly created work or newly discovered ordering constraints should be placed before or between the pending batches.
+- Use replan_remaining_work only when the remaining plan no longer represents the stage correctly at a structural level.
 - Use manual_review only when automation is not trustworthy enough.
 - Use close_stage only when the stage is truly complete.
 
@@ -108,9 +110,11 @@ Structured reasoning fields:
   - true when the current remaining plan still represents the right work, even if it may need regrouping
   - false only when the remaining plan no longer represents the stage correctly
 - new_recovery_tasks_blocking:
-  - true if newly created recovery tasks are blocking stage progress
-  - false if they are non-blocking local follow-ups
+  - true if newly created recovery tasks must be executed before the current remaining plan can continue safely
+  - false if newly created recovery tasks are additive local follow-ups and the current remaining plan can continue without them
   - null if no new recovery tasks were created or the distinction is not applicable
+- Do not interpret "blocking" as a global architectural judgment by recovery itself.
+- Answer it only as a checkpoint-level operational question: must this new work happen before the pending plan continues?
 - single_task_tail_risk:
   - true if continuing unchanged would likely leave an awkward single-task tail that causes an avoidable extra validation loop
 
