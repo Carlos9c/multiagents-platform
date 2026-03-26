@@ -106,6 +106,10 @@ class ExecutionBatch(BaseModel):
     checkpoint_id: str
     checkpoint_reason: str
 
+    is_patch_batch: bool = False
+    anchor_batch_index: int | None = None
+    patch_index: int | None = None
+
     @model_validator(mode="after")
     def validate_batch(self):
         if self.batch_index < 1:
@@ -124,6 +128,18 @@ class ExecutionBatch(BaseModel):
             raise ValueError("ExecutionBatch.checkpoint_id is required.")
         if not self.checkpoint_reason:
             raise ValueError("ExecutionBatch.checkpoint_reason is required.")
+
+        if self.is_patch_batch:
+            if self.anchor_batch_index is None or self.anchor_batch_index < 1:
+                raise ValueError("Patch batches require anchor_batch_index >= 1.")
+            if self.patch_index is None or self.patch_index < 1:
+                raise ValueError("Patch batches require patch_index >= 1.")
+        else:
+            if self.anchor_batch_index is not None:
+                raise ValueError("Non-patch batches cannot define anchor_batch_index.")
+            if self.patch_index is not None:
+                raise ValueError("Non-patch batches cannot define patch_index.")
+
         return self
 
 class CheckpointDefinition(BaseModel):
@@ -179,13 +195,36 @@ class ExecutionPlan(BaseModel):
         if not self.execution_batches:
             raise ValueError("ExecutionPlan.execution_batches cannot be empty.")
 
-        observed_batch_indexes = [batch.batch_index for batch in self.execution_batches]
-        expected_batch_indexes = list(range(1, len(self.execution_batches) + 1))
-        if observed_batch_indexes != expected_batch_indexes:
-            raise ValueError(
-                "ExecutionPlan.execution_batches must have consecutive batch_index values "
-                "starting at 1 and ordered by execution sequence."
+        seen_batch_internal_ids: set[str] = set()
+        seen_patch_keys: set[tuple[int, int]] = set()
+        last_order_key: tuple[int, int] | None = None
+
+        for batch in self.execution_batches:
+            if batch.batch_internal_id in seen_batch_internal_ids:
+                raise ValueError(
+                    f"Duplicate batch_internal_id detected: '{batch.batch_internal_id}'."
+                )
+            seen_batch_internal_ids.add(batch.batch_internal_id)
+
+            order_key = (
+                batch.anchor_batch_index if batch.is_patch_batch else batch.batch_index,
+                batch.patch_index if batch.is_patch_batch else 0,
             )
+
+            if last_order_key is not None and order_key < last_order_key:
+                raise ValueError(
+                    "ExecutionPlan.execution_batches must be ordered by logical execution sequence."
+                )
+            last_order_key = order_key
+
+            if batch.is_patch_batch:
+                patch_key = (batch.anchor_batch_index, batch.patch_index)
+                if patch_key in seen_patch_keys:
+                    raise ValueError(
+                        f"Duplicate patch batch detected for anchor_batch_index="
+                        f"{batch.anchor_batch_index}, patch_index={batch.patch_index}."
+                    )
+                seen_patch_keys.add(patch_key)
 
         batch_ids = {batch.batch_id for batch in self.execution_batches}
         checkpoint_ids = {checkpoint.checkpoint_id for checkpoint in self.checkpoints}

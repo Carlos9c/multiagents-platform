@@ -974,3 +974,145 @@ def test_post_batch_trace_persists_recovery_created_task_ids_and_resequence_acti
     assert len(payload["created_recovery_task_ids"]) == 1
     assert payload["created_recovery_task_ids"][0] > 0
     assert result.resolved_action == "resequence_remaining_batches"
+
+def test_post_batch_creates_patch_batch_for_blocking_recovery_work(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_recovery_decision,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Parent task",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+        executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
+    )
+    failed_task = make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Failed atomic task",
+        status=TASK_STATUS_FAILED,
+        sequence_order=1,
+    )
+    run = make_execution_run(
+        task_id=failed_task.id,
+        status="failed",
+        failure_type="internal",
+        failure_code="executor_failed",
+    )
+    make_artifact(
+        project_id=project.id,
+        task_id=failed_task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"failed"}',
+    )
+
+    pending_future_task = make_task(
+        project_id=project.id,
+        title="Pending future task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        plan_version=1,
+        supersedes_plan_version=None,
+        batches=[
+            {
+                "batch_id": "plan_1_batch_1",
+                "batch_internal_id": "1_1",
+                "batch_index": 1,
+                "plan_version": 1,
+                "task_ids": [failed_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "plan_1_batch_2",
+                "batch_internal_id": "1_2",
+                "batch_index": 2,
+                "plan_version": 1,
+                "task_ids": [pending_future_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    decision = make_recovery_decision(
+        source_task_id=failed_task.id,
+        source_run_id=run.id,
+        action="reatomize",
+        created_tasks=[
+            {
+                "title": "Create minimal Python scaffold",
+                "description": "Create the minimal implementation files needed to continue the recovered work.",
+                "objective": "Seed the implementation surface.",
+                "implementation_notes": "Use conventional file names.",
+                "acceptance_criteria": "The repo has a minimal executable structure.",
+            }
+        ],
+        still_blocks_progress=True,
+        reason="Recovered work must execute before the remaining pending batch.",
+        covered_gap_summary="A new atomic task is required before continuing.",
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.generate_recovery_decision",
+        lambda **kwargs: decision,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_recovery_decision",
+        lambda **kwargs: None,
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recovery_strategy="insert_followup_atomic_tasks",
+        recovery_reason="New work must be executed before the pending plan continues.",
+        recommended_next_action="resequence_remaining_batches",
+        recommended_next_action_reason="Recovered work requires precedence over the remaining batch.",
+        decision_signals=["new_work_requires_precedence", "remaining_plan_still_valid"],
+        plan_change_scope="local_resequencing",
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=True,
+        followup_atomic_tasks_required=True,
+        failed_task_ids=[failed_task.id],
+        notes=["Insert a patch batch before continuing."],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="plan_1_batch_1",
+        persist_result=False,
+    )
+
+    assert result.patched_execution_plan is not None
+    assert result.resolved_action == "resequence_remaining_batches"
+
+    patched_batches = result.patched_execution_plan.execution_batches
+    assert len(patched_batches) == 3
+
+    patch_batch = patched_batches[1]
+    assert patch_batch.is_patch_batch is True
+    assert patch_batch.batch_internal_id == "1_1_p1"
+    assert patch_batch.name == "Plan 1 · Batch 1.1"
+    assert len(patch_batch.task_ids) == 1
+    assert patch_batch.task_ids[0] > 0

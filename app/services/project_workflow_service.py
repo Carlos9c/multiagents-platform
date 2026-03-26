@@ -440,7 +440,20 @@ def _run_execution_iteration(
     resulting_status = "execution_in_progress"
     current_finalization_iteration_count = finalization_iteration_count
 
-    for batch in plan.execution_batches:
+    current_plan = plan
+    current_index = 0
+    processed_batch_ids_set: set[str] = set()
+
+    while current_index < len(current_plan.execution_batches):
+        batch = current_plan.execution_batches[current_index]
+
+        # Guardia defensiva: evita reprocesar el mismo batch si el plan cambia durante la iteración
+        if batch.batch_id in processed_batch_ids_set:
+            raise ProjectWorkflowServiceError(
+                f"Workflow detected an attempt to reprocess batch '{batch.batch_id}' "
+                f"in plan version {current_plan.plan_version}. This would create an execution loop."
+            )
+
         checkpoint_artifact_window_start_exclusive = _get_latest_project_artifact_id(
             db=db,
             project_id=project_id,
@@ -450,13 +463,13 @@ def _run_execution_iteration(
             db=db,
             batch_task_ids=batch.task_ids,
             batch_id=batch.batch_id,
-            plan_version=plan.plan_version,
+            plan_version=current_plan.plan_version,
         )
 
         post_batch_result = _process_batch_after_terminal_tasks(
             db=db,
             project_id=project_id,
-            plan=plan,
+            plan=current_plan,
             batch_id=batch.batch_id,
             current_finalization_iteration_count=current_finalization_iteration_count,
             max_finalization_iterations=max_finalization_iterations,
@@ -466,7 +479,7 @@ def _run_execution_iteration(
         _persist_workflow_batch_trace(
             db=db,
             project_id=project_id,
-            plan=plan,
+            plan=current_plan,
             batch=batch,
             iteration_number=iteration_number,
             task_ids=batch.task_ids,
@@ -474,33 +487,69 @@ def _run_execution_iteration(
         )
 
         processed_batch_ids.append(batch.batch_id)
-        current_finalization_iteration_count = post_batch_result.finalization_iteration_count
+        processed_batch_ids_set.add(batch.batch_id)
+        current_finalization_iteration_count = getattr(
+            post_batch_result,
+            "finalization_iteration_count",
+            current_finalization_iteration_count,
+        )
 
-        if post_batch_result.requires_manual_review or post_batch_result.finalization_guard_triggered:
+        if (
+            getattr(post_batch_result, "requires_manual_review", False)
+            or getattr(post_batch_result, "finalization_guard_triggered", False)
+        ):
             manual_review_required = True
             resulting_status = "awaiting_manual_review"
             break
 
-        if post_batch_result.status == "project_stage_closed":
+        if getattr(post_batch_result, "status", None) == "project_stage_closed":
             resulting_status = "stage_closed"
             break
 
-        if post_batch_result.status == "finalization_reopened":
+        if getattr(post_batch_result, "status", None) == "finalization_reopened":
             reopened_finalization = True
             resulting_status = "execution_in_progress"
             break
 
-        if post_batch_result.requires_replanning or post_batch_result.requires_resequencing:
+        if getattr(post_batch_result, "requires_replanning", False):
             reopened_finalization = True
             resulting_status = "execution_in_progress"
             break
 
-        if post_batch_result.continue_execution:
+        # Caso especial: resequence local materializado como patch batch dentro del mismo plan.
+        # Cambiamos al plan parcheado y avanzamos al siguiente índice para ejecutar el patch recién insertado,
+        # evitando volver a caer sobre el batch ya procesado.
+        patched_execution_plan = getattr(post_batch_result, "patched_execution_plan", None)
+        resolved_action = getattr(post_batch_result, "resolved_action", None)
+        requires_replanning = getattr(post_batch_result, "requires_replanning", False)
+        requires_manual_review = getattr(post_batch_result, "requires_manual_review", False)
+
+        if (
+            patched_execution_plan is not None
+            and resolved_action == "resequence_remaining_batches"
+            and not requires_replanning
+            and not requires_manual_review
+        ):
+            current_plan = patched_execution_plan
+            reopened_finalization = True
+            resulting_status = "execution_in_progress"
+            current_index += 1
+            continue
+
+        # Resequence sin plan parcheado: salir para que una nueva iteración recalcule el plan.
+        if getattr(post_batch_result, "requires_resequencing", False):
+            reopened_finalization = True
+            resulting_status = "execution_in_progress"
+            break
+
+        if getattr(post_batch_result, "continue_execution", False):
+            current_index += 1
             continue
 
         manual_review_required = True
         resulting_status = "awaiting_manual_review"
         break
+
 
     iteration_summary = WorkflowIterationSummary(
         iteration_number=iteration_number,

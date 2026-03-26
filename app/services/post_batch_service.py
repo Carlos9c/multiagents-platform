@@ -45,6 +45,10 @@ from app.services.post_batch_decision_service import (
     build_post_batch_decision_signals,
     resolve_post_batch_decision,
 )
+from app.services.execution_plan_patch_service import (
+    insert_patch_batch_after_batch,
+    persist_patched_execution_plan,
+)
 
 TERMINAL_RUN_STATUSES = {
     EXECUTION_RUN_STATUS_SUCCEEDED,
@@ -704,6 +708,27 @@ def _normalize_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluat
     return _normalize_legacy_evaluation_outcome(evaluation_decision)
 
 
+def _should_materialize_patch_batch(
+    *,
+    normalized: NormalizedEvaluationOutcome,
+    evaluation_decision: Any,
+    created_recovery_task_ids: list[int],
+) -> bool:
+    if not created_recovery_task_ids:
+        return False
+
+    if not normalized.requires_resequencing or normalized.requires_replanning:
+        return False
+
+    if not _normalize_bool(_read_attr(evaluation_decision, "remaining_plan_still_valid"), True):
+        return False
+
+    if not _normalize_bool(_read_attr(evaluation_decision, "new_recovery_tasks_blocking"), False):
+        return False
+
+    return True
+
+
 def _degrade_illegal_stage_closure_for_non_final_batch(
     *,
     normalized: NormalizedEvaluationOutcome,
@@ -918,6 +943,7 @@ def process_batch_after_execution(
 
     resolved_action: str | None = None
     resolved_decision_signals: list[str] = []
+    patched_execution_plan: ExecutionPlan | None = None
 
     if _is_new_stage_evaluation_output(evaluation_decision):
         current_batch_index = next(
@@ -1002,6 +1028,32 @@ def process_batch_after_execution(
 
     notes = normalized.notes or "Post-batch processing completed with explicit checkpoint evaluation."
 
+    if _should_materialize_patch_batch(
+        normalized=normalized,
+        evaluation_decision=evaluation_decision,
+        created_recovery_task_ids=created_recovery_task_ids,
+    ):
+        patched_execution_plan = insert_patch_batch_after_batch(
+            plan=plan,
+            anchor_batch_id=batch.batch_id,
+            task_ids=created_recovery_task_ids,
+            goal="Execute recovery work required before continuing the pending plan.",
+            checkpoint_reason=(
+                "Validate the inserted recovery patch batch before continuing the remaining plan."
+            ),
+        )
+
+        persist_patched_execution_plan(
+            db=db,
+            project_id=project_id,
+            plan=patched_execution_plan,
+        )
+
+        notes = (
+            f"{notes} A local patch batch was inserted into the current plan to execute "
+            f"recovery-created work before continuing."
+        )
+
     if resolved_action:
         signal_suffix = ""
         if resolved_decision_signals:
@@ -1064,6 +1116,7 @@ def process_batch_after_execution(
         requires_manual_review=requires_manual_review,
         resolved_action=resolved_action,
         decision_signals_used=resolved_decision_signals,
+        patched_execution_plan=patched_execution_plan,
         is_final_batch=is_final_batch,
         finalization_iteration_count=finalization_iteration_count,
         max_finalization_iterations=max_finalization_iterations,
