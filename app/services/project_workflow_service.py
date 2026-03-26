@@ -1,4 +1,7 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+from app.models.artifact import Artifact
 
 from app.models.project import Project
 from app.models.task import (
@@ -307,6 +310,7 @@ def _process_batch_after_terminal_tasks(
     batch_id: str,
     current_finalization_iteration_count: int,
     max_finalization_iterations: int,
+    checkpoint_artifact_window_start_exclusive: int,
 ):
     try:
         return process_batch_after_execution(
@@ -317,6 +321,7 @@ def _process_batch_after_terminal_tasks(
             persist_result=True,
             finalization_iteration_count=current_finalization_iteration_count,
             max_finalization_iterations=max_finalization_iterations,
+            checkpoint_artifact_window_start_exclusive=checkpoint_artifact_window_start_exclusive,
         )
     except PostBatchServiceError as exc:
         raise ProjectWorkflowServiceError(
@@ -339,6 +344,11 @@ def _run_execution_iteration(
     current_finalization_iteration_count = finalization_iteration_count
 
     for batch in plan.execution_batches:
+        checkpoint_artifact_window_start_exclusive = _get_latest_project_artifact_id(
+            db=db,
+            project_id=project_id,
+        )
+
         _execute_batch_tasks_synchronously(
             db=db,
             batch_task_ids=batch.task_ids,
@@ -353,6 +363,7 @@ def _run_execution_iteration(
             batch_id=batch.batch_id,
             current_finalization_iteration_count=current_finalization_iteration_count,
             max_finalization_iterations=max_finalization_iterations,
+            checkpoint_artifact_window_start_exclusive=checkpoint_artifact_window_start_exclusive,
         )
 
         processed_batch_ids.append(batch.batch_id)
@@ -402,6 +413,18 @@ def _run_execution_iteration(
     )
 
     return iteration_summary, resulting_status, current_finalization_iteration_count
+
+def _get_latest_project_artifact_id(
+    db: Session,
+    *,
+    project_id: int,
+) -> int:
+    latest_artifact_id = (
+        db.query(func.max(Artifact.id))
+        .filter(Artifact.project_id == project_id)
+        .scalar()
+    )
+    return int(latest_artifact_id or 0)
 
 
 def run_project_workflow(

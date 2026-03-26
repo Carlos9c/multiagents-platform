@@ -161,7 +161,7 @@ def test_build_stage_evaluation_request_includes_new_structured_summaries(
         plan=plan,
         checkpoint_id="cp_1",
         executed_task_ids_since_last_checkpoint=[executed_task.id],
-        artifact_ids_since_last_checkpoint=[executed_artifact.id],
+        checkpoint_artifact_window_ids=[executed_artifact.id],
         recovery_context=recovery_context,
     )
 
@@ -306,7 +306,7 @@ def test_evaluate_checkpoint_passes_structured_request_to_model(
         plan=plan,
         checkpoint_id="cp_1",
         executed_task_ids_since_last_checkpoint=[executed_task.id],
-        artifact_ids_since_last_checkpoint=[artifact.id],
+        checkpoint_artifact_window_ids=[artifact.id],
         recovery_context=RecoveryContext(),
     )
 

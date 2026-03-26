@@ -140,20 +140,20 @@ def _get_task_artifacts(
     )
 
 
-def _get_artifacts_since_last_checkpoint(
+def _get_artifacts_in_checkpoint_window(
     db: Session,
     *,
     project_id: int,
-    artifact_ids_since_last_checkpoint: list[int],
+    checkpoint_artifact_window_ids: list[int],
 ) -> list[Artifact]:
-    if not artifact_ids_since_last_checkpoint:
+    if not checkpoint_artifact_window_ids:
         return []
 
     return (
         db.query(Artifact)
         .filter(
             Artifact.project_id == project_id,
-            Artifact.id.in_(artifact_ids_since_last_checkpoint),
+            Artifact.id.in_(checkpoint_artifact_window_ids),
         )
         .order_by(Artifact.id.asc())
         .all()
@@ -272,11 +272,15 @@ def _build_processed_batch_summary(
     *,
     batch: ExecutionBatch,
     executed_tasks: list[Task],
-    artifacts_since_last_checkpoint: list[Artifact],
+    artifacts_in_checkpoint_window: list[Artifact],
 ) -> str:
     batch_task_ids = set(batch.task_ids)
     batch_tasks = [task for task in executed_tasks if task.id in batch_task_ids]
-    batch_artifacts = [artifact for artifact in artifacts_since_last_checkpoint if artifact.task_id in batch_task_ids]
+    batch_artifacts = [
+        artifact
+        for artifact in artifacts_in_checkpoint_window
+        if artifact.task_id in batch_task_ids
+    ]
 
     payload = {
         "evaluated_batch": _batch_to_dict(batch),
@@ -289,8 +293,8 @@ def _build_processed_batch_summary(
             }
             for task in batch_tasks
         ],
-        "artifact_count_since_last_checkpoint": len(batch_artifacts),
-        "artifact_types_since_last_checkpoint": [artifact.artifact_type for artifact in batch_artifacts],
+        "artifact_count_in_checkpoint_window": len(batch_artifacts),
+        "artifact_types_in_checkpoint_window": [artifact.artifact_type for artifact in batch_artifacts],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -402,13 +406,13 @@ def _build_pending_task_summary(
 
 def _build_checkpoint_artifact_window_summary(
     *,
-    artifacts_since_last_checkpoint: list[Artifact],
+    artifacts_in_checkpoint_window: list[Artifact],
 ) -> str:
     payload = {
-        "artifact_count": len(artifacts_since_last_checkpoint),
+        "artifact_count": len(artifacts_in_checkpoint_window),
         "artifacts": [
             _artifact_to_summary_dict(artifact)
-            for artifact in artifacts_since_last_checkpoint
+            for artifact in artifacts_in_checkpoint_window
         ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -419,7 +423,7 @@ def _build_additional_context(
     project: Project,
     project_operational_context: ProjectOperationalContext,
     executed_tasks: list[Task],
-    artifacts_since_last_checkpoint: list[Artifact],
+    artifacts_in_checkpoint_window: list[Artifact],
     next_batch: ExecutionBatch | None,
     recovery_context: RecoveryContext | None,
     pending_tasks: list[Task],
@@ -433,7 +437,7 @@ def _build_additional_context(
         "project_operational_context": project_operational_context.model_dump(mode="json"),
         "checkpoint_window": {
             "executed_task_ids": [task.id for task in executed_tasks],
-            "artifact_ids": [artifact.id for artifact in artifacts_since_last_checkpoint],
+            "artifact_ids": [artifact.id for artifact in artifacts_in_checkpoint_window],
         },
         "next_batch": _batch_to_dict(next_batch) if next_batch else None,
         "recovery_summary": {
@@ -455,7 +459,7 @@ def build_stage_evaluation_request(
     plan: ExecutionPlan,
     checkpoint_id: str,
     executed_task_ids_since_last_checkpoint: list[int],
-    artifact_ids_since_last_checkpoint: list[int],
+    checkpoint_artifact_window_ids: list[int],
     recovery_context: RecoveryContext | None = None,
 ) -> dict[str, str]:
     project = db.get(Project, project_id)
@@ -470,10 +474,10 @@ def build_stage_evaluation_request(
         project_id=project_id,
         executed_task_ids_since_last_checkpoint=executed_task_ids_since_last_checkpoint,
     )
-    artifacts_since_last_checkpoint = _get_artifacts_since_last_checkpoint(
+    artifacts_in_checkpoint_window = _get_artifacts_in_checkpoint_window(
         db=db,
         project_id=project_id,
-        artifact_ids_since_last_checkpoint=artifact_ids_since_last_checkpoint,
+        checkpoint_artifact_window_ids=checkpoint_artifact_window_ids,
     )
     project_operational_context = build_project_operational_context(
         db=db,
@@ -508,7 +512,7 @@ def build_stage_evaluation_request(
         "processed_batch_summary": _build_processed_batch_summary(
             batch=current_batch,
             executed_tasks=executed_tasks,
-            artifacts_since_last_checkpoint=artifacts_since_last_checkpoint,
+            artifacts_in_checkpoint_window=artifacts_in_checkpoint_window,
         ),
         "task_state_summary": _build_task_state_summary(
             db=db,
@@ -527,13 +531,13 @@ def build_stage_evaluation_request(
             recovery_context=recovery_context,
         ),
         "checkpoint_artifact_window_summary": _build_checkpoint_artifact_window_summary(
-            artifacts_since_last_checkpoint=artifacts_since_last_checkpoint,
+            artifacts_in_checkpoint_window=artifacts_in_checkpoint_window,
         ),
         "additional_context": _build_additional_context(
             project=project,
             project_operational_context=project_operational_context,
             executed_tasks=executed_tasks,
-            artifacts_since_last_checkpoint=artifacts_since_last_checkpoint,
+            artifacts_in_checkpoint_window=artifacts_in_checkpoint_window,
             next_batch=next_batch,
             recovery_context=recovery_context,
             pending_tasks=pending_tasks,
@@ -547,7 +551,7 @@ def evaluate_checkpoint(
     plan: ExecutionPlan,
     checkpoint_id: str,
     executed_task_ids_since_last_checkpoint: list[int],
-    artifact_ids_since_last_checkpoint: list[int],
+    checkpoint_artifact_window_ids: list[int],
     recovery_context: RecoveryContext | None = None,
 ) -> StageEvaluationOutput:
     request = build_stage_evaluation_request(
@@ -556,7 +560,7 @@ def evaluate_checkpoint(
         plan=plan,
         checkpoint_id=checkpoint_id,
         executed_task_ids_since_last_checkpoint=executed_task_ids_since_last_checkpoint,
-        artifact_ids_since_last_checkpoint=artifact_ids_since_last_checkpoint,
+        checkpoint_artifact_window_ids=checkpoint_artifact_window_ids,
         recovery_context=recovery_context,
     )
 

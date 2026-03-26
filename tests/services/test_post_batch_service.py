@@ -459,3 +459,93 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
     assert len(result.recovery_context.recovery_created_tasks) == 1
     assert result.recovery_context.recovery_created_tasks[0].source_task_id == failed_task.id
     assert result.problematic_run_ids == [run.id]
+
+def test_post_batch_uses_real_checkpoint_artifact_window_and_ignores_older_task_artifacts(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    task = make_task(
+        project_id=project.id,
+        title="Completed task",
+        status=TASK_STATUS_COMPLETED,
+    )
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Task completed successfully.",
+    )
+
+    old_artifact = make_artifact(
+        project_id=project.id,
+        task_id=task.id,
+        artifact_type="old_debug_note",
+        content="artifact from an older cycle",
+    )
+
+    plan = make_execution_plan(
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ]
+    )
+
+    new_artifact = make_artifact(
+        project_id=project.id,
+        task_id=task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"completed"}',
+    )
+
+    captured_kwargs = {}
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_completed",
+        decision_summary="The final batch satisfied the stage goals and the stage can be closed.",
+        project_stage_closed=True,
+        stage_goals_satisfied=True,
+        recommended_next_action="close_stage",
+        recommended_next_action_reason="The stage goals are fully satisfied.",
+        decision_signals=["stage_goals_satisfied"],
+        plan_change_scope="none",
+        remaining_plan_still_valid=True,
+        completed_task_ids=[task.id],
+        key_risks=[],
+        notes=["Close the stage."],
+    )
+
+    def _fake_evaluate_checkpoint(**kwargs):
+        captured_kwargs.update(kwargs)
+        return evaluation_output
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        _fake_evaluate_checkpoint,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=False,
+        checkpoint_artifact_window_start_exclusive=old_artifact.id,
+    )
+
+    assert result.status == "project_stage_closed"
+    assert captured_kwargs["checkpoint_artifact_window_ids"] == [new_artifact.id]
+    assert old_artifact.id not in captured_kwargs["checkpoint_artifact_window_ids"]

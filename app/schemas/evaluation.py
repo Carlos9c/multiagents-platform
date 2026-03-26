@@ -99,43 +99,6 @@ class EvaluationReplanInstruction(BaseModel):
         return self
 
 
-class RecoveryCreatedTask(BaseModel):
-    source_run_id: int = Field(..., gt=0)
-    source_task_id: int = Field(..., gt=0)
-    created_task_id: int = Field(..., gt=0)
-    title: str = Field(..., min_length=3)
-    planning_level: str = Field(..., min_length=3)
-    executor_type: str = Field(..., min_length=3)
-
-
-class RecoveryIssue(BaseModel):
-    source_run_id: int = Field(..., gt=0)
-    source_task_id: int = Field(..., gt=0)
-    issue_type: str = Field(..., min_length=3)
-    summary: str = Field(..., min_length=10)
-    recommended_action: str | None = None
-
-    @model_validator(mode="after")
-    def normalize_issue(self) -> "RecoveryIssue":
-        if self.recommended_action is not None:
-            self.recommended_action = self.recommended_action.strip() or None
-        return self
-
-
-class RecoveryDecisionSummary(BaseModel):
-    source_run_id: int = Field(..., gt=0)
-    source_task_id: int = Field(..., gt=0)
-    strategy: str = Field(..., min_length=3)
-    reason: str = Field(..., min_length=10)
-    created_task_ids: list[int] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_summary(self) -> "RecoveryDecisionSummary":
-        if any(task_id <= 0 for task_id in self.created_task_ids):
-            raise ValueError("created_task_ids must contain only positive integers.")
-        return self
-
-
 class StageEvaluationOutput(BaseModel):
     decision: StageEvaluationDecision
     decision_summary: str = Field(..., min_length=20)

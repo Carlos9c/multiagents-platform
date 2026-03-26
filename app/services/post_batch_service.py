@@ -223,6 +223,23 @@ def _get_artifact_ids_for_tasks(
     )
     return [artifact.id for artifact in artifacts]
 
+def _get_artifact_ids_in_checkpoint_window(
+    db: Session,
+    *,
+    project_id: int,
+    start_exclusive: int,
+) -> list[int]:
+    artifacts = (
+        db.query(Artifact)
+        .filter(
+            Artifact.project_id == project_id,
+            Artifact.id > start_exclusive,
+        )
+        .order_by(Artifact.id.asc())
+        .all()
+    )
+    return [artifact.id for artifact in artifacts]
+
 
 def _build_next_batch_summary(plan: ExecutionPlan, batch_id: str) -> str | None:
     batch_index = next(
@@ -623,6 +640,7 @@ def process_batch_after_execution(
     persist_result: bool = True,
     finalization_iteration_count: int = 0,
     max_finalization_iterations: int = 2,
+    checkpoint_artifact_window_start_exclusive: int | None = None,
 ) -> PostBatchResult:
     project = db.get(Project, project_id)
     if not project:
@@ -754,11 +772,20 @@ def process_batch_after_execution(
 
     aggregated_recovery_context = merge_recovery_contexts(recovery_contexts)
 
-    artifact_ids_since_last_checkpoint = _get_artifact_ids_for_tasks(
-        db=db,
-        project_id=project_id,
-        task_ids=executed_task_ids + created_recovery_task_ids,
-    )
+    if checkpoint_artifact_window_start_exclusive is not None:
+        checkpoint_artifact_window_ids = _get_artifact_ids_in_checkpoint_window(
+            db=db,
+            project_id=project_id,
+            start_exclusive=checkpoint_artifact_window_start_exclusive,
+        )
+    else:
+        # Fallback defensivo para llamadas legacy o tests que no capturen todavía
+        # el cutoff real al inicio del batch.
+        checkpoint_artifact_window_ids = _get_artifact_ids_for_tasks(
+            db=db,
+            project_id=project_id,
+            task_ids=executed_task_ids + created_recovery_task_ids,
+        )
 
     evaluation_decision = evaluate_checkpoint(
         db=db,
@@ -766,10 +793,10 @@ def process_batch_after_execution(
         plan=plan,
         checkpoint_id=checkpoint.checkpoint_id,
         executed_task_ids_since_last_checkpoint=executed_task_ids,
-        artifact_ids_since_last_checkpoint=artifact_ids_since_last_checkpoint,
+        checkpoint_artifact_window_ids=checkpoint_artifact_window_ids,
         recovery_context=aggregated_recovery_context,
     )
-
+    
     persist_evaluation_decision(
         db=db,
         project_id=project_id,

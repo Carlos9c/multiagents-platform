@@ -106,6 +106,7 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
         batch_id,
         current_finalization_iteration_count,
         max_finalization_iterations,
+        checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
             return types.SimpleNamespace(
