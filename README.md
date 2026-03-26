@@ -4,349 +4,282 @@
 
 Este proyecto implementa una **plataforma backend multiagente** cuyo objetivo es:
 
-> Transformar una idea de software en un sistema ejecutable de forma progresiva, autónoma y verificable sobre un workspace real.
+> Transformar una idea de software en un sistema ejecutable de forma progresiva, estructurada y autónoma.
 
-El sistema no se limita a generar texto: **planifica, ejecuta, valida y recupera errores operando sobre artefactos reales (código, archivos, comandos, etc.)**.
+El sistema se basa en:
+- planificación jerárquica
+- ejecución por batches
+- evaluación iterativa
+- recovery automático
+- y control de flujo inteligente
 
 ---
 
 # 🏗️ Estado actual del proyecto
 
-## ✅ Núcleo funcional consolidado
+El sistema ha pasado de un estado experimental a una base **estructuralmente sólida**.
 
-Actualmente el sistema cubre un pipeline completo:
+## ✅ Núcleo estable
 
-1. Planificación (planner)
-2. Atomización (atomic)
-3. Ejecución (execution engine)
-4. Validación
-5. Recovery
-6. Post-batch + workflow
+### 🔹 Evaluación estructurada
+- `StageEvaluationOutput` con contrato fuerte
+- separación clara entre:
+  - `continue_current_plan`
+  - `resequence_remaining_batches`
+  - `replan_remaining_work`
+  - `manual_review`
+  - `close_stage`
+- validaciones cruzadas entre:
+  - `decision`
+  - `recommended_next_action`
+  - `plan_change_scope`
+  - `remaining_plan_still_valid`
 
-Todo ello con:
-- ejecución real sobre workspace
-- evidencias persistidas
-- control de estado consistente
-- tests pasando
-
----
-
-## ⚙️ Execution Engine (estado actual)
-
-### 🧩 Eliminación de `code_executor`
-
-- ❌ Eliminado como concepto operativo
-- ✅ Sustituido completamente por `execution_engine`
-- 🔁 Alias legacy permitido solo en normalización puntual
-
-👉 El ejecutor ya no se decide en atomic  
-👉 Se resuelve dinámicamente en runtime por el engine
-
----
-
-### 🧠 Arquitectura real
-
-El sistema opera con:
-
-- Orchestrator (LLM) → decide siguiente acción
-- Subagentes → ejecutan acciones
-- Tools → primitivas deterministas
-- Evidence → trazabilidad completa
-
----
-
-### 🔁 Acciones disponibles
-
-- inspect_context
-- resolve_file_operations
-- apply_file_operations
-- run_command
-- finish
-- reject
-
----
-
-### 🤖 Subagentes activos
-
-- context_selection_agent
-- placement_resolver_agent
-- code_change_agent
-- command_runner_agent
-
----
-
-### 🧰 Tools activas
-
-- read_text_file
-- write_text_file
-- capture_file_snapshot
-- restore_file_snapshot
-- run_command
-
----
-
-## 🔍 Catálogo de capacidades (nuevo)
-
-Se ha introducido:
-
-execution_engine/capabilities.py
-
-Permite:
-
-- Definir explícitamente:
-  - subagentes
-  - tools
-  - límites
-  - capacidades reales
-- Inyectar esta información en:
-  - orchestrator
-  - atomic
-  - recovery
-
-👉 El sistema ya no usa capacidades implícitas
-
----
-
-## 🧠 Atomic y Recovery alineados con capacidades reales
+### 🔹 Contexto de evaluación limpio (CRÍTICO)
+Se ha eliminado una de las principales fuentes de errores:
 
 Antes:
-- generaban tareas imposibles
+- mezcla de artifacts históricos
+- ruido de ciclos anteriores
 
 Ahora:
-- conocen capacidades reales
-- generan tareas ejecutables
-- evitan incoherencias
+- ventana real de checkpoint basada en `artifact_id`
+- el evaluador solo ve evidencia del ciclo actual
+
+### 🔹 Separación de contexto
+El evaluador recibe bloques diferenciados:
+- `processed_batch_summary`
+- `checkpoint_artifact_window_summary`
+- `recovery_tasks_created_summary`
+- `remaining_batches_summary`
+- `pending_task_summary`
+- `additional_context`
+
+👉 Resultado:
+- menos ambigüedad
+- menos replanificaciones erróneas
+
+### 🔹 Recovery rediseñado correctamente
+
+#### Eliminación completa de `retry`
+- fuera del schema
+- fuera del flujo
+- schemas estrictos (`extra="forbid"`)
+
+#### Input mejorado
+- se introduce `last_execution_agent_sequence`
+- recovery entiende la trayectoria real de ejecución
+
+#### Integridad estructural garantizada
+- ya no se crean tasks bajo una atomic sin `parent_task_id`
+- si ocurre → error explícito
+
+👉 Resultado:
+- recovery más fiable
+- sin corrupción del árbol de tareas
+
+### 🔹 Limpieza de schemas
+- `recovery.py` es la única fuente de verdad
+- eliminada duplicidad en `evaluation.py`
+
+### 🔹 Tests reforzados
+Cobertura sólida en:
+- evaluation_service
+- post_batch_service
+- recovery_service
+- schemas
+
+Incluyendo:
+- validaciones de contrato
+- artifact window
+- decisiones de flujo
+- integridad de recovery
 
 ---
 
-## 🔁 Tracking de ejecución real (nuevo)
+# ⚠️ Problemas resueltos
 
-Se han añadido:
+## ❌ Replanificación excesiva
+Antes:
+- el sistema replanificaba con facilidad
 
-- execution_agent_sequence (ExecutionRun)
-- last_execution_agent_sequence (Task)
+Ahora:
+- mejor señal
+- mejor contexto
+- mejor contrato
 
-Permite:
+👉 Aún queda un ajuste fino (ver backlog)
 
-- saber qué subagentes participaron
-- trazabilidad completa
-- debugging avanzado
-- base futura para recovery inteligente
+## ❌ Ruido en artifacts
+Antes:
+- el evaluador veía datos irrelevantes
 
----
+Ahora:
+- ventana limpia por checkpoint
 
-## 🧹 Limpieza estructural
+## ❌ Ambigüedad en recovery
+Antes:
+- lógica difusa
+- retry ambiguo
 
-Eliminado completamente:
+Ahora:
+- acciones claras:
+  - `reatomize`
+  - `insert_followup`
+  - `manual_review`
 
-- code_executor (uso activo)
-- referencias en prompts
-- referencias en atomic/recovery
-- code_context_selection
-- repo_inspector_agent
-- repo_tree_tool
+## ❌ Corrupción de jerarquía de tareas
+Antes:
+- una atomic podía convertirse en padre
 
-👉 Código muerto eliminado (no enrutable)
-
----
-
-## 🔧 Mejora crítica: run_command
-
-### Problema original
-
-- shell=True
-- ejecución arbitraria
-- comportamiento impredecible
-
-### Solución
-
-- shell=False
-- parseo seguro (shlex)
-- bloqueo de operadores:
-  - && || ; | > < >> etc.
-- ejecución de un único comando
-
-👉 Ahora run_command es:
-
-“una acción puntual controlada, no scripting”
+Ahora:
+- prohibido explícitamente
 
 ---
 
-## 🧠 Ajustes en prompts
+# 🧱 BACKLOG ACTUAL (REAL)
 
-Se ha endurecido:
+## 🔥 BLOQUE 1 — Estabilizar decisiones post-recovery (CRÍTICO)
 
-- no usar run_command para exploración
-- no chaining
-- no compensar mala planificación
-- preferir finish
+### Problema actual
+El sistema aún puede sobre-reaccionar cuando aparecen nuevas tasks de recovery.
 
----
+### Objetivo
+Evitar que recovery implique automáticamente cambio estructural.
 
-## 🧪 Testing
+### Tareas
 
-- Todos los tests pasan
-- Ajustados a:
-  - nuevos contratos
-  - nuevos estados
-  - eliminación de legacy
+#### 1.1 Reglas explícitas en `post_batch_service`
+- Si:
+  - `remaining_plan_still_valid = True`
+  - y hay backlog válido  
+→ ❌ NO replan
 
----
+- Si:
+  - recovery crea tasks
+  - y `still_blocks_progress = False`  
+→ ❌ NO replan  
+→ ✔ continue / resequence
 
-# ⚠️ Decisiones clave
+- Solo replan si:
+  - inconsistencia estructural real
+  - o `plan_change_scope` fuerte
 
-## ✔️ No allowlist de comandos
+#### 1.2 Priorizar continuidad
+- default → `continue_current_plan`
+- resequence solo si:
+  - dependencia real
+  - orden incorrecto
 
-Motivo:
-- sistema multi-stack (Python, Java, Node, etc.)
+#### 1.3 Formalizar decisión final
+Eliminar lógica implícita basada en flags dispersos.
 
-Solución:
-- restringir forma, no contenido
-
----
-
-## ✔️ No mantener código muerto
-
-- si no es enrutable → se elimina
-
----
-
-## ✔️ Capacidades explícitas siempre
-
-- todo definido en capabilities.py
-- nada implícito
+#### 1.4 Tests críticos
+- recovery + no blocking → NO replan
+- backlog válido → NO replan
+- follow-up simple → NO replan
 
 ---
 
-# 🚧 Deuda técnica
+## 🧱 BLOQUE 2 — Identidad de planes y batches (BUG 2)
 
-## 1. run_command aún usa string
+### Problema
+- el sistema puede “volver a batch 1”
+- falta trazabilidad
 
-Mejora futura:
-- usar argv estructurado
+### Tareas
 
----
+#### 2.1 `plan_version` determinista
+`max(plan_version) + 1`
 
-## 2. step_kind no tipado
+#### 2.2 ID estable de batch
+`{plan_version}_{batch_index}`
 
-- sigue siendo string
-- riesgo de errores
-
----
-
-## 3. Prompts no verificados automáticamente
-
-- falta coherencia garantizada con capabilities
+#### 2.3 Nombre normalizado
+`Plan {version} · Batch {index}`
 
 ---
 
-## 4. Recovery no usa execution_agent_sequence
+## 🧱 BLOQUE 3 — Observabilidad
 
-Gran oportunidad de mejora
+### Tareas
 
----
+#### 3.1 Artifacts completos
+- execution_plan
+- evaluation_decision
+- post_batch_result
+- recovery_decisions
 
-## 5. Falta observabilidad avanzada
-
-- no hay timeline
-- debugging limitado
-
----
-
-# 🧭 Siguientes pasos
-
-## 🔥 Prioridad alta
-
-### 1. Evolucionar run_command
-
-- migrar a argv
-- validación estructural
-
----
-
-### 2. Recovery inteligente
-
-- usar execution_agent_sequence
-- adaptar estrategia según fallo real
-
----
-
-### 3. Validación automática de capacidades
-
-- test que detecte:
-  - subagentes no registrados
-  - tools no declaradas
-  - código muerto
-
----
-
-### 4. Tipado de step_kind
-
-- usar constantes o enums
-
----
-
-## ⚙️ Prioridad media
-
-### 5. Endurecer prompts
-
-- evitar loops
-- mejorar decisiones finish/reject
-
----
-
-### 6. Métricas del orchestrator
-
-- nº pasos
-- nº retries
-- decisiones inválidas
-
----
-
-### 7. Tests del engine más completos
-
-- escenarios completos
-- fallos controlados
+#### 3.2 Trazabilidad del flujo
+Guardar por iteración:
+- batch
+- tasks
 - recovery
+- decisión
 
 ---
 
-## 🧠 Futuro
+## 🧱 BLOQUE 4 — Recovery (refinamiento)
 
-### 8. Multi-executor real
-
-- execution_engine como router
-- múltiples backends
-
----
-
-### 9. Planificación basada en ejecución real
-
-- feedback loop execution → planner
+### Tareas
+- validar impacto real de `last_execution_agent_sequence`
+- ajustar prompt si es necesario
+- (opcional) tests de trayectoria
 
 ---
 
-### 10. Visualización del pipeline
+## 🧱 BLOQUE 5 — Evaluador (fase final)
 
-- debug visual
-- trazabilidad completa
+### Tareas
+- reforzar prompt:
+  - NO replan por defecto
+  - recovery ≠ fallo estructural
+- añadir ejemplos negativos
 
 ---
 
-# 🧠 Conclusión
+## 🧱 BLOQUE 6 — Limpieza final
+
+### Tareas
+- renombrado semántico
+- eliminación de legacy restante
+
+---
+
+# 🧠 Prioridad real
+
+## 🔥 Inmediato
+1. reglas post-recovery (bloque 1)
+2. identidad de plan/batch (bloque 2)
+
+## ⚠️ Medio
+3. observabilidad
+
+## ⚙️ Bajo
+4. ajustes de recovery y evaluador
+
+---
+
+# 🧭 Siguientes pasos recomendados
+
+1. Implementar reglas explícitas en `post_batch_service`
+2. Añadir tests de “no replan innecesario”
+3. Introducir `plan_version` determinista
+4. Estabilizar identidad de batch
+5. Mejorar trazabilidad de ejecución
+
+---
+
+# 💬 Conclusión
 
 El sistema ha evolucionado de:
 
-❌ Generación de tareas + ejecución débil  
-a  
-✅ Sistema multiagente real con ejecución, validación y recuperación
+> comportamiento errático y difícil de razonar
 
-Cambios clave:
+a:
 
-- eliminación de code_executor
-- capacidades explícitas
-- orquestación real
-- tools seguras
-- limpieza de legacy
+> arquitectura sólida con semántica clara y decisiones estructuradas
 
-👉 El sistema ya no necesita reinvención, sino **refinamiento y robustez**
+Ahora el foco ya no es “arreglar caos”, sino:
+
+> afinar comportamiento y asegurar estabilidad operativa
