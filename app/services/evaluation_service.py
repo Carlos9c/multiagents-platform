@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from typing import Any
 
@@ -8,9 +10,9 @@ from app.models.execution_run import ExecutionRun
 from app.models.project import Project
 from app.models.task import Task
 from app.schemas.evaluation import StageEvaluationOutput
-from app.schemas.recovery import RecoveryContext
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.project_memory import ProjectOperationalContext
+from app.schemas.recovery import RecoveryContext
 from app.services.artifacts import create_artifact
 from app.services.evaluation_client import call_stage_evaluation_model
 from app.services.project_memory_service import (
@@ -18,7 +20,6 @@ from app.services.project_memory_service import (
     build_project_operational_context,
     persist_project_operational_context,
 )
-
 
 CODE_VALIDATION_RESULT_ARTIFACT_TYPE = "code_validation_result"
 EVALUATION_DECISION_ARTIFACT_TYPE = "evaluation_decision"
@@ -101,6 +102,18 @@ def _get_executed_tasks(
     )
 
 
+def _get_pending_project_tasks(
+    db: Session,
+    *,
+    project_id: int,
+    exclude_task_ids: list[int] | None = None,
+) -> list[Task]:
+    query = db.query(Task).filter(Task.project_id == project_id)
+    if exclude_task_ids:
+        query = query.filter(~Task.id.in_(exclude_task_ids))
+    return query.order_by(Task.sequence_order.asc().nullsfirst(), Task.id.asc()).all()
+
+
 def _get_latest_run_for_task(db: Session, task_id: int) -> ExecutionRun | None:
     return (
         db.query(ExecutionRun)
@@ -170,7 +183,11 @@ def _task_to_stage_evidence(
     )
 
     validation_artifact = next(
-        (artifact for artifact in reversed(task_artifacts) if artifact.artifact_type == CODE_VALIDATION_RESULT_ARTIFACT_TYPE),
+        (
+            artifact
+            for artifact in reversed(task_artifacts)
+            if artifact.artifact_type == CODE_VALIDATION_RESULT_ARTIFACT_TYPE
+        ),
         None,
     )
 
@@ -257,9 +274,9 @@ def _build_processed_batch_summary(
     executed_tasks: list[Task],
     artifacts_since_last_checkpoint: list[Artifact],
 ) -> str:
-    task_ids = {task.id for task in executed_tasks}
-    batch_tasks = [task for task in executed_tasks if task.id in batch.task_ids]
-    batch_artifacts = [artifact for artifact in artifacts_since_last_checkpoint if artifact.task_id in task_ids]
+    batch_task_ids = set(batch.task_ids)
+    batch_tasks = [task for task in executed_tasks if task.id in batch_task_ids]
+    batch_artifacts = [artifact for artifact in artifacts_since_last_checkpoint if artifact.task_id in batch_task_ids]
 
     payload = {
         "evaluated_batch": _batch_to_dict(batch),
@@ -317,6 +334,86 @@ def _build_recovery_context_summary(recovery_context: RecoveryContext | None) ->
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _build_recovery_tasks_created_summary(
+    recovery_context: RecoveryContext | None,
+) -> str:
+    resolved = recovery_context or RecoveryContext()
+
+    payload = {
+        "created_task_count": len(resolved.recovery_created_tasks),
+        "created_tasks": [
+            {
+                "created_task_id": created.created_task_id,
+                "source_task_id": created.source_task_id,
+                "source_run_id": created.source_run_id,
+                "title": created.title,
+                "planning_level": created.planning_level,
+                "executor_type": created.executor_type,
+            }
+            for created in resolved.recovery_created_tasks
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _build_remaining_batches_summary(
+    *,
+    plan: ExecutionPlan,
+    checkpoint_batch_index: int,
+) -> str:
+    remaining_batches = plan.execution_batches[checkpoint_batch_index + 1 :]
+
+    payload = {
+        "remaining_batch_count": len(remaining_batches),
+        "remaining_batches": [_batch_to_dict(batch) for batch in remaining_batches],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _build_pending_task_summary(
+    *,
+    pending_tasks: list[Task],
+    remaining_batch_task_ids: list[int],
+    recovery_context: RecoveryContext | None,
+) -> str:
+    recovery_task_ids = {
+        created.created_task_id
+        for created in (recovery_context or RecoveryContext()).recovery_created_tasks
+    }
+    remaining_batch_task_id_set = set(remaining_batch_task_ids)
+
+    payload = {
+        "pending_task_count": len(pending_tasks),
+        "pending_tasks": [
+            {
+                "task_id": task.id,
+                "title": task.title,
+                "status": task.status,
+                "planning_level": task.planning_level,
+                "executor_type": task.executor_type,
+                "is_in_remaining_batches": task.id in remaining_batch_task_id_set,
+                "is_recovery_generated": task.id in recovery_task_ids,
+            }
+            for task in pending_tasks
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _build_checkpoint_artifact_window_summary(
+    *,
+    artifacts_since_last_checkpoint: list[Artifact],
+) -> str:
+    payload = {
+        "artifact_count": len(artifacts_since_last_checkpoint),
+        "artifacts": [
+            _artifact_to_summary_dict(artifact)
+            for artifact in artifacts_since_last_checkpoint
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def _build_additional_context(
     *,
     project: Project,
@@ -324,6 +421,8 @@ def _build_additional_context(
     executed_tasks: list[Task],
     artifacts_since_last_checkpoint: list[Artifact],
     next_batch: ExecutionBatch | None,
+    recovery_context: RecoveryContext | None,
+    pending_tasks: list[Task],
 ) -> str:
     payload = {
         "project": {
@@ -337,6 +436,14 @@ def _build_additional_context(
             "artifact_ids": [artifact.id for artifact in artifacts_since_last_checkpoint],
         },
         "next_batch": _batch_to_dict(next_batch) if next_batch else None,
+        "recovery_summary": {
+            "created_task_ids": [
+                created.created_task_id
+                for created in (recovery_context or RecoveryContext()).recovery_created_tasks
+            ],
+            "open_issue_count": len((recovery_context or RecoveryContext()).open_issues),
+        },
+        "pending_task_ids": [task.id for task in pending_tasks],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -374,10 +481,17 @@ def build_stage_evaluation_request(
     )
 
     current_batch = plan.execution_batches[checkpoint_batch_index]
-    next_batch = (
-        plan.execution_batches[checkpoint_batch_index + 1]
-        if checkpoint_batch_index + 1 < len(plan.execution_batches)
-        else None
+    remaining_batches = plan.execution_batches[checkpoint_batch_index + 1 :]
+    next_batch = remaining_batches[0] if remaining_batches else None
+    remaining_batch_task_ids = [
+        task_id
+        for batch in remaining_batches
+        for task_id in batch.task_ids
+    ]
+    pending_tasks = _get_pending_project_tasks(
+        db=db,
+        project_id=project_id,
+        exclude_task_ids=executed_task_ids_since_last_checkpoint,
     )
 
     return {
@@ -402,12 +516,27 @@ def build_stage_evaluation_request(
             executed_tasks=executed_tasks,
         ),
         "recovery_context_summary": _build_recovery_context_summary(recovery_context),
+        "recovery_tasks_created_summary": _build_recovery_tasks_created_summary(recovery_context),
+        "remaining_batches_summary": _build_remaining_batches_summary(
+            plan=plan,
+            checkpoint_batch_index=checkpoint_batch_index,
+        ),
+        "pending_task_summary": _build_pending_task_summary(
+            pending_tasks=pending_tasks,
+            remaining_batch_task_ids=remaining_batch_task_ids,
+            recovery_context=recovery_context,
+        ),
+        "checkpoint_artifact_window_summary": _build_checkpoint_artifact_window_summary(
+            artifacts_since_last_checkpoint=artifacts_since_last_checkpoint,
+        ),
         "additional_context": _build_additional_context(
             project=project,
             project_operational_context=project_operational_context,
             executed_tasks=executed_tasks,
             artifacts_since_last_checkpoint=artifacts_since_last_checkpoint,
             next_batch=next_batch,
+            recovery_context=recovery_context,
+            pending_tasks=pending_tasks,
         ),
     }
 

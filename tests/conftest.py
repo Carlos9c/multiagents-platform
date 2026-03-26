@@ -231,6 +231,11 @@ def make_stage_evaluation_output() -> Callable[..., StageEvaluationOutput]:
         manual_review_reason: str | None = None,
         recommended_next_action: str | None = None,
         recommended_next_action_reason: str | None = None,
+        decision_signals: list[str] | None = None,
+        plan_change_scope: str = "none",
+        remaining_plan_still_valid: bool = True,
+        new_recovery_tasks_blocking: bool | None = None,
+        single_task_tail_risk: bool = False,
         evaluated_batch_id: str = "batch_1",
         evaluated_outcome: str = "successful",
         completed_task_ids: list[int] | None = None,
@@ -258,6 +263,11 @@ def make_stage_evaluation_output() -> Callable[..., StageEvaluationOutput]:
             manual_review_reason=manual_review_reason,
             recommended_next_action=recommended_next_action,
             recommended_next_action_reason=recommended_next_action_reason,
+            decision_signals=decision_signals or ["remaining_plan_still_valid"],
+            plan_change_scope=plan_change_scope,
+            remaining_plan_still_valid=remaining_plan_still_valid,
+            new_recovery_tasks_blocking=new_recovery_tasks_blocking,
+            single_task_tail_risk=single_task_tail_risk,
             evaluated_batches=[
                 EvaluatedBatchSummary(
                     batch_id=evaluated_batch_id,

@@ -4,6 +4,7 @@ from app.schemas.evaluation import StageEvaluationOutput
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
+
 STAGE_EVALUATION_SYSTEM_PROMPT = """
 You evaluate whether the CURRENT PROJECT STAGE should be closed, continue as planned, be resequenced, be replanned, or require manual review.
 
@@ -14,7 +15,7 @@ Core responsibilities:
 - Decide whether the current stage is complete, incomplete, or requires manual review.
 - Decide whether recovery should happen through re-atomization, follow-up atomic work, high-level replanning, or manual review.
 - Recommend the NEXT OPERATIONAL ACTION explicitly using recommended_next_action.
-- Be operationally strict and consistent with the current workflow.
+- Explain the operational reasoning with structured fields, not only narrative text.
 
 Current workflow reality:
 - The platform currently plans at high_level and decomposes directly into atomic tasks by default.
@@ -94,6 +95,25 @@ Recommended next action rules:
 - Use manual_review only when automation is not trustworthy enough.
 - Use close_stage only when the stage is truly complete.
 
+Structured reasoning fields:
+- decision_signals:
+  - include a concise list of the main operational signals that drove the decision
+  - examples: "remaining_plan_still_valid", "followup_tasks_created", "single_task_tail_risk", "blocking_recovery_tasks", "structural_gap_detected", "high_level_plan_invalid", "manual_review_needed"
+- plan_change_scope:
+  - none: no plan change is needed
+  - local_resequencing: reorder or regroup locally within remaining work
+  - remaining_plan_rebuild: the remaining batches should be rebuilt, but high-level stage planning is still valid
+  - high_level_replan: the high-level stage plan is no longer valid
+- remaining_plan_still_valid:
+  - true when the current remaining plan still represents the right work, even if it may need regrouping
+  - false only when the remaining plan no longer represents the stage correctly
+- new_recovery_tasks_blocking:
+  - true if newly created recovery tasks are blocking stage progress
+  - false if they are non-blocking local follow-ups
+  - null if no new recovery tasks were created or the distinction is not applicable
+- single_task_tail_risk:
+  - true if continuing unchanged would likely leave an awkward single-task tail that causes an avoidable extra validation loop
+
 Important distinction:
 - New follow-up tasks do NOT automatically imply high-level replanning.
 - A local recovery that introduces one or more follow-up tasks may still justify:
@@ -114,6 +134,11 @@ Consistency rules:
 - If recommended_next_action is replan_remaining_work, then replan.required must be true and replan.level must be high_level.
 - If recommended_next_action is continue_current_plan, then do not request follow-up tasks, replanning, or manual review.
 - If recommended_next_action is resequence_remaining_batches, the situation must remain locally recoverable without high-level replanning.
+- If recommended_next_action is continue_current_plan or close_stage, plan_change_scope must be none.
+- If recommended_next_action is resequence_remaining_batches, plan_change_scope must be local_resequencing or remaining_plan_rebuild.
+- If recommended_next_action is replan_remaining_work, plan_change_scope must be high_level_replan.
+- If replan.level is high_level, remaining_plan_still_valid must be false.
+- If recommended_next_action is continue_current_plan or resequence_remaining_batches, remaining_plan_still_valid should normally be true.
 
 Evidence usage rules:
 - Base the decision on stage goals, batch outcomes, failed/partial/completed tasks, and recovery implications.
@@ -131,6 +156,7 @@ Evidence usage rules:
 Output quality rules:
 - decision_summary must clearly explain the stage-level conclusion
 - recommended_next_action_reason must explain WHY that next action is preferable over the nearby alternatives
+- decision_signals must list the main operational factors
 - evaluated_batches must summarize the meaningful outcomes of the processed batches
 - key_risks should identify the main unresolved risks
 - notes may include operational observations useful for downstream orchestration
@@ -147,6 +173,10 @@ def build_stage_evaluation_user_prompt(
     processed_batch_summary: str,
     task_state_summary: str,
     recovery_context_summary: str,
+    recovery_tasks_created_summary: str,
+    remaining_batches_summary: str,
+    pending_task_summary: str,
+    checkpoint_artifact_window_summary: str,
     additional_context: str,
 ) -> str:
     return f"""
@@ -168,6 +198,18 @@ Task state summary:
 Recovery context summary:
 {recovery_context_summary}
 
+Recovery tasks created summary:
+{recovery_tasks_created_summary}
+
+Remaining batches summary:
+{remaining_batches_summary}
+
+Pending task summary:
+{pending_task_summary}
+
+Checkpoint artifact window summary:
+{checkpoint_artifact_window_summary}
+
 Additional context:
 {additional_context}
 
@@ -176,6 +218,12 @@ Operational instructions:
 - determine whether the stage can be closed now
 - if the stage is incomplete, choose the narrowest reliable next recovery mechanism
 - explicitly choose the next operational action using recommended_next_action
+- fill the structured reasoning fields:
+  - decision_signals
+  - plan_change_scope
+  - remaining_plan_still_valid
+  - new_recovery_tasks_blocking
+  - single_task_tail_risk
 - prefer atomic-level correction when the issue is local
 - escalate to high-level replanning only when the current high-level plan is no longer adequate
 - do not use refined as a planning or replanning level
@@ -229,6 +277,7 @@ Critical corrections:
 - only valid replan levels are atomic and high_level
 - do not use retry_batch
 - keep decision, project_stage_closed, manual_review_required, recovery_strategy, replan, and recommended_next_action fully consistent
+- keep plan_change_scope, remaining_plan_still_valid, new_recovery_tasks_blocking, and single_task_tail_risk consistent with the recommended action
 - do not set stage_completed unless the stage is truly closed
 - do not request replan_from_high_level unless replan.required=true and replan.level=high_level
 - do not request insert_followup_atomic_tasks unless followup_atomic_tasks_required=true
@@ -250,6 +299,10 @@ def call_stage_evaluation_model(
     processed_batch_summary: str,
     task_state_summary: str,
     recovery_context_summary: str,
+    recovery_tasks_created_summary: str,
+    remaining_batches_summary: str,
+    pending_task_summary: str,
+    checkpoint_artifact_window_summary: str,
     additional_context: str = "",
 ) -> StageEvaluationOutput:
     provider = get_llm_provider()
@@ -265,6 +318,10 @@ def call_stage_evaluation_model(
         processed_batch_summary=processed_batch_summary,
         task_state_summary=task_state_summary,
         recovery_context_summary=recovery_context_summary,
+        recovery_tasks_created_summary=recovery_tasks_created_summary,
+        remaining_batches_summary=remaining_batches_summary,
+        pending_task_summary=pending_task_summary,
+        checkpoint_artifact_window_summary=checkpoint_artifact_window_summary,
         additional_context=additional_context,
     )
 

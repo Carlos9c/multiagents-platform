@@ -39,6 +39,13 @@ RecommendedNextAction = Literal[
     "manual_review",
 ]
 
+PlanChangeScope = Literal[
+    "none",
+    "local_resequencing",
+    "remaining_plan_rebuild",
+    "high_level_replan",
+]
+
 
 class EvaluatedBatchSummary(BaseModel):
     batch_id: str = Field(..., min_length=1)
@@ -152,6 +159,13 @@ class StageEvaluationOutput(BaseModel):
     recommended_next_action: RecommendedNextAction | None = None
     recommended_next_action_reason: str | None = None
 
+    # Nuevas señales estructuradas de razonamiento operativo
+    decision_signals: list[str] = Field(default_factory=list)
+    plan_change_scope: PlanChangeScope = "none"
+    remaining_plan_still_valid: bool = True
+    new_recovery_tasks_blocking: bool | None = None
+    single_task_tail_risk: bool = False
+
     evaluated_batches: list[EvaluatedBatchSummary] = Field(default_factory=list)
     key_risks: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
@@ -174,6 +188,9 @@ class StageEvaluationOutput(BaseModel):
         if self.recommended_next_action_reason is not None:
             self.recommended_next_action_reason = self.recommended_next_action_reason.strip() or None
 
+        self.decision_signals = [
+            item.strip() for item in self.decision_signals if item and item.strip()
+        ]
         self.key_risks = [item.strip() for item in self.key_risks if item and item.strip()]
         self.notes = [item.strip() for item in self.notes if item and item.strip()]
 
@@ -215,6 +232,16 @@ class StageEvaluationOutput(BaseModel):
                     "replan.level='high_level'."
                 )
 
+        if self.replan.required and self.replan.level == "high_level":
+            if self.remaining_plan_still_valid:
+                raise ValueError(
+                    "remaining_plan_still_valid must be false when high-level replanning is required."
+                )
+            if self.plan_change_scope != "high_level_replan":
+                raise ValueError(
+                    "plan_change_scope must be 'high_level_replan' when high-level replanning is required."
+                )
+
         if self.decision == "stage_completed":
             if not self.project_stage_closed:
                 raise ValueError(
@@ -233,6 +260,12 @@ class StageEvaluationOutput(BaseModel):
             if self.recommended_next_action not in {None, "close_stage"}:
                 raise ValueError(
                     "stage_completed only allows recommended_next_action='close_stage'."
+                )
+            if self.plan_change_scope != "none":
+                raise ValueError("stage_completed requires plan_change_scope='none'.")
+            if not self.remaining_plan_still_valid:
+                raise ValueError(
+                    "stage_completed requires remaining_plan_still_valid=true."
                 )
 
         if self.decision == "manual_review_required":
@@ -261,6 +294,10 @@ class StageEvaluationOutput(BaseModel):
             if self.decision != "stage_completed" or not self.project_stage_closed:
                 raise ValueError(
                     "recommended_next_action='close_stage' requires a closed stage."
+                )
+            if self.plan_change_scope != "none":
+                raise ValueError(
+                    "recommended_next_action='close_stage' requires plan_change_scope='none'."
                 )
 
         if self.recommended_next_action == "manual_review":
@@ -291,6 +328,16 @@ class StageEvaluationOutput(BaseModel):
                     "recommended_next_action='continue_current_plan' is incompatible with "
                     "followup_atomic_tasks_required=true."
                 )
+            if self.plan_change_scope != "none":
+                raise ValueError(
+                    "recommended_next_action='continue_current_plan' requires "
+                    "plan_change_scope='none'."
+                )
+            if not self.remaining_plan_still_valid:
+                raise ValueError(
+                    "recommended_next_action='continue_current_plan' requires "
+                    "remaining_plan_still_valid=true."
+                )
 
         if self.recommended_next_action == "resequence_remaining_batches":
             if self.project_stage_closed:
@@ -307,6 +354,19 @@ class StageEvaluationOutput(BaseModel):
                 raise ValueError(
                     "recommended_next_action='resequence_remaining_batches' cannot coexist with "
                     "high-level replanning."
+                )
+            if self.plan_change_scope not in {
+                "local_resequencing",
+                "remaining_plan_rebuild",
+            }:
+                raise ValueError(
+                    "recommended_next_action='resequence_remaining_batches' requires "
+                    "plan_change_scope in {'local_resequencing', 'remaining_plan_rebuild'}."
+                )
+            if not self.remaining_plan_still_valid:
+                raise ValueError(
+                    "recommended_next_action='resequence_remaining_batches' requires "
+                    "remaining_plan_still_valid=true."
                 )
             if (
                 not self.followup_atomic_tasks_required
@@ -336,6 +396,16 @@ class StageEvaluationOutput(BaseModel):
                 raise ValueError(
                     "recommended_next_action='replan_remaining_work' is incompatible with "
                     "manual_review_required=true."
+                )
+            if self.plan_change_scope != "high_level_replan":
+                raise ValueError(
+                    "recommended_next_action='replan_remaining_work' requires "
+                    "plan_change_scope='high_level_replan'."
+                )
+            if self.remaining_plan_still_valid:
+                raise ValueError(
+                    "recommended_next_action='replan_remaining_work' requires "
+                    "remaining_plan_still_valid=false."
                 )
 
         return self

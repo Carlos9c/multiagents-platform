@@ -139,6 +139,15 @@ def test_post_batch_requests_resequencing_when_evaluator_recommends_resequence_r
         recommended_next_action_reason=(
             "The remaining work is still valid, but regrouping avoids an awkward one-task validation cycle."
         ),
+        decision_signals=[
+            "remaining_plan_still_valid",
+            "followup_tasks_created",
+            "single_task_tail_risk",
+        ],
+        plan_change_scope="local_resequencing",
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=False,
+        single_task_tail_risk=True,
         completed_task_ids=[completed_task.id],
         notes=["Resequence the remaining work."],
     )
@@ -224,6 +233,14 @@ def test_post_batch_requests_replanning_when_evaluator_recommends_replan_remaini
         recommended_next_action_reason=(
             "The remaining batches no longer reflect the correct structure of the work."
         ),
+        decision_signals=[
+            "structural_gap_detected",
+            "high_level_plan_invalid",
+        ],
+        plan_change_scope="high_level_replan",
+        remaining_plan_still_valid=False,
+        new_recovery_tasks_blocking=True,
+        single_task_tail_risk=False,
         completed_task_ids=[completed_task.id],
         notes=["Replan the remaining work from the high-level stage layer."],
     )
