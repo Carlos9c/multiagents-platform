@@ -477,6 +477,34 @@ def _count_preexisting_valid_pending_tasks(
         exclude_task_ids=exclude_ids,
     )
 
+def _validate_stage_evaluation_coherence(
+    *,
+    evaluation_decision: Any,
+) -> None:
+    recommended_next_action = _normalize_string(
+        _read_attr(evaluation_decision, "recommended_next_action"),
+        "",
+    )
+    remaining_plan_still_valid = _normalize_bool(
+        _read_attr(evaluation_decision, "remaining_plan_still_valid"),
+        True,
+    )
+    replan = _read_attr(evaluation_decision, "replan", None)
+    replan_required = _normalize_bool(_read_attr(replan, "required"), False)
+    replan_level = _normalize_string(_read_attr(replan, "level"), "")
+
+    if recommended_next_action == "replan_remaining_work" and remaining_plan_still_valid:
+        raise PostBatchServiceError(
+            "Checkpoint evaluation is contradictory: recommended_next_action='replan_remaining_work' "
+            "requires remaining_plan_still_valid=False."
+        )
+
+    if replan_required and replan_level == "high_level" and remaining_plan_still_valid:
+        raise PostBatchServiceError(
+            "Checkpoint evaluation is contradictory: high-level replanning requires "
+            "remaining_plan_still_valid=False."
+        )
+
 
 def _is_final_batch(plan: ExecutionPlan, batch_id: str) -> bool:
     if not plan.execution_batches:
@@ -1112,6 +1140,7 @@ def process_batch_after_execution(
     )
 
     _require_new_stage_evaluation_output(evaluation_decision)
+    _validate_stage_evaluation_coherence(evaluation_decision=evaluation_decision)
 
     current_batch_index = next(
         index
@@ -1210,12 +1239,6 @@ def process_batch_after_execution(
 
         if mutation_result.mutation_kind == "assignment":
             patched_execution_plan = mutation_result.patched_execution_plan
-            continue_execution = True
-            requires_replanning = False
-            requires_resequencing = False
-            requires_manual_review = False
-            is_stage_closed = False
-            status = "completed_with_evaluation"
 
             assigned_task_ids = mutation_result.metadata.get("assigned_task_ids", [])
             cluster_assignments = mutation_result.metadata.get(
@@ -1224,10 +1247,33 @@ def process_batch_after_execution(
             )
             cluster_count = len(cluster_assignments)
 
-            notes = (
-                f"{notes} Recovery assignment placed all new tasks before continuing. "
-                f"clusters_assigned={cluster_count}; assigned_task_ids={assigned_task_ids}."
-            )
+            if resolved_intent.intent_type == "assign":
+                continue_execution = True
+                requires_replanning = False
+                requires_resequencing = False
+                requires_manual_review = False
+                is_stage_closed = False
+                status = "completed_with_evaluation"
+                notes = (
+                    f"{notes} Recovery assignment placed all new tasks before continuing. "
+                    f"clusters_assigned={cluster_count}; assigned_task_ids={assigned_task_ids}."
+                )
+            elif resolved_intent.intent_type == "resequence":
+                continue_execution = False
+                requires_replanning = False
+                requires_resequencing = True
+                requires_manual_review = False
+                is_stage_closed = False
+                status = "checkpoint_blocked"
+                notes = (
+                    f"{notes} Recovery assignment placed the blocking tasks into the live plan, "
+                    "but continuation remains paused until the resequenced plan is applied. "
+                    f"clusters_assigned={cluster_count}; assigned_task_ids={assigned_task_ids}."
+                )
+            else:
+                raise PostBatchServiceError(
+                    f"Mutation result 'assignment' is inconsistent with resolved intent '{resolved_intent.intent_type}'."
+                )
 
         elif mutation_result.mutation_kind == "escalated_to_replan":
             patched_execution_plan = None

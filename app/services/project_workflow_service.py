@@ -433,6 +433,7 @@ def _run_execution_iteration(
     finalization_iteration_count: int,
     max_finalization_iterations: int,
     iteration_number: int,
+    previously_completed_batch_ids: set[str] | None = None,
 ) -> tuple[WorkflowIterationSummary, str, int, ExecutionPlan, bool]:
     processed_batch_ids: list[str] = []
     reopened_finalization = False
@@ -444,9 +445,14 @@ def _run_execution_iteration(
     current_plan = plan
     current_index = 0
     processed_batch_ids_set: set[str] = set()
+    previously_completed_batch_ids = set(previously_completed_batch_ids or ())
 
     while current_index < len(current_plan.execution_batches):
         batch = current_plan.execution_batches[current_index]
+
+        if batch.batch_id in previously_completed_batch_ids:
+            current_index += 1
+            continue
 
         if batch.batch_id in processed_batch_ids_set:
             raise ProjectWorkflowServiceError(
@@ -570,6 +576,7 @@ def _run_execution_iteration(
         iteration_requires_replan,
     )
 
+
 def run_project_workflow(
     db: Session,
     project_id: int,
@@ -658,6 +665,7 @@ def run_project_workflow(
             finalization_iteration_count=finalization_iteration_count,
             max_finalization_iterations=max_finalization_iterations,
             iteration_number=iteration_number,
+            previously_completed_batch_ids=set(completed_batches),
         )
 
         active_plan = resulting_plan
@@ -683,7 +691,6 @@ def run_project_workflow(
 
         if iteration_summary.reopened_finalization:
             final_status = "execution_in_progress"
-
             continue
 
         final_status = resulting_status
