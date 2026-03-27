@@ -433,12 +433,13 @@ def _run_execution_iteration(
     finalization_iteration_count: int,
     max_finalization_iterations: int,
     iteration_number: int,
-) -> tuple[WorkflowIterationSummary, str, int]:
+) -> tuple[WorkflowIterationSummary, str, int, ExecutionPlan, bool]:
     processed_batch_ids: list[str] = []
     reopened_finalization = False
     manual_review_required = False
     resulting_status = "execution_in_progress"
     current_finalization_iteration_count = finalization_iteration_count
+    iteration_requires_replan = False
 
     current_plan = plan
     current_index = 0
@@ -513,6 +514,7 @@ def _run_execution_iteration(
         if getattr(post_batch_result, "requires_replanning", False):
             reopened_finalization = True
             resulting_status = "execution_in_progress"
+            iteration_requires_replan = True
             break
 
         patched_execution_plan = getattr(post_batch_result, "patched_execution_plan", None)
@@ -545,7 +547,7 @@ def _run_execution_iteration(
 
     iteration_summary = WorkflowIterationSummary(
         iteration_number=iteration_number,
-        plan_version=plan.plan_version,
+        plan_version=current_plan.plan_version,
         batch_ids_processed=processed_batch_ids,
         reopened_finalization=reopened_finalization,
         manual_review_required=manual_review_required,
@@ -560,8 +562,13 @@ def _run_execution_iteration(
         ),
     )
 
-    return iteration_summary, resulting_status, current_finalization_iteration_count
-
+    return (
+        iteration_summary,
+        resulting_status,
+        current_finalization_iteration_count,
+        current_plan,
+        iteration_requires_replan,
+    )
 
 def run_project_workflow(
     db: Session,
@@ -602,16 +609,22 @@ def run_project_workflow(
     final_status = "execution_in_progress"
     finalization_iteration_count = 0
 
-    for iteration_number in range(1, max_workflow_iterations + 1):
-        plan = generate_execution_plan(db=db, project_id=project_id)
-        persist_execution_plan(
-            db=db,
-            project_id=project_id,
-            plan=plan,
-            created_by="project_workflow_service",
-        )
+    active_plan: ExecutionPlan | None = None
 
-        execution_plan_generated = True
+    for iteration_number in range(1, max_workflow_iterations + 1):
+        if active_plan is None:
+            plan = generate_execution_plan(db=db, project_id=project_id)
+            persist_execution_plan(
+                db=db,
+                project_id=project_id,
+                plan=plan,
+                created_by="project_workflow_service",
+            )
+            execution_plan_generated = True
+            active_plan = plan
+        else:
+            plan = active_plan
+
         plan_version = plan.plan_version
 
         if not plan.execution_batches:
@@ -632,7 +645,13 @@ def run_project_workflow(
             )
             break
 
-        iteration_summary, resulting_status, finalization_iteration_count = _run_execution_iteration(
+        (
+            iteration_summary,
+            resulting_status,
+            finalization_iteration_count,
+            resulting_plan,
+            iteration_requires_replan,
+        ) = _run_execution_iteration(
             db=db,
             project_id=project_id,
             plan=plan,
@@ -640,6 +659,12 @@ def run_project_workflow(
             max_finalization_iterations=max_finalization_iterations,
             iteration_number=iteration_number,
         )
+
+        active_plan = resulting_plan
+        plan_version = active_plan.plan_version
+
+        if iteration_requires_replan:
+            active_plan = None
 
         iterations.append(iteration_summary)
         completed_batches.extend(iteration_summary.batch_ids_processed)
@@ -656,6 +681,7 @@ def run_project_workflow(
 
         if iteration_summary.reopened_finalization:
             final_status = "execution_in_progress"
+
             continue
 
         final_status = resulting_status
@@ -666,7 +692,7 @@ def run_project_workflow(
 
     if execution_plan_generated:
         try:
-            current_plan = generate_execution_plan(db=db, project_id=project_id)
+            current_plan = active_plan or generate_execution_plan(db=db, project_id=project_id)
             processed = set(completed_batches)
             blocked_batches = [
                 batch.batch_id

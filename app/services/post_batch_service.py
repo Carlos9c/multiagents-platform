@@ -43,18 +43,9 @@ from app.schemas.recovery_assignment import (
 from app.schemas.workflow_iteration_trace import WorkflowIterationTrace
 from app.services.artifacts import create_artifact
 from app.services.evaluation_service import evaluate_checkpoint, persist_evaluation_decision
-from app.services.execution_plan_patch_service import (
-    insert_patch_batch_after_batch,
-    persist_patched_execution_plan,
-)
 from app.services.post_batch_decision_service import (
     build_post_batch_decision_signals,
     resolve_post_batch_intent,
-)
-from app.services.recovery_assignment_client import call_recovery_assignment_model
-from app.services.recovery_assignment_compiler_service import (
-    RecoveryAssignmentCompilerError,
-    compile_recovery_assignment_plan,
 )
 from app.services.recovery_service import (
     build_recovery_context_entry,
@@ -66,6 +57,10 @@ from app.services.recovery_service import (
 from app.services.task_hierarchy_reconciliation_service import (
     TaskHierarchyReconciliationServiceError,
     reconcile_task_hierarchy_after_changes,
+)
+from app.services.live_plan_mutation_service import (
+    LivePlanMutationServiceError,
+    mutate_live_plan,
 )
 
 TERMINAL_RUN_STATUSES = {
@@ -1190,169 +1185,31 @@ def process_batch_after_execution(
 
     notes = resolved_intent.notes or "Post-batch processing completed with explicit checkpoint evaluation."
 
-    if resolved_intent.intent_type == "resequence":
-        if _should_run_immediate_resequence_patch(
-            intent=resolved_intent,
-            created_recovery_task_ids=created_recovery_task_ids,
-            evaluation_decision=evaluation_decision,
-        ):
-            patched_execution_plan = insert_patch_batch_after_batch(
-                plan=plan,
-                anchor_batch_id=batch.batch_id,
-                task_ids=created_recovery_task_ids,
-                goal="Execute recovery work required before continuing the pending plan.",
-                checkpoint_reason=(
-                    "Validate the inserted recovery patch batch before continuing the remaining plan."
-                ),
-            )
-
-            persist_patched_execution_plan(
-                db=db,
-                project_id=project_id,
-                plan=patched_execution_plan,
-            )
-
-            notes = (
-                f"{notes} A local patch batch was inserted into the current plan to execute "
-                f"recovery-created work before continuing."
-            )
-        else:
-            continue_execution = False
-            requires_replanning = False
-            requires_resequencing = True
-            requires_manual_review = False
-            is_stage_closed = False
-            status = "checkpoint_blocked"
-
-        patched_execution_plan = insert_patch_batch_after_batch(
-            plan=plan,
-            anchor_batch_id=batch.batch_id,
-            task_ids=created_recovery_task_ids,
-            goal="Execute recovery work required before continuing the pending plan.",
-            checkpoint_reason=(
-                "Validate the inserted recovery patch batch before continuing the remaining plan."
-            ),
-        )
-
-        persist_patched_execution_plan(
-            db=db,
-            project_id=project_id,
-            plan=patched_execution_plan,
-        )
-
-        notes = (
-            f"{notes} A local patch batch was inserted into the current plan to execute "
-            f"recovery-created work before continuing."
-        )
-
-    elif resolved_intent.intent_type == "assign":
-        if not created_recovery_task_ids:
-            raise PostBatchServiceError(
-                "Resolved assign intent requires newly created recovery tasks, but none were found."
-            )
-
-        assignment_input = _build_recovery_assignment_input(
-            db=db,
-            project=project,
-            plan=plan,
-            batch=batch,
-            evaluation_decision=evaluation_decision,
-            recovery_context=aggregated_recovery_context,
-            created_recovery_task_ids=created_recovery_task_ids,
-            executed_task_ids=executed_task_ids,
-            successful_task_ids=successful_task_ids,
-            problematic_run_ids=problematic_run_ids,
-            task_run_summaries=task_run_summaries,
-            resolved_action=resolved_action,
-        )
-
-        _persist_recovery_assignment_payload(
-            db=db,
-            project_id=project_id,
-            artifact_type="recovery_assignment_input",
-            payload=assignment_input.model_dump(mode="json"),
-        )
-
-        assignment_output = call_recovery_assignment_model(
-            assignment_input=assignment_input,
-        )
-
-        _persist_recovery_assignment_payload(
-            db=db,
-            project_id=project_id,
-            artifact_type="recovery_assignment_output",
-            payload=assignment_output.model_dump(mode="json"),
-        )
-
+    if resolved_intent.intent_type in {"resequence", "assign"}:
         try:
-            compiled_assignment = compile_recovery_assignment_plan(
+            mutation_result = mutate_live_plan(
+                db=db,
+                project=project,
                 plan=plan,
-                assignment_input=assignment_input,
-                assignment_output=assignment_output,
+                batch=batch,
+                resolved_intent=resolved_intent,
+                evaluation_decision=evaluation_decision,
+                recovery_context=aggregated_recovery_context,
+                created_recovery_task_ids=created_recovery_task_ids,
+                executed_task_ids=executed_task_ids,
+                successful_task_ids=successful_task_ids,
+                problematic_run_ids=problematic_run_ids,
+                task_run_summaries=task_run_summaries,
+                build_recovery_assignment_input_fn=_build_recovery_assignment_input,
+                persist_recovery_assignment_payload_fn=_persist_recovery_assignment_payload,
             )
-        except RecoveryAssignmentCompilerError as exc:
+        except LivePlanMutationServiceError as exc:
             raise PostBatchServiceError(
-                f"Recovery assignment compilation failed: {str(exc)}"
+                f"Live plan mutation failed: {str(exc)}"
             ) from exc
 
-        if compiled_assignment.requires_replan:
-            requires_replanning = True
-            requires_resequencing = False
-            requires_manual_review = False
-            continue_execution = False
-            is_stage_closed = False
-            resolved_action = "replan_remaining_work"
-            status = "checkpoint_blocked"
-            notes = (
-                f"{notes} Recovery assignment escalated to replanning because the newly created "
-                f"work revealed a structural conflict: {' '.join(compiled_assignment.notes).strip() or 'no extra notes'}"
-            )
-            resolved_decision_signals = list(
-                dict.fromkeys(resolved_decision_signals + ["assignment_escalated_to_replan"])
-            )
-        else:
-            if compiled_assignment.patched_execution_plan is None:
-                raise PostBatchServiceError(
-                    "Recovery assignment completed without a patched execution plan."
-                )
-
-            patched_execution_plan = compiled_assignment.patched_execution_plan
-
-            persist_patched_execution_plan(
-                db=db,
-                project_id=project_id,
-                plan=patched_execution_plan,
-                created_by="recovery_assignment_compiler_service",
-            )
-
-            _persist_recovery_assignment_payload(
-                db=db,
-                project_id=project_id,
-                artifact_type="recovery_assignment_compiled_plan",
-                payload={
-                    "strategy": compiled_assignment.strategy,
-                    "requires_replan": compiled_assignment.requires_replan,
-                    "assigned_task_ids": compiled_assignment.assigned_task_ids,
-                    "unassigned_task_ids": compiled_assignment.unassigned_task_ids,
-                    "compiled_cluster_assignments": [
-                        {
-                            "cluster_id": item.cluster_id,
-                            "task_ids_in_execution_order": item.task_ids_in_execution_order,
-                            "impact_type": item.impact_type,
-                            "placement_relation": item.placement_relation,
-                            "batch_assignment_mode": item.batch_assignment_mode,
-                            "target_batch_id": item.target_batch_id,
-                            "target_batch_name": item.target_batch_name,
-                            "intrabatch_placement_mode": item.intrabatch_placement_mode,
-                            "anchor_task_id": item.anchor_task_id,
-                            "rationale": item.rationale,
-                        }
-                        for item in compiled_assignment.compiled_cluster_assignments
-                    ],
-                    "notes": compiled_assignment.notes,
-                },
-            )
-
+        if mutation_result.mutation_kind == "assignment":
+            patched_execution_plan = mutation_result.patched_execution_plan
             continue_execution = True
             requires_replanning = False
             requires_resequencing = False
@@ -1360,12 +1217,60 @@ def process_batch_after_execution(
             is_stage_closed = False
             status = "completed_with_evaluation"
 
-            cluster_count = len(compiled_assignment.compiled_cluster_assignments)
+            assigned_task_ids = mutation_result.metadata.get("assigned_task_ids", [])
+            cluster_assignments = mutation_result.metadata.get(
+                "compiled_cluster_assignments",
+                [],
+            )
+            cluster_count = len(cluster_assignments)
+
             notes = (
                 f"{notes} Recovery assignment placed all new tasks before continuing. "
-                f"clusters_assigned={cluster_count}; assigned_task_ids={compiled_assignment.assigned_task_ids}."
+                f"clusters_assigned={cluster_count}; assigned_task_ids={assigned_task_ids}."
             )
 
+        elif mutation_result.mutation_kind == "escalated_to_replan":
+            patched_execution_plan = None
+            continue_execution = False
+            requires_replanning = True
+            requires_resequencing = False
+            requires_manual_review = False
+            is_stage_closed = False
+            resolved_action = "replan_remaining_work"
+            status = "checkpoint_blocked"
+            notes = (
+                f"{notes} Recovery assignment escalated to replanning because the newly created "
+                f"work revealed a structural conflict: {' '.join(mutation_result.notes).strip() or 'no extra notes'}"
+            )
+            resolved_decision_signals = list(
+                dict.fromkeys(resolved_decision_signals + ["assignment_escalated_to_replan"])
+            )
+
+        elif mutation_result.mutation_kind == "resequence_patch":
+            patched_execution_plan = mutation_result.patched_execution_plan
+            continue_execution = False
+            requires_replanning = False
+            requires_resequencing = True
+            requires_manual_review = False
+            is_stage_closed = False
+            status = "checkpoint_blocked"
+            if mutation_result.notes:
+                notes = f"{notes} {' '.join(mutation_result.notes)}"
+
+        elif mutation_result.mutation_kind == "resequence_deferred":
+            patched_execution_plan = None
+            continue_execution = False
+            requires_replanning = False
+            requires_resequencing = True
+            requires_manual_review = False
+            is_stage_closed = False
+            status = "checkpoint_blocked"
+
+        else:
+            raise PostBatchServiceError(
+                f"Unsupported mutation result '{mutation_result.mutation_kind}' for intent '{resolved_intent.intent_type}'."
+            )
+        
     elif resolved_intent.intent_type == "replan":
         continue_execution = False
         requires_replanning = True

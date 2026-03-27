@@ -133,6 +133,8 @@ def test_resolve_post_batch_decision_closes_stage_when_stage_completed():
         decision="stage_completed",
         project_stage_closed=True,
         recommended_next_action="close_stage",
+        is_final_batch=True,
+        remaining_batch_count=0,
     )
 
     resolved = resolve_post_batch_decision(signals)

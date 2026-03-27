@@ -18,7 +18,11 @@ from app.services.post_batch_service import (
     PostBatchServiceError,
     process_batch_after_execution,
 )
-
+from app.schemas.recovery import (
+        RecoveryContext,
+        RecoveryCreatedTaskRecord,
+        RecoveryDecisionSummary,
+    )
 
 def test_post_batch_continues_on_successful_intermediate_checkpoint(
     db_session,
@@ -1259,39 +1263,32 @@ def test_post_batch_runs_recovery_assignment_when_new_non_blocking_tasks_must_be
         "app.services.post_batch_service.persist_evaluation_decision",
         lambda **kwargs: None,
     )
+
     monkeypatch.setattr(
-        "app.services.post_batch_service.call_recovery_assignment_model",
+        "app.services.post_batch_service.mutate_live_plan",
         lambda **kwargs: types.SimpleNamespace(
-            strategy="continue_with_assignment",
-            model_dump=lambda mode="json": {
-                "strategy": "continue_with_assignment",
-                "clusters": [{"cluster_id": "cluster_1"}],
-            },
-        ),
-    )
-    monkeypatch.setattr(
-        "app.services.post_batch_service.compile_recovery_assignment_plan",
-        lambda **kwargs: types.SimpleNamespace(
-            strategy="continue_with_assignment",
-            requires_replan=False,
+            mutation_kind="assignment",
             patched_execution_plan=compiled_plan,
-            assigned_task_ids=[created_recovery_task.id],
-            unassigned_task_ids=[],
-            compiled_cluster_assignments=[
-                types.SimpleNamespace(
-                    cluster_id="cluster_1",
-                    task_ids_in_execution_order=[created_recovery_task.id],
-                    impact_type="additive_deferred",
-                    placement_relation="after_current_tail",
-                    batch_assignment_mode="new_patch_batch",
-                    target_batch_id="plan_2_batch_1_patch_1",
-                    target_batch_name="Plan 2 · Batch 1.1",
-                    intrabatch_placement_mode="not_applicable",
-                    anchor_task_id=None,
-                    rationale="Append the new task as a patch batch.",
-                )
-            ],
+            requires_replan=False,
             notes=["All new work was assigned safely."],
+            metadata={
+                "assigned_task_ids": [created_recovery_task.id],
+                "unassigned_task_ids": [],
+                "compiled_cluster_assignments": [
+                    {
+                        "cluster_id": "cluster_1",
+                        "task_ids_in_execution_order": [created_recovery_task.id],
+                        "impact_type": "additive_deferred",
+                        "placement_relation": "after_current_tail",
+                        "batch_assignment_mode": "new_patch_batch",
+                        "target_batch_id": "plan_2_batch_1_patch_1",
+                        "target_batch_name": "Plan 2 · Batch 1.1",
+                        "intrabatch_placement_mode": "not_applicable",
+                        "anchor_task_id": None,
+                        "rationale": "Append the new task as a patch batch.",
+                    }
+                ],
+            },
         ),
     )
 
@@ -1323,10 +1320,8 @@ def test_post_batch_runs_recovery_assignment_when_new_non_blocking_tasks_must_be
         .order_by(Artifact.id.asc())
         .all()
     ]
-    assert "recovery_assignment_input" in artifact_types
-    assert "recovery_assignment_output" in artifact_types
-    assert "recovery_assignment_compiled_plan" in artifact_types
-    assert "execution_plan_patch" in artifact_types
+    assert "post_batch_result" in artifact_types
+    assert "workflow_iteration_trace" in artifact_types
 
 
 def test_post_batch_final_batch_stays_open_when_recovery_assignment_extends_the_live_plan(
@@ -1452,39 +1447,32 @@ def test_post_batch_final_batch_stays_open_when_recovery_assignment_extends_the_
         "app.services.post_batch_service.persist_evaluation_decision",
         lambda **kwargs: None,
     )
+
     monkeypatch.setattr(
-        "app.services.post_batch_service.call_recovery_assignment_model",
+        "app.services.post_batch_service.mutate_live_plan",
         lambda **kwargs: types.SimpleNamespace(
-            strategy="continue_with_assignment",
-            model_dump=lambda mode="json": {
-                "strategy": "continue_with_assignment",
-                "clusters": [{"cluster_id": "cluster_1"}],
-            },
-        ),
-    )
-    monkeypatch.setattr(
-        "app.services.post_batch_service.compile_recovery_assignment_plan",
-        lambda **kwargs: types.SimpleNamespace(
-            strategy="continue_with_assignment",
-            requires_replan=False,
+            mutation_kind="assignment",
             patched_execution_plan=compiled_plan,
-            assigned_task_ids=[created_recovery_task.id],
-            unassigned_task_ids=[],
-            compiled_cluster_assignments=[
-                types.SimpleNamespace(
-                    cluster_id="cluster_1",
-                    task_ids_in_execution_order=[created_recovery_task.id],
-                    impact_type="additive_deferred",
-                    placement_relation="after_current_tail",
-                    batch_assignment_mode="new_patch_batch",
-                    target_batch_id="plan_3_batch_1_patch_1",
-                    target_batch_name="Plan 3 · Batch 1.1",
-                    intrabatch_placement_mode="not_applicable",
-                    anchor_task_id=None,
-                    rationale="Append the tail task after the old final batch.",
-                )
-            ],
-            notes=["The stage stays open until the new final batch is evaluated."],
+            requires_replan=False,
+            notes=["All new work was assigned safely."],
+            metadata={
+                "assigned_task_ids": [created_recovery_task.id],
+                "unassigned_task_ids": [],
+                "compiled_cluster_assignments": [
+                    {
+                        "cluster_id": "cluster_1",
+                        "task_ids_in_execution_order": [created_recovery_task.id],
+                        "impact_type": "additive_deferred",
+                        "placement_relation": "after_current_tail",
+                        "batch_assignment_mode": "new_patch_batch",
+                        "target_batch_id": "plan_2_batch_1_patch_1",
+                        "target_batch_name": "Plan 2 · Batch 1.1",
+                        "intrabatch_placement_mode": "not_applicable",
+                        "anchor_task_id": None,
+                        "rationale": "Append the new task as a patch batch.",
+                    }
+                ],
+            },
         ),
     )
 
@@ -1520,3 +1508,180 @@ def _get_latest_run_id_for_task(db_session, task_id: int) -> int:
     )
     assert run is not None
     return run.id
+
+
+def test_post_batch_consumes_assignment_mutation_result_from_live_plan_mutation_service(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    failed_task = make_task(
+        project_id=project.id,
+        title="Failed task",
+        status=TASK_STATUS_FAILED,
+    )
+    make_execution_run(
+        task_id=failed_task.id,
+        status="failed",
+        failure_type="validation",
+        failure_code="needs_followup",
+        work_summary="Task failed and produced recovery follow-up work.",
+    )
+    make_artifact(
+        project_id=project.id,
+        task_id=failed_task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"failed"}',
+    )
+
+    created_recovery_task = make_task(
+        project_id=project.id,
+        title="Recovery task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    pending_task = make_task(
+        project_id=project.id,
+        title="Pending task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [failed_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "task_ids": [pending_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ]
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="continue_current_plan",
+        recommended_next_action_reason="The new recovery work must be assigned into the active plan.",
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=False,
+        notes=["Continue after assigning new work."],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.generate_recovery_decision",
+        lambda **kwargs: types.SimpleNamespace(
+            source_task_id=failed_task.id,
+            source_run_id=1,
+            action="insert_followup",
+            reason="Create follow-up work.",
+            still_blocks_progress=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_recovery_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.materialize_recovery_decision",
+        lambda **kwargs: [created_recovery_task],
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.build_recovery_context_entry",
+        lambda **kwargs: RecoveryContext(
+            recovery_decisions=[
+                RecoveryDecisionSummary(
+                    source_task_id=failed_task.id,
+                    source_run_id=1,
+                    action="insert_followup",
+                    confidence="medium",
+                    reason="Create follow-up work.",
+                    still_blocks_progress=False,
+                    created_task_ids=[created_recovery_task.id],
+                )
+            ],
+            recovery_created_tasks=[
+                RecoveryCreatedTaskRecord(
+                    created_task_id=created_recovery_task.id,
+                    source_task_id=failed_task.id,
+                    source_run_id=1,
+                    title=created_recovery_task.title,
+                    planning_level=created_recovery_task.planning_level,
+                    executor_type=created_recovery_task.executor_type,
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.merge_recovery_contexts",
+        lambda contexts: contexts[0] if contexts else RecoveryContext(
+            recovery_decisions=[],
+            open_issues=[],
+            recovery_created_tasks=[],
+        ),
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.resolve_post_batch_intent",
+        lambda signals: types.SimpleNamespace(
+            intent_type="assign",
+            legacy_action="continue_current_plan",
+            mutation_scope="assignment",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=True,
+            requires_plan_mutation=True,
+            requires_all_new_tasks_assigned=True,
+            can_continue_after_application=True,
+            should_close_stage=False,
+            requires_manual_review=False,
+            reopened_finalization=False,
+            notes="New recovery work must be assigned into the active plan before the next batch starts.",
+            decision_signals=list(getattr(signals, "decision_signals", [])),
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.mutate_live_plan",
+        lambda **kwargs: types.SimpleNamespace(
+            mutation_kind="assignment",
+            patched_execution_plan=plan,
+            requires_replan=False,
+            notes=["Assigned successfully."],
+            metadata={
+                "assigned_task_ids": [created_recovery_task.id],
+                "compiled_cluster_assignments": [{"cluster_id": "cluster_1"}],
+            },
+        ),
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=False,
+    )
+
+    assert result.continue_execution is True
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+    assert result.patched_execution_plan is not None
+    assert f"assigned_task_ids=[{created_recovery_task.id}]" in result.notes
