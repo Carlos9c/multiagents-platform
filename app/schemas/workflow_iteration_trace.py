@@ -16,9 +16,18 @@ class WorkflowIterationTrace(BaseModel):
     successful_task_ids: list[int] = Field(default_factory=list)
     problematic_run_ids: list[int] = Field(default_factory=list)
     created_recovery_task_ids: list[int] = Field(default_factory=list)
+    source_run_ids_with_recovery: list[int] = Field(default_factory=list)
 
     resolved_action: str | None = None
     decision_signals_used: list[str] = Field(default_factory=list)
+
+    mutation_kind: str | None = None
+    patched_plan_version: int | None = Field(default=None, ge=1)
+    assigned_task_ids: list[int] = Field(default_factory=list)
+    unassigned_task_ids: list[int] = Field(default_factory=list)
+
+    preexisting_pending_valid_task_count: int = Field(default=0, ge=0)
+    new_recovery_pending_task_count: int = Field(default=0, ge=0)
 
     continue_execution: bool
     requires_resequencing: bool

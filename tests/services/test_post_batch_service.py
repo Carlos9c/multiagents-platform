@@ -3266,3 +3266,169 @@ def test_post_batch_uses_live_plan_mutation_service_for_recovery_assignment(
     assert mutation_calls[0]["batch"].batch_id == "batch_1"
     assert result.requires_replanning is False
     assert result.patched_execution_plan is not None
+
+
+def test_post_batch_trace_includes_mutation_and_recovery_link_fields(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+    make_recovery_decision,
+):
+    project = make_project()
+
+    failed_task = make_task(
+        project_id=project.id,
+        title="Failed task",
+        status=TASK_STATUS_FAILED,
+    )
+    future_task = make_task(
+        project_id=project.id,
+        title="Future task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    failed_run = make_execution_run(
+        task_id=failed_task.id,
+        status="failed",
+        failure_type="validation",
+        failure_code="needs_followup",
+        work_summary="Failed task created recovery work.",
+    )
+
+    make_artifact(
+        project_id=project.id,
+        task_id=failed_task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"failed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=40,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "batch_internal_id": "40_1",
+                "batch_index": 1,
+                "plan_version": 40,
+                "task_ids": [failed_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "batch_internal_id": "40_2",
+                "batch_index": 2,
+                "plan_version": 40,
+                "task_ids": [future_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    recovery_task = make_task(
+        project_id=project.id,
+        title="Recovery task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    recovery_decision = make_recovery_decision(
+        source_task_id=failed_task.id,
+        source_run_id=failed_run.id,
+        action="insert_followup",
+        still_blocks_progress=False,
+        created_tasks=[
+            {
+                "title": recovery_task.title,
+                "description": recovery_task.description,
+                "objective": recovery_task.objective,
+                "implementation_notes": recovery_task.implementation_notes,
+                "acceptance_criteria": recovery_task.acceptance_criteria,
+            }
+        ],
+        reason="Recovery work should be assigned into the current plan.",
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="continue_current_plan",
+        recommended_next_action_reason="Assign the new recovery task into the current plan.",
+        decision_signals=["remaining_plan_still_valid", "followup_tasks_created"],
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=False,
+        notes=["Assignment should proceed through live plan mutation."],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.generate_recovery_decision",
+        lambda **kwargs: recovery_decision,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_recovery_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.materialize_recovery_decision",
+        lambda **kwargs: [recovery_task],
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.mutate_live_plan",
+        lambda **kwargs: __import__("types").SimpleNamespace(
+            mutation_kind="assignment",
+            patched_execution_plan=plan,
+            requires_replan=False,
+            notes=["Assigned through live mutation."],
+            metadata={
+                "assigned_task_ids": [recovery_task.id],
+                "unassigned_task_ids": [],
+                "compiled_cluster_assignments": [
+                    {
+                        "cluster_id": "cluster_1",
+                        "task_ids_in_execution_order": [recovery_task.id],
+                    }
+                ],
+            },
+        ),
+    )
+
+    process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=True,
+    )
+
+    trace_artifact = (
+        db_session.query(Artifact)
+        .filter(
+            Artifact.project_id == project.id,
+            Artifact.artifact_type == "workflow_iteration_trace",
+        )
+        .order_by(Artifact.id.desc())
+        .first()
+    )
+
+    assert trace_artifact is not None
+    payload = json.loads(trace_artifact.content)
+
+    assert payload["mutation_kind"] == "assignment"
+    assert payload["patched_plan_version"] == 40
+    assert payload["assigned_task_ids"] == [recovery_task.id]
+    assert payload["unassigned_task_ids"] == []
+    assert payload["source_run_ids_with_recovery"] == [failed_run.id]
+    assert payload["preexisting_pending_valid_task_count"] == 1
+    assert payload["new_recovery_pending_task_count"] == 1

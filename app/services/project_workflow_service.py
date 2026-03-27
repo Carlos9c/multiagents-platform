@@ -435,6 +435,7 @@ def _run_execution_iteration(
     iteration_number: int,
     previously_completed_batch_ids: set[str] | None = None,
 ) -> tuple[WorkflowIterationSummary, str, int, ExecutionPlan, bool]:
+    starting_plan_version = plan.plan_version
     processed_batch_ids: list[str] = []
     reopened_finalization = False
     manual_review_required = False
@@ -444,6 +445,9 @@ def _run_execution_iteration(
 
     current_plan = plan
     current_index = 0
+    used_patched_plan = False
+    requires_replanning = False
+    requires_manual_review = False
     processed_batch_ids_set: set[str] = set()
     previously_completed_batch_ids = set(previously_completed_batch_ids or ())
 
@@ -472,6 +476,7 @@ def _run_execution_iteration(
             plan_version=current_plan.plan_version,
         )
 
+        patched_execution_plan = None
         post_batch_result = _process_batch_after_terminal_tasks(
             db=db,
             project_id=project_id,
@@ -533,6 +538,7 @@ def _run_execution_iteration(
             and not requires_manual_review
         ):
             current_plan = patched_execution_plan
+            used_patched_plan = True
             reopened_finalization = True
             resulting_status = "execution_in_progress"
             current_index += 1
@@ -551,12 +557,27 @@ def _run_execution_iteration(
         resulting_status = "awaiting_manual_review"
         break
 
+    ending_plan_version = current_plan.plan_version
+
+    processed_set = set(processed_batch_ids)
+    blocked_batch_ids_after_iteration = [
+        current_batch.batch_id
+        for current_batch in current_plan.execution_batches
+        if current_batch.batch_id not in processed_set
+        and current_batch.batch_id not in previously_completed_batch_ids
+    ]
+
     iteration_summary = WorkflowIterationSummary(
         iteration_number=iteration_number,
         plan_version=current_plan.plan_version,
+        starting_plan_version=starting_plan_version,
+        ending_plan_version=ending_plan_version,
         batch_ids_processed=processed_batch_ids,
+        blocked_batch_ids_after_iteration=blocked_batch_ids_after_iteration,
         reopened_finalization=reopened_finalization,
         manual_review_required=manual_review_required,
+        used_patched_plan=used_patched_plan,
+        replan_triggered=iteration_requires_replan,
         notes=(
             "Iteration ended because the stage was closed."
             if resulting_status == "stage_closed"
@@ -567,7 +588,6 @@ def _run_execution_iteration(
             else "Iteration completed."
         ),
     )
-
     return (
         iteration_summary,
         resulting_status,
@@ -641,9 +661,14 @@ def run_project_workflow(
                 WorkflowIterationSummary(
                     iteration_number=iteration_number,
                     plan_version=plan.plan_version,
+                    starting_plan_version=plan.plan_version,
+                    ending_plan_version=plan.plan_version,
                     batch_ids_processed=[],
+                    blocked_batch_ids_after_iteration=[],
                     reopened_finalization=False,
                     manual_review_required=True,
+                    used_patched_plan=False,
+                    replan_triggered=False,
                     notes=(
                         "Execution plan generation returned no batches. "
                         "Manual review is required because decomposition or sequencing produced no executable work."

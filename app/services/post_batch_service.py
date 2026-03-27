@@ -93,6 +93,13 @@ def _build_workflow_iteration_trace(
     checkpoint_id: str,
     created_recovery_task_ids: list[int],
     result: PostBatchResult,
+    mutation_kind: str | None,
+    patched_execution_plan: ExecutionPlan | None,
+    assigned_task_ids: list[int],
+    unassigned_task_ids: list[int],
+    source_run_ids_with_recovery: list[int],
+    preexisting_pending_valid_task_count: int,
+    new_recovery_pending_task_count: int,
 ) -> WorkflowIterationTrace:
     return WorkflowIterationTrace(
         project_id=project_id,
@@ -105,8 +112,15 @@ def _build_workflow_iteration_trace(
         successful_task_ids=list(result.successful_task_ids),
         problematic_run_ids=list(result.problematic_run_ids),
         created_recovery_task_ids=list(created_recovery_task_ids),
+        source_run_ids_with_recovery=list(source_run_ids_with_recovery),
         resolved_action=result.resolved_action,
         decision_signals_used=list(result.decision_signals_used),
+        mutation_kind=mutation_kind,
+        patched_plan_version=patched_execution_plan.plan_version if patched_execution_plan else None,
+        assigned_task_ids=list(assigned_task_ids),
+        unassigned_task_ids=list(unassigned_task_ids),
+        preexisting_pending_valid_task_count=preexisting_pending_valid_task_count,
+        new_recovery_pending_task_count=new_recovery_pending_task_count,
         continue_execution=result.continue_execution,
         requires_resequencing=result.requires_resequencing,
         requires_replanning=result.requires_replanning,
@@ -1207,6 +1221,14 @@ def process_batch_after_execution(
     patched_execution_plan: ExecutionPlan | None = None
     finalization_guard_triggered = False
 
+    mutation_kind: str | None = None
+    assigned_task_ids: list[int] = []
+    unassigned_task_ids: list[int] = []
+    source_run_ids_with_recovery = [
+        decision.source_run_id
+        for decision in aggregated_recovery_context.recovery_decisions
+    ]
+
     if continue_execution:
         status = "completed_with_evaluation"
     else:
@@ -1237,10 +1259,13 @@ def process_batch_after_execution(
                 f"Live plan mutation failed: {str(exc)}"
             ) from exc
 
+        mutation_kind = mutation_result.mutation_kind
+        assigned_task_ids = list(mutation_result.metadata.get("assigned_task_ids", []))
+        unassigned_task_ids = list(mutation_result.metadata.get("unassigned_task_ids", []))
+
         if mutation_result.mutation_kind == "assignment":
             patched_execution_plan = mutation_result.patched_execution_plan
 
-            assigned_task_ids = mutation_result.metadata.get("assigned_task_ids", [])
             cluster_assignments = mutation_result.metadata.get(
                 "compiled_cluster_assignments",
                 [],
@@ -1438,6 +1463,13 @@ def process_batch_after_execution(
         checkpoint_id=checkpoint.checkpoint_id,
         created_recovery_task_ids=created_recovery_task_ids,
         result=result,
+        mutation_kind=mutation_kind,
+        patched_execution_plan=patched_execution_plan,
+        assigned_task_ids=assigned_task_ids,
+        unassigned_task_ids=unassigned_task_ids,
+        source_run_ids_with_recovery=source_run_ids_with_recovery,
+        preexisting_pending_valid_task_count=preexisting_pending_valid_task_count,
+        new_recovery_pending_task_count=new_recovery_pending_task_count,
     )
 
     if persist_result:
