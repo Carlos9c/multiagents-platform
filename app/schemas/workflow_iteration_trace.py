@@ -38,5 +38,5 @@ class WorkflowIterationTrace(BaseModel):
     finalization_iteration_count: int = Field(..., ge=0)
     max_finalization_iterations: int = Field(..., ge=0)
     finalization_guard_triggered: bool = False
-
+    
     notes: str = Field(..., min_length=5)

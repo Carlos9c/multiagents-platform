@@ -145,9 +145,14 @@ class PostBatchResult(BaseModel):
                     "checkpoint_blocked is incompatible with a closed stage."
                 )
 
-        if self.requires_manual_review and not self.evaluation_decision.manual_review_required:
+        if (
+            self.requires_manual_review
+            and not self.evaluation_decision.manual_review_required
+            and not self.finalization_guard_triggered
+        ):
             raise ValueError(
-                "requires_manual_review=true must align with evaluation_decision.manual_review_required=true."
+                "requires_manual_review=true must align with evaluation_decision.manual_review_required=true "
+                "unless manual review was triggered by the finalization guard."
             )
 
         return self

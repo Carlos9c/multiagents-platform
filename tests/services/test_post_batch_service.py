@@ -3432,3 +3432,571 @@ def test_post_batch_trace_includes_mutation_and_recovery_link_fields(
     assert payload["source_run_ids_with_recovery"] == [failed_run.id]
     assert payload["preexisting_pending_valid_task_count"] == 1
     assert payload["new_recovery_pending_task_count"] == 1
+
+def test_post_batch_completed_with_evaluation_has_no_blocking_flags(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    task = make_task(
+        project_id=project.id,
+        title="Completed task",
+        status="completed",
+    )
+
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Task completed successfully.",
+    )
+
+    make_artifact(
+        project_id=project.id,
+        task_id=task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"completed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=80,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ],
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="continue_current_plan",
+        recommended_next_action_reason="The plan can continue normally.",
+        decision_signals=["remaining_plan_still_valid"],
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=False,
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=False,
+    )
+
+    assert result.status == "completed_with_evaluation"
+    assert result.continue_execution is True
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+    assert result.requires_manual_review is False
+
+def test_post_batch_project_stage_closed_has_no_blocking_flags(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    task = make_task(
+        project_id=project.id,
+        title="Final completed task",
+        status="completed",
+    )
+
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Final task completed successfully.",
+    )
+
+    make_artifact(
+        project_id=project.id,
+        task_id=task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"completed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=81,
+        batches=[
+            {
+                "batch_id": "batch_final",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ],
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_completed",
+        project_stage_closed=True,
+        stage_goals_satisfied=True,
+        recommended_next_action="close_stage",
+        recommended_next_action_reason="The stage goals are fully satisfied.",
+        decision_signals=["stage_goals_satisfied", "close_stage"],
+        remaining_plan_still_valid=True,
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_final",
+        persist_result=False,
+    )
+
+    assert result.status == "project_stage_closed"
+    assert result.continue_execution is False
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+    assert result.requires_manual_review is False
+
+def test_post_batch_finalization_guard_blocked_requires_only_manual_review(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    task = make_task(
+        project_id=project.id,
+        title="Final task requiring repeated resequencing",
+        status="completed",
+    )
+
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Final task completed but triggered finalization reopening.",
+    )
+
+    make_artifact(
+        project_id=project.id,
+        task_id=task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"completed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=82,
+        batches=[
+            {
+                "batch_id": "batch_final",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ],
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="resequence_remaining_batches",
+        recommended_next_action_reason="Finalization must be reopened again.",
+        decision_signals=["remaining_plan_still_valid", "followup_tasks_created"],
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=True,
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.mutate_live_plan",
+        lambda **kwargs: types.SimpleNamespace(
+            mutation_kind="resequence_deferred",
+            patched_execution_plan=None,
+            requires_replan=False,
+            notes=["Deferred resequence at finalization."],
+            metadata={},
+        ),
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_final",
+        persist_result=False,
+        finalization_iteration_count=2,
+        max_finalization_iterations=2,
+    )
+
+    assert result.status == "finalization_guard_blocked"
+    assert result.continue_execution is False
+    assert result.requires_manual_review is True
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+
+def test_post_batch_finalization_reopened_never_continues_execution(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    task = make_task(
+        project_id=project.id,
+        title="Final task reopening finalization",
+        status="completed",
+    )
+
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Final task completed but further finalization work is needed.",
+    )
+
+    make_artifact(
+        project_id=project.id,
+        task_id=task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"completed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=83,
+        batches=[
+            {
+                "batch_id": "batch_final",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ],
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="resequence_remaining_batches",
+        recommended_next_action_reason="Finalization needs one more pass.",
+        decision_signals=["remaining_plan_still_valid", "followup_tasks_created"],
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=True,
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.mutate_live_plan",
+        lambda **kwargs: types.SimpleNamespace(
+            mutation_kind="resequence_deferred",
+            patched_execution_plan=None,
+            requires_replan=False,
+            notes=["Deferred resequence at finalization."],
+            metadata={},
+        ),
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_final",
+        persist_result=False,
+        finalization_iteration_count=0,
+        max_finalization_iterations=2,
+    )
+
+    assert result.status == "finalization_reopened"
+    assert result.continue_execution is False
+
+
+def test_post_batch_finalization_reopened_has_consistent_flags(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    task = make_task(
+        project_id=project.id,
+        title="Final task reopening finalization",
+        status="completed",
+    )
+
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Final task completed but requires another finalization pass.",
+    )
+
+    make_artifact(
+        project_id=project.id,
+        task_id=task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"completed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=84,
+        batches=[
+            {
+                "batch_id": "batch_final",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ],
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="resequence_remaining_batches",
+        recommended_next_action_reason="One more finalization pass is needed.",
+        decision_signals=["remaining_plan_still_valid", "followup_tasks_created"],
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=True,
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.mutate_live_plan",
+        lambda **kwargs: types.SimpleNamespace(
+            mutation_kind="resequence_deferred",
+            patched_execution_plan=None,
+            requires_replan=False,
+            notes=["Deferred resequence during finalization."],
+            metadata={},
+        ),
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_final",
+        persist_result=False,
+        finalization_iteration_count=0,
+        max_finalization_iterations=2,
+    )
+
+    assert result.status == "finalization_reopened"
+    assert result.continue_execution is False
+    assert result.requires_manual_review is False
+    assert result.finalization_guard_triggered is False
+    assert result.finalization_iteration_count == 1
+
+
+def test_post_batch_project_stage_closed_has_consistent_flags(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    task = make_task(
+        project_id=project.id,
+        title="Final completed task",
+        status="completed",
+    )
+
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Final task completed successfully.",
+    )
+
+    make_artifact(
+        project_id=project.id,
+        task_id=task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"completed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=85,
+        batches=[
+            {
+                "batch_id": "batch_final",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ],
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_completed",
+        project_stage_closed=True,
+        stage_goals_satisfied=True,
+        recommended_next_action="close_stage",
+        recommended_next_action_reason="The stage goals are fully satisfied.",
+        decision_signals=["stage_goals_satisfied", "close_stage"],
+        remaining_plan_still_valid=True,
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_final",
+        persist_result=False,
+    )
+
+    assert result.status == "project_stage_closed"
+    assert result.continue_execution is False
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+    assert result.requires_manual_review is False
+    assert result.finalization_guard_triggered is False
+
+
+def test_post_batch_completed_with_evaluation_has_consistent_flags(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    task = make_task(
+        project_id=project.id,
+        title="Completed task",
+        status="completed",
+    )
+
+    make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+        work_summary="Task completed successfully.",
+    )
+
+    make_artifact(
+        project_id=project.id,
+        task_id=task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"completed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=86,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [task.id],
+                "evaluation_focus": ["functional_coverage"],
+            }
+        ],
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="continue_current_plan",
+        recommended_next_action_reason="The remaining plan is still valid and execution can continue.",
+        decision_signals=["remaining_plan_still_valid"],
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=False,
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=False,
+    )
+
+    assert result.status == "completed_with_evaluation"
+    assert result.continue_execution is True
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+    assert result.requires_manual_review is False
+    assert result.finalization_guard_triggered is False

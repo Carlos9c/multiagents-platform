@@ -316,6 +316,7 @@ def _persist_workflow_batch_trace(
     iteration_number: int,
     task_ids: list[int],
     post_batch_result,
+    patched_plan_version: int | None = None,
 ) -> None:
     task_run_summaries: list[dict] = []
 
@@ -358,8 +359,12 @@ def _persist_workflow_batch_trace(
             "finalization_iteration_count",
             0,
         ),
+        "resolved_action": getattr(post_batch_result, "resolved_action", None),
+        "decision_signals_used": getattr(post_batch_result, "decision_signals_used", []),
+        "patched_plan_version": patched_plan_version,
         "notes": getattr(post_batch_result, "notes", None),
     }
+
 
     create_artifact(
         db=db,
@@ -476,7 +481,6 @@ def _run_execution_iteration(
             plan_version=current_plan.plan_version,
         )
 
-        patched_execution_plan = None
         post_batch_result = _process_batch_after_terminal_tasks(
             db=db,
             project_id=project_id,
@@ -485,6 +489,12 @@ def _run_execution_iteration(
             current_finalization_iteration_count=current_finalization_iteration_count,
             max_finalization_iterations=max_finalization_iterations,
             checkpoint_artifact_window_start_exclusive=checkpoint_artifact_window_start_exclusive,
+        )
+        batch_patched_execution_plan = getattr(post_batch_result, "patched_execution_plan", None)
+        batch_patched_plan_version = (
+            batch_patched_execution_plan.plan_version
+            if batch_patched_execution_plan is not None
+            else None
         )
 
         _persist_workflow_batch_trace(
@@ -495,6 +505,7 @@ def _run_execution_iteration(
             iteration_number=iteration_number,
             task_ids=batch.task_ids,
             post_batch_result=post_batch_result,
+            patched_plan_version=batch_patched_plan_version,
         )
 
         processed_batch_ids.append(batch.batch_id)

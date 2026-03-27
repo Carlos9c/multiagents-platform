@@ -1,5 +1,7 @@
 import types
+import json
 
+from app.models.artifact import Artifact
 import pytest
 
 from app.models.project import Project
@@ -1929,3 +1931,1284 @@ def test_workflow_iteration_summary_tracks_plan_transition_and_blocked_batches(
     assert iteration.replan_triggered is False
     assert iteration.batch_ids_processed == ["batch_1", "batch_1_patch_1"]
     assert iteration.blocked_batch_ids_after_iteration == ["batch_2"]
+
+
+def test_workflow_batch_trace_includes_resolved_action_decision_signals_and_patched_plan_version(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project(
+        name="Workflow batch trace enrichment",
+        description="Project for validating enriched workflow_batch_trace payload",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_1 = make_task(
+        project_id=project.id,
+        title="Atomic task 1",
+        status=TASK_STATUS_PENDING,
+    )
+    patch_task = make_task(
+        project_id=project.id,
+        title="Patched task",
+        status=TASK_STATUS_PENDING,
+    )
+    task_2 = make_task(
+        project_id=project.id,
+        title="Atomic task 2",
+        status=TASK_STATUS_PENDING,
+    )
+
+    initial_plan = make_execution_plan(
+        plan_version=60,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "batch_internal_id": "60_1",
+                "batch_index": 1,
+                "plan_version": 60,
+                "task_ids": [task_1.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "batch_internal_id": "60_2",
+                "batch_index": 2,
+                "plan_version": 60,
+                "task_ids": [task_2.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    patched_plan = make_execution_plan(
+        plan_version=60,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "batch_internal_id": "60_1",
+                "batch_index": 1,
+                "plan_version": 60,
+                "task_ids": [task_1.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_1_patch_1",
+                "batch_internal_id": "60_1_p1",
+                "batch_index": 1,
+                "plan_version": 60,
+                "task_ids": [patch_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "batch_internal_id": "60_2",
+                "batch_index": 2,
+                "plan_version": 60,
+                "task_ids": [task_2.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        lambda db, project_id: initial_plan,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    def _fake_execute_task_sync(db, task_id):
+        return types.SimpleNamespace(
+            final_task_status="completed",
+            validation_decision="completed",
+            executor_type=EXECUTION_ENGINE,
+        )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.execute_task_sync",
+        _fake_execute_task_sync,
+    )
+
+    def _fake_post_batch(
+        db,
+        project_id,
+        plan,
+        batch_id,
+        current_finalization_iteration_count,
+        max_finalization_iterations,
+        checkpoint_artifact_window_start_exclusive,
+    ):
+        if batch_id == "batch_1":
+            return types.SimpleNamespace(
+                status="completed_with_evaluation",
+                continue_execution=True,
+                requires_manual_review=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                finalization_guard_triggered=False,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="continue_current_plan",
+                decision_signals_used=[
+                    "remaining_plan_still_valid",
+                    "followup_tasks_created",
+                ],
+                patched_execution_plan=patched_plan,
+                notes="Recovery work was assigned into the live plan.",
+            )
+
+        if batch_id == "batch_1_patch_1":
+            return types.SimpleNamespace(
+                status="checkpoint_blocked",
+                continue_execution=False,
+                requires_manual_review=True,
+                requires_replanning=False,
+                requires_resequencing=False,
+                finalization_guard_triggered=False,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="manual_review",
+                decision_signals_used=["manual_review_required"],
+                patched_execution_plan=None,
+                notes="Manual review required after patch batch.",
+            )
+
+        raise AssertionError(f"Unexpected batch_id {batch_id}")
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._process_batch_after_terminal_tasks",
+        _fake_post_batch,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=2,
+        max_finalization_iterations=2,
+    )
+
+    assert result.status == "awaiting_manual_review"
+
+    trace_artifacts = (
+        db_session.query(Artifact)
+        .filter(
+            Artifact.project_id == project.id,
+            Artifact.artifact_type == "workflow_batch_trace",
+        )
+        .order_by(Artifact.id.asc())
+        .all()
+    )
+
+    assert len(trace_artifacts) == 2
+
+    first_payload = json.loads(trace_artifacts[0].content)
+    second_payload = json.loads(trace_artifacts[1].content)
+
+    assert first_payload["batch_id"] == "batch_1"
+    assert first_payload["resolved_action"] == "continue_current_plan"
+    assert first_payload["decision_signals_used"] == [
+        "remaining_plan_still_valid",
+        "followup_tasks_created",
+    ]
+    assert first_payload["patched_plan_version"] == 60
+
+    assert second_payload["batch_id"] == "batch_1_patch_1"
+    assert second_payload["resolved_action"] == "manual_review"
+    assert second_payload["decision_signals_used"] == ["manual_review_required"]
+    assert second_payload["patched_plan_version"] is None
+
+
+def test_workflow_batch_trace_iteration_summary_and_result_blocked_batches_are_consistent(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project(
+        name="Workflow blocked batch consistency",
+        description="Project for validating consistency across workflow trace outputs",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_1 = make_task(
+        project_id=project.id,
+        title="Atomic task 1",
+        status=TASK_STATUS_PENDING,
+    )
+    patch_task = make_task(
+        project_id=project.id,
+        title="Patched task",
+        status=TASK_STATUS_PENDING,
+    )
+    task_2 = make_task(
+        project_id=project.id,
+        title="Atomic task 2",
+        status=TASK_STATUS_PENDING,
+    )
+    task_3 = make_task(
+        project_id=project.id,
+        title="Atomic task 3",
+        status=TASK_STATUS_PENDING,
+    )
+
+    initial_plan = make_execution_plan(
+        plan_version=70,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "batch_internal_id": "70_1",
+                "batch_index": 1,
+                "plan_version": 70,
+                "task_ids": [task_1.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "batch_internal_id": "70_2",
+                "batch_index": 2,
+                "plan_version": 70,
+                "task_ids": [task_2.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_3",
+                "batch_internal_id": "70_3",
+                "batch_index": 3,
+                "plan_version": 70,
+                "task_ids": [task_3.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    patched_plan = make_execution_plan(
+        plan_version=70,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "batch_internal_id": "70_1",
+                "batch_index": 1,
+                "plan_version": 70,
+                "task_ids": [task_1.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_1_patch_1",
+                "batch_internal_id": "70_1_p1",
+                "batch_index": 1,
+                "plan_version": 70,
+                "task_ids": [patch_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "batch_internal_id": "70_2",
+                "batch_index": 2,
+                "plan_version": 70,
+                "task_ids": [task_2.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_3",
+                "batch_internal_id": "70_3",
+                "batch_index": 3,
+                "plan_version": 70,
+                "task_ids": [task_3.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        lambda db, project_id: initial_plan,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    def _fake_execute_task_sync(db, task_id):
+        return types.SimpleNamespace(
+            final_task_status="completed",
+            validation_decision="completed",
+            executor_type=EXECUTION_ENGINE,
+        )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.execute_task_sync",
+        _fake_execute_task_sync,
+    )
+
+    def _fake_post_batch(
+        db,
+        project_id,
+        plan,
+        batch_id,
+        current_finalization_iteration_count,
+        max_finalization_iterations,
+        checkpoint_artifact_window_start_exclusive,
+    ):
+        if batch_id == "batch_1":
+            return types.SimpleNamespace(
+                status="completed_with_evaluation",
+                continue_execution=True,
+                requires_manual_review=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                finalization_guard_triggered=False,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="continue_current_plan",
+                decision_signals_used=["remaining_plan_still_valid", "followup_tasks_created"],
+                patched_execution_plan=patched_plan,
+                notes="Recovery work was assigned into the live plan.",
+            )
+
+        if batch_id == "batch_1_patch_1":
+            return types.SimpleNamespace(
+                status="completed_with_evaluation",
+                continue_execution=True,
+                requires_manual_review=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                finalization_guard_triggered=False,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="continue_current_plan",
+                decision_signals_used=["patched_plan_continues"],
+                patched_execution_plan=None,
+                notes="Patch batch completed successfully.",
+            )
+
+        if batch_id == "batch_2":
+            return types.SimpleNamespace(
+                status="checkpoint_blocked",
+                continue_execution=False,
+                requires_manual_review=True,
+                requires_replanning=False,
+                requires_resequencing=False,
+                finalization_guard_triggered=False,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="manual_review",
+                decision_signals_used=["manual_review_required"],
+                patched_execution_plan=None,
+                notes="Manual review required before continuing to final batch.",
+            )
+
+        raise AssertionError(f"Unexpected batch_id {batch_id}")
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._process_batch_after_terminal_tasks",
+        _fake_post_batch,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=2,
+        max_finalization_iterations=2,
+    )
+
+    assert result.status == "awaiting_manual_review"
+    assert result.manual_review_required is True
+    assert result.blocked_batches == ["batch_3"]
+
+    assert len(result.iterations) == 1
+    iteration = result.iterations[0]
+    assert iteration.batch_ids_processed == ["batch_1", "batch_1_patch_1", "batch_2"]
+    assert iteration.blocked_batch_ids_after_iteration == ["batch_3"]
+
+    trace_artifacts = (
+        db_session.query(Artifact)
+        .filter(
+            Artifact.project_id == project.id,
+            Artifact.artifact_type == "workflow_batch_trace",
+        )
+        .order_by(Artifact.id.asc())
+        .all()
+    )
+
+    assert len(trace_artifacts) == 3
+
+    last_trace_payload = json.loads(trace_artifacts[-1].content)
+    assert last_trace_payload["batch_id"] == "batch_2"
+    assert last_trace_payload["resolved_action"] == "manual_review"
+
+    assert iteration.blocked_batch_ids_after_iteration == result.blocked_batches == ["batch_3"]
+
+
+def test_workflow_result_matches_last_iteration_when_manual_review_stops_execution(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project(
+        name="Workflow result consistency on manual review stop",
+        description="Project for validating workflow-level status consistency",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_1 = make_task(
+        project_id=project.id,
+        title="Atomic task 1",
+        status=TASK_STATUS_PENDING,
+    )
+    task_2 = make_task(
+        project_id=project.id,
+        title="Atomic task 2",
+        status=TASK_STATUS_PENDING,
+    )
+    task_3 = make_task(
+        project_id=project.id,
+        title="Atomic task 3",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        plan_version=90,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [task_1.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "task_ids": [task_2.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_3",
+                "task_ids": [task_3.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        lambda db, project_id: plan,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    def _fake_execute_task_sync(db, task_id):
+        return types.SimpleNamespace(
+            final_task_status="completed",
+            validation_decision="completed",
+            executor_type=EXECUTION_ENGINE,
+        )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.execute_task_sync",
+        _fake_execute_task_sync,
+    )
+
+    def _fake_post_batch(
+        db,
+        project_id,
+        plan,
+        batch_id,
+        current_finalization_iteration_count,
+        max_finalization_iterations,
+        checkpoint_artifact_window_start_exclusive,
+    ):
+        if batch_id == "batch_1":
+            return types.SimpleNamespace(
+                status="completed_with_evaluation",
+                continue_execution=True,
+                requires_manual_review=False,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="continue_current_plan",
+                decision_signals_used=["remaining_plan_still_valid"],
+                notes="Continue to the next batch.",
+            )
+
+        if batch_id == "batch_2":
+            return types.SimpleNamespace(
+                status="checkpoint_blocked",
+                continue_execution=False,
+                requires_manual_review=True,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="manual_review",
+                decision_signals_used=["manual_review_required"],
+                notes="Manual review required before final batch.",
+            )
+
+        raise AssertionError(f"Unexpected batch_id {batch_id}")
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._process_batch_after_terminal_tasks",
+        _fake_post_batch,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=2,
+        max_finalization_iterations=2,
+    )
+
+    assert result.status == "awaiting_manual_review"
+    assert result.manual_review_required is True
+    assert result.final_stage_closed is False
+    assert result.blocked_batches == ["batch_3"]
+
+    assert len(result.iterations) == 1
+    last_iteration = result.iterations[-1]
+    assert last_iteration.manual_review_required is True
+    assert last_iteration.blocked_batch_ids_after_iteration == ["batch_3"]
+
+
+def test_workflow_artifacts_and_results_tell_a_consistent_execution_story(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project(
+        name="Workflow full story reconstruction",
+        description="Project for validating consistency across workflow traces and result views",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_1 = make_task(
+        project_id=project.id,
+        title="Atomic task 1",
+        status=TASK_STATUS_PENDING,
+    )
+    patch_task = make_task(
+        project_id=project.id,
+        title="Patch task",
+        status=TASK_STATUS_PENDING,
+    )
+    task_2 = make_task(
+        project_id=project.id,
+        title="Atomic task 2",
+        status=TASK_STATUS_PENDING,
+    )
+    task_3 = make_task(
+        project_id=project.id,
+        title="Atomic task 3",
+        status=TASK_STATUS_PENDING,
+    )
+
+    initial_plan = make_execution_plan(
+        plan_version=100,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "batch_internal_id": "100_1",
+                "batch_index": 1,
+                "plan_version": 100,
+                "task_ids": [task_1.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "batch_internal_id": "100_2",
+                "batch_index": 2,
+                "plan_version": 100,
+                "task_ids": [task_2.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_3",
+                "batch_internal_id": "100_3",
+                "batch_index": 3,
+                "plan_version": 100,
+                "task_ids": [task_3.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    patched_plan = make_execution_plan(
+        plan_version=100,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "batch_internal_id": "100_1",
+                "batch_index": 1,
+                "plan_version": 100,
+                "task_ids": [task_1.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_1_patch_1",
+                "batch_internal_id": "100_1_p1",
+                "batch_index": 1,
+                "plan_version": 100,
+                "task_ids": [patch_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "batch_internal_id": "100_2",
+                "batch_index": 2,
+                "plan_version": 100,
+                "task_ids": [task_2.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_3",
+                "batch_internal_id": "100_3",
+                "batch_index": 3,
+                "plan_version": 100,
+                "task_ids": [task_3.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        lambda db, project_id: initial_plan,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    def _fake_execute_task_sync(db, task_id):
+        return types.SimpleNamespace(
+            final_task_status="completed",
+            validation_decision="completed",
+            executor_type=EXECUTION_ENGINE,
+        )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.execute_task_sync",
+        _fake_execute_task_sync,
+    )
+
+    def _fake_post_batch(
+        db,
+        project_id,
+        plan,
+        batch_id,
+        current_finalization_iteration_count,
+        max_finalization_iterations,
+        checkpoint_artifact_window_start_exclusive,
+    ):
+        if batch_id == "batch_1":
+            return types.SimpleNamespace(
+                status="completed_with_evaluation",
+                continue_execution=True,
+                requires_manual_review=False,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                patched_execution_plan=patched_plan,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="continue_current_plan",
+                decision_signals_used=[
+                    "remaining_plan_still_valid",
+                    "followup_tasks_created",
+                ],
+                notes="Recovery work was inserted into the live plan.",
+            )
+
+        if batch_id == "batch_1_patch_1":
+            return types.SimpleNamespace(
+                status="completed_with_evaluation",
+                continue_execution=True,
+                requires_manual_review=False,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="continue_current_plan",
+                decision_signals_used=["patched_plan_continues"],
+                notes="Patch batch completed successfully.",
+            )
+
+        if batch_id == "batch_2":
+            return types.SimpleNamespace(
+                status="checkpoint_blocked",
+                continue_execution=False,
+                requires_manual_review=True,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="manual_review",
+                decision_signals_used=["manual_review_required"],
+                notes="Manual review required before final batch.",
+            )
+
+        raise AssertionError(f"Unexpected batch_id {batch_id}")
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._process_batch_after_terminal_tasks",
+        _fake_post_batch,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=2,
+        max_finalization_iterations=2,
+    )
+
+    assert result.status == "awaiting_manual_review"
+    assert result.manual_review_required is True
+    assert result.final_stage_closed is False
+    assert result.completed_batches == ["batch_1", "batch_1_patch_1", "batch_2"]
+    assert result.blocked_batches == ["batch_3"]
+
+    assert len(result.iterations) == 1
+    iteration = result.iterations[0]
+    assert iteration.batch_ids_processed == ["batch_1", "batch_1_patch_1", "batch_2"]
+    assert iteration.blocked_batch_ids_after_iteration == ["batch_3"]
+    assert iteration.used_patched_plan is True
+    assert iteration.replan_triggered is False
+    assert iteration.manual_review_required is True
+
+    batch_trace_artifacts = (
+        db_session.query(Artifact)
+        .filter(
+            Artifact.project_id == project.id,
+            Artifact.artifact_type == "workflow_batch_trace",
+        )
+        .order_by(Artifact.id.asc())
+        .all()
+    )
+
+    assert len(batch_trace_artifacts) == 3
+
+    batch_trace_payloads = [json.loads(item.content) for item in batch_trace_artifacts]
+    assert [payload["batch_id"] for payload in batch_trace_payloads] == [
+        "batch_1",
+        "batch_1_patch_1",
+        "batch_2",
+    ]
+
+    assert batch_trace_payloads[0]["patched_plan_version"] == 100
+    assert batch_trace_payloads[0]["resolved_action"] == "continue_current_plan"
+
+    assert batch_trace_payloads[1]["patched_plan_version"] is None
+    assert batch_trace_payloads[1]["resolved_action"] == "continue_current_plan"
+
+    assert batch_trace_payloads[2]["patched_plan_version"] is None
+    assert batch_trace_payloads[2]["resolved_action"] == "manual_review"
+
+    assert iteration.blocked_batch_ids_after_iteration == result.blocked_batches == ["batch_3"]
+
+
+def test_workflow_completed_batches_never_contains_duplicates(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project(
+        name="Workflow completed batches uniqueness invariant",
+        description="Project for validating that completed_batches never contains duplicates",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_1 = make_task(
+        project_id=project.id,
+        title="Atomic task 1",
+        status=TASK_STATUS_PENDING,
+    )
+    task_2 = make_task(
+        project_id=project.id,
+        title="Atomic task 2",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        plan_version=110,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [task_1.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "task_ids": [task_2.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+
+    generation_calls = []
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        lambda db, project_id: generation_calls.append("generate") or plan,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    def _fake_execute_task_sync(db, task_id):
+        return types.SimpleNamespace(
+            final_task_status="completed",
+            validation_decision="completed",
+            executor_type=EXECUTION_ENGINE,
+        )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.execute_task_sync",
+        _fake_execute_task_sync,
+    )
+
+    def _fake_post_batch(
+        db,
+        project_id,
+        plan,
+        batch_id,
+        current_finalization_iteration_count,
+        max_finalization_iterations,
+        checkpoint_artifact_window_start_exclusive,
+    ):
+        if batch_id == "batch_1":
+            return types.SimpleNamespace(
+                status="checkpoint_blocked",
+                continue_execution=False,
+                requires_manual_review=False,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=True,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="resequence_remaining_batches",
+                decision_signals_used=["remaining_plan_still_valid"],
+                notes="Deferred resequencing after batch 1.",
+            )
+
+        if batch_id == "batch_2":
+            return types.SimpleNamespace(
+                status="project_stage_closed",
+                continue_execution=False,
+                requires_manual_review=False,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="close_stage",
+                decision_signals_used=["stage_goals_satisfied"],
+                notes="Stage closed.",
+            )
+
+        raise AssertionError(f"Unexpected batch_id {batch_id}")
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._process_batch_after_terminal_tasks",
+        _fake_post_batch,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=3,
+        max_finalization_iterations=2,
+    )
+
+    assert result.status == "stage_closed"
+    assert result.completed_batches == ["batch_1", "batch_2"]
+    assert len(result.completed_batches) == len(set(result.completed_batches))
+
+
+def test_workflow_invalidates_active_plan_and_regenerates_when_iteration_requires_replan(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project(
+        name="Workflow replan invalidates active plan invariant",
+        description="Project for validating that structural replan invalidates active_plan",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_1 = make_task(
+        project_id=project.id,
+        title="Atomic task 1",
+        status=TASK_STATUS_PENDING,
+    )
+    replanned_task = make_task(
+        project_id=project.id,
+        title="Replanned atomic task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    initial_plan = make_execution_plan(
+        plan_version=111,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [task_1.id],
+                "evaluation_focus": ["functional_coverage"],
+            }
+        ],
+    )
+
+    replanned_plan = make_execution_plan(
+        plan_version=112,
+        batches=[
+            {
+                "batch_id": "batch_replanned",
+                "task_ids": [replanned_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+
+    generation_calls = []
+
+    def _fake_generate_execution_plan(db, project_id):
+        generation_calls.append("generate")
+        if len(generation_calls) == 1:
+            return initial_plan
+        return replanned_plan
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        _fake_generate_execution_plan,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    executed_task_ids = []
+
+    def _fake_execute_task_sync(db, task_id):
+        executed_task_ids.append(task_id)
+        return types.SimpleNamespace(
+            final_task_status="completed",
+            validation_decision="completed",
+            executor_type=EXECUTION_ENGINE,
+        )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.execute_task_sync",
+        _fake_execute_task_sync,
+    )
+
+    def _fake_post_batch(
+        db,
+        project_id,
+        plan,
+        batch_id,
+        current_finalization_iteration_count,
+        max_finalization_iterations,
+        checkpoint_artifact_window_start_exclusive,
+    ):
+        if batch_id == "batch_1":
+            return types.SimpleNamespace(
+                status="checkpoint_blocked",
+                continue_execution=False,
+                requires_manual_review=False,
+                finalization_guard_triggered=False,
+                requires_replanning=True,
+                requires_resequencing=False,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="replan_remaining_work",
+                decision_signals_used=["remaining_plan_invalid"],
+                notes="Structural replanning required.",
+            )
+
+        if batch_id == "batch_replanned":
+            return types.SimpleNamespace(
+                status="project_stage_closed",
+                continue_execution=False,
+                requires_manual_review=False,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="close_stage",
+                decision_signals_used=["stage_goals_satisfied"],
+                notes="Replanned batch closed the stage.",
+            )
+
+        raise AssertionError(f"Unexpected batch_id {batch_id}")
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._process_batch_after_terminal_tasks",
+        _fake_post_batch,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=3,
+        max_finalization_iterations=2,
+    )
+
+    assert generation_calls == ["generate", "generate"]
+    assert executed_task_ids == [task_1.id, replanned_task.id]
+    assert result.status == "stage_closed"
+    assert result.completed_batches == ["batch_1", "batch_replanned"]
+    assert result.plan_version == 112
+
+
+def test_workflow_blocked_batches_never_includes_completed_batches(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project(
+        name="Workflow blocked batches exclusion invariant",
+        description="Project for validating that blocked_batches excludes completed batches",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task_1 = make_task(project_id=project.id, title="Atomic task 1", status=TASK_STATUS_PENDING)
+    task_2 = make_task(project_id=project.id, title="Atomic task 2", status=TASK_STATUS_PENDING)
+    task_3 = make_task(project_id=project.id, title="Atomic task 3", status=TASK_STATUS_PENDING)
+
+    plan = make_execution_plan(
+        plan_version=113,
+        batches=[
+            {"batch_id": "batch_1", "task_ids": [task_1.id], "evaluation_focus": ["functional_coverage"]},
+            {"batch_id": "batch_2", "task_ids": [task_2.id], "evaluation_focus": ["functional_coverage"]},
+            {"batch_id": "batch_3", "task_ids": [task_3.id], "evaluation_focus": ["functional_coverage", "stage_closure"]},
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        lambda db, project_id: plan,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    def _fake_execute_task_sync(db, task_id):
+        return types.SimpleNamespace(
+            final_task_status="completed",
+            validation_decision="completed",
+            executor_type=EXECUTION_ENGINE,
+        )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.execute_task_sync",
+        _fake_execute_task_sync,
+    )
+
+    def _fake_post_batch(
+        db,
+        project_id,
+        plan,
+        batch_id,
+        current_finalization_iteration_count,
+        max_finalization_iterations,
+        checkpoint_artifact_window_start_exclusive,
+    ):
+        if batch_id == "batch_1":
+            return types.SimpleNamespace(
+                status="completed_with_evaluation",
+                continue_execution=True,
+                requires_manual_review=False,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="continue_current_plan",
+                decision_signals_used=["remaining_plan_still_valid"],
+                notes="Continue.",
+            )
+
+        if batch_id == "batch_2":
+            return types.SimpleNamespace(
+                status="checkpoint_blocked",
+                continue_execution=False,
+                requires_manual_review=True,
+                finalization_guard_triggered=False,
+                requires_replanning=False,
+                requires_resequencing=False,
+                patched_execution_plan=None,
+                finalization_iteration_count=current_finalization_iteration_count,
+                resolved_action="manual_review",
+                decision_signals_used=["manual_review_required"],
+                notes="Stop before final batch.",
+            )
+
+        raise AssertionError(f"Unexpected batch_id {batch_id}")
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._process_batch_after_terminal_tasks",
+        _fake_post_batch,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=2,
+        max_finalization_iterations=2,
+    )
+
+    assert result.completed_batches == ["batch_1", "batch_2"]
+    assert result.blocked_batches == ["batch_3"]
+    assert set(result.completed_batches).isdisjoint(set(result.blocked_batches))
