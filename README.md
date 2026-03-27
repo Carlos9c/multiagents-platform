@@ -6,280 +6,239 @@ Este proyecto implementa una **plataforma backend multiagente** cuyo objetivo es
 
 > Transformar una idea de proyecto en un sistema ejecutable de forma progresiva, estructurada y autónoma.
 
-El sistema se basa en:
-- planificación jerárquica
-- ejecución por batches
-- evaluación iterativa
-- recovery automático
-- y control de flujo inteligente
+El sistema orquesta planificación, ejecución, evaluación y recuperación mediante un pipeline iterativo basado en **batches y checkpoints**, con trazabilidad completa y decisiones deterministas.
 
 ---
 
 # 🏗️ Estado actual del proyecto
 
-El sistema ha pasado de un estado experimental a una base **estructuralmente sólida**.
+## ✅ Núcleo del sistema (COMPLETADO)
 
-## ✅ Núcleo estable
+El sistema end-to-end está completamente operativo:
 
-### 🔹 Evaluación estructurada
-- `StageEvaluationOutput` con contrato fuerte
-- separación clara entre:
-  - `continue_current_plan`
-  - `resequence_remaining_batches`
-  - `replan_remaining_work`
-  - `manual_review`
-  - `close_stage`
-- validaciones cruzadas entre:
-  - `decision`
-  - `recommended_next_action`
-  - `plan_change_scope`
-  - `remaining_plan_still_valid`
+- ✔️ Creación de proyectos  
+- ✔️ Generación de execution plan  
+- ✔️ Ejecución por batches  
+- ✔️ Evaluación por checkpoints  
+- ✔️ Recovery automático de tareas fallidas  
+- ✔️ Decisión determinista post-batch  
+- ✔️ Iteración del workflow hasta cierre o bloqueo  
+- ✔️ Persistencia completa mediante artifacts  
 
-### 🔹 Contexto de evaluación limpio (CRÍTICO)
-Se ha eliminado una de las principales fuentes de errores:
+---
+
+# 🔁 Pipeline de ejecución
+
+El flujo actual es:
+
+1. **Planner** genera `ExecutionPlan`  
+2. Se ejecuta un **batch**  
+3. Se recogen artifacts generados  
+4. Se ejecuta:
+   - `evaluation_service`  
+   - `recovery_service` (si aplica)  
+5. `post_batch_service`:
+   - normaliza señales  
+   - resuelve acción final (determinista)  
+6. `project_workflow_service`:
+   - continúa / resecuencia / replanifica / detiene  
+
+---
+
+# 🧩 Arquitectura consolidada
+
+## 🔹 Separación de responsabilidades (CRÍTICO)
+
+| Componente | Responsabilidad |
+|----------|----------------|
+| Planner | Genera plan inicial |
+| Executor | Ejecuta tareas |
+| Recovery | Actúa localmente sobre fallos |
+| Evaluator | Emite señales (NO decide flujo) |
+| PostBatchDecisionService | Decide acción final |
+| WorkflowService | Orquesta iteraciones |
+
+---
+
+## 🔹 Decisión determinista post-batch (ESTABILIZADO)
+
+Se ha eliminado lógica implícita dispersa.
+
+La decisión final sigue:
+
+if structural_replan:
+    → replan
+elif blocking_gap:
+    → resequence
+else:
+    → continue
+
+✔️ Recovery **NO implica replan automáticamente**  
+✔️ Continuidad es el default  
+✔️ Resequence solo si hay bloqueo real  
+✔️ Replan solo si hay ruptura estructural  
+
+---
+
+## 🔹 Patch batches (NUEVO)
+
+Se han introducido **batches intermedios (1.1, 1.2, …)**:
+
+- Permiten insertar trabajo nuevo sin replanificar  
+- Mantienen `plan_version` estable  
+- Evitan romper el flujo  
+- Eliminan soluciones arbitrarias  
+
+---
+
+## 🔹 Identidad de plan y batches (RESUELTO)
+
+- `plan_version` determinista  
+- `batch_internal_id` estable  
+- naming normalizado:  
+  Plan {version} · Batch {index}  
+
+✔️ Se elimina completamente el problema de “volver a batch 1”  
+
+---
+
+## 🔹 Observabilidad completa (RESUELTO)
+
+Se persisten artifacts estructurados:
+
+- `execution_plan`  
+- `evaluation_decision`  
+- `post_batch_result`  
+- `recovery_decisions`  
+- `workflow_iteration_trace`  
+
+✔️ Permite reconstrucción completa del sistema  
+✔️ Auditoría desde BBDD sin endpoints adicionales  
+
+---
+
+## 🔹 Control de loops (CRÍTICO)
+
+- Protección contra reprocesado de batches  
+- Control explícito de `current_index`  
+- Manejo correcto de planes parcheados  
+
+✔️ Se evita loop infinito en workflow  
+
+---
+
+# 🧪 Testing
+
+- ✔️ Tests de servicios principales  
+- ✔️ Tests de decisiones post-batch  
+- ✔️ Tests de recovery  
+- ✔️ Tests de workflow  
+- ✔️ Compatibilidad con mocks legacy (`SimpleNamespace`)  
+
+Estado: **Todos los tests en verde**
+
+---
+
+# ⚠️ Problemas resueltos clave
 
 Antes:
-- mezcla de artifacts históricos
-- ruido de ciclos anteriores
+- Replanificaciones innecesarias  
+- Recovery provocaba caos estructural  
+- Batches sin identidad  
+- Falta de trazabilidad  
+- Decisiones implícitas y frágiles  
 
 Ahora:
-- ventana real de checkpoint basada en `artifact_id`
-- el evaluador solo ve evidencia del ciclo actual
-
-### 🔹 Separación de contexto
-El evaluador recibe bloques diferenciados:
-- `processed_batch_summary`
-- `checkpoint_artifact_window_summary`
-- `recovery_tasks_created_summary`
-- `remaining_batches_summary`
-- `pending_task_summary`
-- `additional_context`
-
-👉 Resultado:
-- menos ambigüedad
-- menos replanificaciones erróneas
-
-### 🔹 Recovery rediseñado correctamente
-
-#### Eliminación completa de `retry`
-- fuera del schema
-- fuera del flujo
-- schemas estrictos (`extra="forbid"`)
-
-#### Input mejorado
-- se introduce `last_execution_agent_sequence`
-- recovery entiende la trayectoria real de ejecución
-
-#### Integridad estructural garantizada
-- ya no se crean tasks bajo una atomic sin `parent_task_id`
-- si ocurre → error explícito
-
-👉 Resultado:
-- recovery más fiable
-- sin corrupción del árbol de tareas
-
-### 🔹 Limpieza de schemas
-- `recovery.py` es la única fuente de verdad
-- eliminada duplicidad en `evaluation.py`
-
-### 🔹 Tests reforzados
-Cobertura sólida en:
-- evaluation_service
-- post_batch_service
-- recovery_service
-- schemas
-
-Incluyendo:
-- validaciones de contrato
-- artifact window
-- decisiones de flujo
-- integridad de recovery
+- Decisión determinista centralizada  
+- Recovery desacoplado del flujo global  
+- Plan estable con patching local  
+- Observabilidad completa  
+- Sistema auditable y predecible  
 
 ---
 
-# ⚠️ Problemas resueltos
+# 🔜 Siguientes pasos (priorizados correctamente)
 
-## ❌ Replanificación excesiva
-Antes:
-- el sistema replanificaba con facilidad
+## 🔥 BLOQUE 4 — Recovery (PRIORIDAD ACTUAL)
 
-Ahora:
-- mejor señal
-- mejor contexto
-- mejor contrato
+El sistema ya decide bien.  
+Ahora hay que mejorar **la calidad del input (recovery)**.
 
-👉 Aún queda un ajuste fino (ver backlog)
+### 4.1 Validar `last_execution_agent_sequence`
 
-## ❌ Ruido en artifacts
-Antes:
-- el evaluador veía datos irrelevantes
+- ¿Se está usando realmente?  
+- ¿Mejora decisiones?  
+- ¿Introduce ruido?  
 
-Ahora:
-- ventana limpia por checkpoint
+### 4.2 Refinar prompt de recovery
 
-## ❌ Ambigüedad en recovery
-Antes:
-- lógica difusa
-- retry ambiguo
+Diferenciar correctamente:
 
-Ahora:
-- acciones claras:
-  - `reatomize`
-  - `insert_followup`
-  - `manual_review`
+- scoping_problem → falta trabajo  
+- execution_path_problem → mal enfoque  
+- additive_gap → falta puntual  
 
-## ❌ Corrupción de jerarquía de tareas
-Antes:
-- una atomic podía convertirse en padre
+### 4.3 (Opcional) Test de trajectory
 
-Ahora:
-- prohibido explícitamente
+- parsing correcto  
+- fallback robusto  
+- integración en prompt  
 
 ---
 
-# 🧱 BACKLOG ACTUAL (REAL)
+## 🧠 BLOQUE 5 — Evaluator (POSTERIOR)
 
-## 🔥 BLOQUE 1 — Estabilizar decisiones post-recovery (CRÍTICO)
+Solo tras estabilizar recovery.
 
-### Problema actual
-El sistema aún puede sobre-reaccionar cuando aparecen nuevas tasks de recovery.
+Objetivo:
 
-### Objetivo
-Evitar que recovery implique automáticamente cambio estructural.
+- NO replan si backlog cubre trabajo  
+- recovery ≠ fallo estructural  
+- preferir continuar  
 
-### Tareas
+MUY importante:
 
-#### 1.1 Reglas explícitas en `post_batch_service`
-- Si:
-  - `remaining_plan_still_valid = True`
-  - y hay backlog válido  
-→ ❌ NO replan
-
-- Si:
-  - recovery crea tasks
-  - y `still_blocks_progress = False`  
-→ ❌ NO replan  
-→ ✔ continue / resequence
-
-- Solo replan si:
-  - inconsistencia estructural real
-  - o `plan_change_scope` fuerte
-
-#### 1.2 Priorizar continuidad
-- default → `continue_current_plan`
-- resequence solo si:
-  - dependencia real
-  - orden incorrecto
-
-#### 1.3 Formalizar decisión final
-Eliminar lógica implícita basada en flags dispersos.
-
-#### 1.4 Tests críticos
-- recovery + no blocking → NO replan
-- backlog válido → NO replan
-- follow-up simple → NO replan
+- añadir ejemplos negativos  
+- evitar sobre-reacción del modelo  
 
 ---
 
-## 🧱 BLOQUE 2 — Identidad de planes y batches (BUG 2)
+## 🧹 BLOQUE 6 — Limpieza (DEUDA TÉCNICA)
 
-### Problema
-- el sistema puede “volver a batch 1”
-- falta trazabilidad
-
-### Tareas
-
-#### 2.1 `plan_version` determinista
-`max(plan_version) + 1`
-
-#### 2.2 ID estable de batch
-`{plan_version}_{batch_index}`
-
-#### 2.3 Nombre normalizado
-`Plan {version} · Batch {index}`
+- eliminar legacy restante  
+- consolidar nombres  
+- eliminar helpers duplicados  
+- limpiar executor antiguo  
 
 ---
 
-## 🧱 BLOQUE 3 — Observabilidad
+# 🧭 Conclusión
 
-### Tareas
+El sistema ha pasado de:
 
-#### 3.1 Artifacts completos
-- execution_plan
-- evaluation_decision
-- post_batch_result
-- recovery_decisions
-
-#### 3.2 Trazabilidad del flujo
-Guardar por iteración:
-- batch
-- tasks
-- recovery
-- decisión
-
----
-
-## 🧱 BLOQUE 4 — Recovery (refinamiento)
-
-### Tareas
-- validar impacto real de `last_execution_agent_sequence`
-- ajustar prompt si es necesario
-- (opcional) tests de trayectoria
-
----
-
-## 🧱 BLOQUE 5 — Evaluador (fase final)
-
-### Tareas
-- reforzar prompt:
-  - NO replan por defecto
-  - recovery ≠ fallo estructural
-- añadir ejemplos negativos
-
----
-
-## 🧱 BLOQUE 6 — Limpieza final
-
-### Tareas
-- renombrado semántico
-- eliminación de legacy restante
-
----
-
-# 🧠 Prioridad real
-
-## 🔥 Inmediato
-1. reglas post-recovery (bloque 1)
-2. identidad de plan/batch (bloque 2)
-
-## ⚠️ Medio
-3. observabilidad
-
-## ⚙️ Bajo
-4. ajustes de recovery y evaluador
-
----
-
-# 🧭 Siguientes pasos recomendados
-
-1. Implementar reglas explícitas en `post_batch_service`
-2. Añadir tests de “no replan innecesario”
-3. Introducir `plan_version` determinista
-4. Estabilizar identidad de batch
-5. Mejorar trazabilidad de ejecución
-
----
-
-# 💬 Conclusión
-
-El sistema ha evolucionado de:
-
-> comportamiento errático y difícil de razonar
+pipeline frágil, no determinista y difícil de depurar  
 
 a:
 
-> arquitectura sólida con semántica clara y decisiones estructuradas
+sistema robusto, trazable, determinista y extensible  
 
-Ahora el foco ya no es “arreglar caos”, sino:
+Estado real:
 
-> afinar comportamiento y asegurar estabilidad operativa
+- 🟢 Decisión → RESUELTA  
+- 🟢 Identidad → RESUELTA  
+- 🟢 Observabilidad → RESUELTA  
+- 🟡 Recovery → SIGUIENTE FOCO  
+- ⚪ Evaluator → POSTERIOR  
+- ⚪ Limpieza → FINAL  
+
+---
+
+# 💡 Nota final
+
+El sistema ya no necesita más complejidad.
+
+Ahora necesita:
+
+mejor señal de entrada (recovery) + ajuste fino del evaluator  
+
+No tocar la orquestación salvo que sea estrictamente necesario.
