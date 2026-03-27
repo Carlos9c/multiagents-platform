@@ -1685,3 +1685,101 @@ def test_post_batch_consumes_assignment_mutation_result_from_live_plan_mutation_
     assert result.requires_resequencing is False
     assert result.patched_execution_plan is not None
     assert f"assigned_task_ids=[{created_recovery_task.id}]" in result.notes
+
+
+def test_post_batch_does_not_materialize_patch_for_deferred_resequence(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_execution_plan,
+    make_stage_evaluation_output,
+):
+    project = make_project()
+
+    completed_task = make_task(
+        project_id=project.id,
+        title="Completed task",
+        status="completed",
+    )
+    make_execution_run(
+        task_id=completed_task.id,
+        status="succeeded",
+        work_summary="Task completed successfully.",
+    )
+
+    pending_followup = make_task(
+        project_id=project.id,
+        title="Pending follow-up",
+        status="pending",
+    )
+
+    plan = make_execution_plan(
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [completed_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "task_ids": [pending_followup.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ]
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        followup_atomic_tasks_required=True,
+        recovery_strategy="insert_followup_atomic_tasks",
+        recovery_reason="Recovery introduced local follow-up work without invalidating the overall stage plan.",
+        recommended_next_action="resequence_remaining_batches",
+        recommended_next_action_reason="The remaining work should be regrouped.",
+        decision_signals=[
+            "remaining_plan_still_valid",
+            "followup_tasks_created",
+            "single_task_tail_risk",
+        ],
+        plan_change_scope="local_resequencing",
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=False,
+        single_task_tail_risk=True,
+        completed_task_ids=[completed_task.id],
+        notes=["Resequence the remaining work."],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.mutate_live_plan",
+        lambda **kwargs: types.SimpleNamespace(
+            mutation_kind="resequence_deferred",
+            patched_execution_plan=None,
+            requires_replan=False,
+            notes=["Deferred resequence; no immediate patch batch was created."],
+            metadata={},
+        ),
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="batch_1",
+        persist_result=False,
+    )
+
+    assert result.requires_resequencing is True
+    assert result.requires_replanning is False
+    assert result.continue_execution is False
+    assert result.patched_execution_plan is None

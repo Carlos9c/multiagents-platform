@@ -661,10 +661,12 @@ def run_project_workflow(
         )
 
         active_plan = resulting_plan
-        plan_version = active_plan.plan_version
 
         if iteration_requires_replan:
             active_plan = None
+            plan_version = resulting_plan.plan_version
+        else:
+            plan_version = active_plan.plan_version
 
         iterations.append(iteration_summary)
         completed_batches.extend(iteration_summary.batch_ids_processed)

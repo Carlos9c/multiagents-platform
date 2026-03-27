@@ -1,244 +1,322 @@
-# 🚀 Multiagent Platform – Backend
+# 🧠 Agente Desarrollador — Execution Engine
 
-## 🧠 Visión
-
-Este proyecto implementa una **plataforma backend multiagente** cuyo objetivo es:
-
-> Transformar una idea de proyecto en un sistema ejecutable de forma progresiva, estructurada y autónoma.
-
-El sistema orquesta planificación, ejecución, evaluación y recuperación mediante un pipeline iterativo basado en **batches y checkpoints**, con trazabilidad completa y decisiones deterministas.
+Sistema de ejecución autónoma basado en planificación iterativa, evaluación por checkpoints y mutación controlada del plan.
 
 ---
 
-# 🏗️ Estado actual del proyecto
+## 🚀 Estado actual del proyecto
 
-## ✅ Núcleo del sistema (COMPLETADO)
+El sistema ha alcanzado un estado **estable en el core de ejecución**, con:
 
-El sistema end-to-end está completamente operativo:
+* Decisión post-batch completamente formalizada (`ResolvedPostBatchIntent`)
+* Separación clara entre:
 
-- ✔️ Creación de proyectos  
-- ✔️ Generación de execution plan  
-- ✔️ Ejecución por batches  
-- ✔️ Evaluación por checkpoints  
-- ✔️ Recovery automático de tareas fallidas  
-- ✔️ Decisión determinista post-batch  
-- ✔️ Iteración del workflow hasta cierre o bloqueo  
-- ✔️ Persistencia completa mediante artifacts  
+  * decisión (post-batch)
+  * mutación (live_plan_mutation_service)
+  * orquestación (project_workflow_service)
+* Eliminación de rutas legacy de mutación de plan
+* Control explícito de:
 
----
-
-# 🔁 Pipeline de ejecución
-
-El flujo actual es:
-
-1. **Planner** genera `ExecutionPlan`  
-2. Se ejecuta un **batch**  
-3. Se recogen artifacts generados  
-4. Se ejecuta:
-   - `evaluation_service`  
-   - `recovery_service` (si aplica)  
-5. `post_batch_service`:
-   - normaliza señales  
-   - resuelve acción final (determinista)  
-6. `project_workflow_service`:
-   - continúa / resecuencia / replanifica / detiene  
+  * replan estructural vs patch local
+  * assignment vs resequence vs continue
+* `active_plan` persistente entre iteraciones
+* Tests de regresión cubriendo comportamiento crítico
 
 ---
 
-# 🧩 Arquitectura consolidada
+## 🧩 Arquitectura (visión global)
 
-## 🔹 Separación de responsabilidades (CRÍTICO)
-
-| Componente | Responsabilidad |
-|----------|----------------|
-| Planner | Genera plan inicial |
-| Executor | Ejecuta tareas |
-| Recovery | Actúa localmente sobre fallos |
-| Evaluator | Emite señales (NO decide flujo) |
-| PostBatchDecisionService | Decide acción final |
-| WorkflowService | Orquesta iteraciones |
-
----
-
-## 🔹 Decisión determinista post-batch (ESTABILIZADO)
-
-Se ha eliminado lógica implícita dispersa.
-
-La decisión final sigue:
-
-if structural_replan:
-    → replan
-elif blocking_gap:
-    → resequence
-else:
-    → continue
-
-✔️ Recovery **NO implica replan automáticamente**  
-✔️ Continuidad es el default  
-✔️ Resequence solo si hay bloqueo real  
-✔️ Replan solo si hay ruptura estructural  
+Planner → Atomic Generator → Execution Plan
+↓
+Execution Engine (Workflow)
+↓
+Batch Execution (tasks)
+↓
+Post-Batch Evaluation
+↓
+ResolvedPostBatchIntent
+↓
+LivePlanMutationService (opcional)
+↓
+Workflow decide siguiente paso
 
 ---
 
-## 🔹 Patch batches (NUEVO)
+## 🧠 Componentes clave
 
-Se han introducido **batches intermedios (1.1, 1.2, …)**:
+### 1. post_batch_decision_service
 
-- Permiten insertar trabajo nuevo sin replanificar  
-- Mantienen `plan_version` estable  
-- Evitan romper el flujo  
-- Eliminan soluciones arbitrarias  
+Responsabilidad:
 
----
+* Interpretar señales del evaluator
+* Resolver una intención canónica
 
-## 🔹 Identidad de plan y batches (RESUELTO)
+Output:
+ResolvedPostBatchIntent
 
-- `plan_version` determinista  
-- `batch_internal_id` estable  
-- naming normalizado:  
-  Plan {version} · Batch {index}  
+Tipos de intent:
 
-✔️ Se elimina completamente el problema de “volver a batch 1”  
+* continue → seguir sin cambios
+* assign → introducir nuevas tareas en el plan
+* resequence → ajustar orden local
+* replan → reconstrucción estructural
+* close → cerrar etapa
+* manual_review → intervención humana
 
----
-
-## 🔹 Observabilidad completa (RESUELTO)
-
-Se persisten artifacts estructurados:
-
-- `execution_plan`  
-- `evaluation_decision`  
-- `post_batch_result`  
-- `recovery_decisions`  
-- `workflow_iteration_trace`  
-
-✔️ Permite reconstrucción completa del sistema  
-✔️ Auditoría desde BBDD sin endpoints adicionales  
+⚠️ Este servicio **NO muta el plan**.
 
 ---
 
-## 🔹 Control de loops (CRÍTICO)
+### 2. live_plan_mutation_service
 
-- Protección contra reprocesado de batches  
-- Control explícito de `current_index`  
-- Manejo correcto de planes parcheados  
+Responsabilidad:
 
-✔️ Se evita loop infinito en workflow  
+* Aplicar mutaciones sobre el plan activo **cuando procede**
 
----
+Entrada:
 
-# 🧪 Testing
+* intent (ResolvedPostBatchIntent)
+* contexto de ejecución
+* recovery
 
-- ✔️ Tests de servicios principales  
-- ✔️ Tests de decisiones post-batch  
-- ✔️ Tests de recovery  
-- ✔️ Tests de workflow  
-- ✔️ Compatibilidad con mocks legacy (`SimpleNamespace`)  
+Salida:
+LivePlanMutationResult
 
-Estado: **Todos los tests en verde**
+Tipos de resultado:
 
----
+* assignment → plan parcheado con nuevas tareas
+* resequence_patch → inserción inmediata de batch
+* resequence_deferred → no se muta plan (solo señal lógica)
+* escalated_to_replan → no se pudo mutar → requiere replan
+* none → no aplica mutación
 
-# ⚠️ Problemas resueltos clave
+⚠️ Este servicio:
 
-Antes:
-- Replanificaciones innecesarias  
-- Recovery provocaba caos estructural  
-- Batches sin identidad  
-- Falta de trazabilidad  
-- Decisiones implícitas y frágiles  
-
-Ahora:
-- Decisión determinista centralizada  
-- Recovery desacoplado del flujo global  
-- Plan estable con patching local  
-- Observabilidad completa  
-- Sistema auditable y predecible  
+* NO decide si hay que replanear
+* NO genera planes desde cero
+* SOLO modifica el plan existente o escala
 
 ---
 
-# 🔜 Siguientes pasos (priorizados correctamente)
+### 3. post_batch_service
 
-## 🔥 BLOQUE 4 — Recovery (PRIORIDAD ACTUAL)
+Responsabilidad:
 
-El sistema ya decide bien.  
-Ahora hay que mejorar **la calidad del input (recovery)**.
+* Orquestar evaluación + decisión + mutación
+* Persistir artefactos
 
-### 4.1 Validar `last_execution_agent_sequence`
+Flujo:
+evaluate_checkpoint → resolve_intent → mutate_live_plan → construir resultado
 
-- ¿Se está usando realmente?  
-- ¿Mejora decisiones?  
-- ¿Introduce ruido?  
+Garantías:
 
-### 4.2 Refinar prompt de recovery
-
-Diferenciar correctamente:
-
-- scoping_problem → falta trabajo  
-- execution_path_problem → mal enfoque  
-- additive_gap → falta puntual  
-
-### 4.3 (Opcional) Test de trajectory
-
-- parsing correcto  
-- fallback robusto  
-- integración en prompt  
+* Nunca deja tareas nuevas sin asignar si el intent lo requiere
+* No crea patches inválidos (ej: resequence diferido)
+* Escala correctamente a replan cuando no puede mutar
 
 ---
 
-## 🧠 BLOQUE 5 — Evaluator (POSTERIOR)
+### 4. project_workflow_service (ORQUESTADOR)
 
-Solo tras estabilizar recovery.
+Responsabilidad:
 
-Objetivo:
+* Ejecutar el workflow iterativo completo
 
-- NO replan si backlog cubre trabajo  
-- recovery ≠ fallo estructural  
-- preferir continuar  
+Claves:
 
-MUY importante:
+#### active_plan
 
-- añadir ejemplos negativos  
-- evitar sobre-reacción del modelo  
+* Se mantiene entre iteraciones
+* Se actualiza si hay patch
+* Se invalida si hay replan estructural
 
----
+#### iteration_requires_replan
 
-## 🧹 BLOQUE 6 — Limpieza (DEUDA TÉCNICA)
+* Señal explícita desde post-batch
+* Provoca regeneración del plan en la siguiente iteración
 
-- eliminar legacy restante  
-- consolidar nombres  
-- eliminar helpers duplicados  
-- limpiar executor antiguo  
+#### Flujo de iteración
 
----
+for iteration:
+if no active_plan:
+generar plan
 
-# 🧭 Conclusión
+```
+ejecutar batches  
 
-El sistema ha pasado de:
+post_batch_result  
 
-pipeline frágil, no determinista y difícil de depurar  
+if requires_replan:  
+    active_plan = None  
 
-a:
+elif patched_plan:  
+    active_plan = patched_plan  
 
-sistema robusto, trazable, determinista y extensible  
-
-Estado real:
-
-- 🟢 Decisión → RESUELTA  
-- 🟢 Identidad → RESUELTA  
-- 🟢 Observabilidad → RESUELTA  
-- 🟡 Recovery → SIGUIENTE FOCO  
-- ⚪ Evaluator → POSTERIOR  
-- ⚪ Limpieza → FINAL  
+continuar / parar según estado  
+```
 
 ---
 
-# 💡 Nota final
+## ⚖️ Semántica del sistema (CRÍTICO)
 
-El sistema ya no necesita más complejidad.
+### 🔴 Replan (estructural)
 
-Ahora necesita:
+Se produce cuando:
 
-mejor señal de entrada (recovery) + ajuste fino del evaluator  
+* remaining_plan_still_valid = False
+* inconsistencia global
+* assignment no colocable
 
-No tocar la orquestación salvo que sea estrictamente necesario.
+Acción:
+
+* se descarta active_plan
+* el workflow genera uno nuevo
+
+---
+
+### 🟡 Resequence (local)
+
+Dos tipos:
+
+Patch inmediato:
+
+* Se inserta batch nuevo
+* mutation_kind = resequence_patch
+
+Deferred:
+
+* No se modifica el plan
+* Solo cambia interpretación futura
+* mutation_kind = resequence_deferred
+
+---
+
+### 🟢 Assignment
+
+* Introduce nuevas tareas en el plan
+* Siempre antes de continuar
+* Nunca deja tareas en limbo
+
+---
+
+### 🔵 Continue
+
+* Plan intacto
+* Sin trabajo nuevo
+
+---
+
+### ⚫ Close
+
+Solo ocurre si:
+
+* último batch
+* sin tareas pendientes
+* sin recovery nuevo
+
+---
+
+## 🧪 Cobertura de tests (regresión)
+
+Cubierto:
+
+Decision layer:
+
+* selección correcta de intent
+* no replan por defecto
+* cierre legal de etapa
+
+Mutation layer:
+
+* assignment correcto
+* resequence deferred sin patch
+* escalado a replan
+* rechazo de intents no mutantes
+
+Post-batch:
+
+* integración completa decisión + mutación
+* persistencia consistente
+* no creación de patches inválidos
+
+Workflow:
+
+* reutilización de active_plan
+* invalidación en replan
+* no reejecución de batches
+* adopción de planes parcheados
+
+---
+
+## 🧱 Decisiones arquitectónicas clave
+
+Separación estricta:
+
+* Decision → qué hacer
+* Mutation → cómo modificar el plan
+* Workflow → cuándo ejecutar
+
+Una única vía de mutación:
+
+Todo pasa por live_plan_mutation_service
+
+El workflow es el único orquestador:
+
+* decide cuándo regenerar plan
+* decide cuándo continuar
+* decide cuándo parar
+
+---
+
+## ⚠️ Riesgos conocidos (controlados)
+
+* complejidad creciente del post_batch_service
+* tamaño de project_workflow_service
+* dependencia fuerte de consistencia en signals
+
+---
+
+## 🔜 Siguientes pasos recomendados
+
+Crítico:
+
+* reforzar tests de regresión
+* endurecer validaciones de mutation
+
+Alto:
+
+* trazabilidad completa plan → batch → run → recovery → evaluación
+* limpieza final de legacy
+
+Medio:
+
+* unificación de artefactos de trazas
+* portabilidad de storage/config
+* integración end-to-end
+
+Bajo:
+
+* tuning de prompts
+* refactor de servicios grandes
+* optimización del execution engine
+
+---
+
+## 🧭 Filosofía del sistema
+
+1. No replanear por defecto
+2. No dejar trabajo sin asignar
+3. Separar decisión de ejecución
+
+---
+
+## 🏁 Conclusión
+
+El sistema actual ya no es un prototipo:
+
+* Tiene semántica estable
+* Tiene control de estado explícito
+* Tiene arquitectura extensible
+
+A partir de aquí el foco es:
+robustez, observabilidad y mantenibilidad

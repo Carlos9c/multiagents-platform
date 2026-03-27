@@ -387,3 +387,235 @@ def test_mutate_live_plan_resequence_without_immediate_patch_returns_deferred(
     assert result.mutation_kind == "resequence_deferred"
     assert result.requires_replan is False
     assert result.patched_execution_plan is None
+
+def test_mutate_live_plan_returns_resequence_deferred_without_patch(
+    db_session,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project()
+
+    current_task = make_task(
+        project_id=project.id,
+        title="Current task",
+        status=TASK_STATUS_PENDING,
+    )
+    future_task = make_task(
+        project_id=project.id,
+        title="Future task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        plan_version=3,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [current_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "batch_2",
+                "task_ids": [future_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+    batch = plan.execution_batches[0]
+
+    resolved_intent = types.SimpleNamespace(
+        intent_type="resequence",
+        legacy_action="resequence_remaining_batches",
+        remaining_plan_still_valid=True,
+    )
+
+    evaluation_decision = types.SimpleNamespace(
+        new_recovery_tasks_blocking=False,
+    )
+
+    recovery_context = types.SimpleNamespace(
+        recovery_decisions=[],
+        recovery_created_tasks=[],
+    )
+
+    result = mutate_live_plan(
+        db=db_session,
+        project=project,
+        plan=plan,
+        batch=batch,
+        resolved_intent=resolved_intent,
+        evaluation_decision=evaluation_decision,
+        recovery_context=recovery_context,
+        created_recovery_task_ids=[],
+        executed_task_ids=[current_task.id],
+        successful_task_ids=[current_task.id],
+        problematic_run_ids=[],
+        task_run_summaries=[],
+        build_recovery_assignment_input_fn=lambda **kwargs: None,
+        persist_recovery_assignment_payload_fn=lambda **kwargs: None,
+    )
+
+    assert result.mutation_kind == "resequence_deferred"
+    assert result.patched_execution_plan is None
+    assert result.requires_replan is False
+
+
+def test_mutate_live_plan_returns_escalated_to_replan_when_assignment_is_not_placeable(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project()
+
+    current_task = make_task(
+        project_id=project.id,
+        title="Current task",
+        status=TASK_STATUS_PENDING,
+    )
+    recovery_task = make_task(
+        project_id=project.id,
+        title="Recovery task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        plan_version=4,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [current_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ],
+    )
+    batch = plan.execution_batches[0]
+
+    resolved_intent = types.SimpleNamespace(
+        intent_type="assign",
+        legacy_action="continue_current_plan",
+        remaining_plan_still_valid=True,
+    )
+
+    evaluation_decision = types.SimpleNamespace(
+        decision="stage_incomplete",
+        recommended_next_action="continue_current_plan",
+        remaining_plan_still_valid=True,
+    )
+
+    recovery_context = types.SimpleNamespace(
+        recovery_decisions=[],
+        recovery_created_tasks=[],
+    )
+
+    monkeypatch.setattr(
+        "app.services.live_plan_mutation_service.call_recovery_assignment_model",
+        lambda **kwargs: types.SimpleNamespace(
+            model_dump=lambda mode="json": {
+                "strategy": "continue_with_assignment",
+                "clusters": [{"cluster_id": "cluster_1"}],
+            }
+        ),
+    )
+
+    monkeypatch.setattr(
+        "app.services.live_plan_mutation_service.compile_recovery_assignment_plan",
+        lambda **kwargs: types.SimpleNamespace(
+            strategy="continue_with_assignment",
+            requires_replan=True,
+            patched_execution_plan=None,
+            assigned_task_ids=[],
+            unassigned_task_ids=[recovery_task.id],
+            compiled_cluster_assignments=[],
+            notes=["Structural conflict detected."],
+        ),
+    )
+
+    persisted_payload_types = []
+
+    result = mutate_live_plan(
+        db=db_session,
+        project=project,
+        plan=plan,
+        batch=batch,
+        resolved_intent=resolved_intent,
+        evaluation_decision=evaluation_decision,
+        recovery_context=recovery_context,
+        created_recovery_task_ids=[recovery_task.id],
+        executed_task_ids=[current_task.id],
+        successful_task_ids=[current_task.id],
+        problematic_run_ids=[],
+        task_run_summaries=[],
+        build_recovery_assignment_input_fn=lambda **kwargs: types.SimpleNamespace(
+            model_dump=lambda mode="json": {"project_id": project.id}
+        ),
+        persist_recovery_assignment_payload_fn=lambda **kwargs: persisted_payload_types.append(
+            kwargs["artifact_type"]
+        ),
+    )
+
+    assert result.mutation_kind == "escalated_to_replan"
+    assert result.patched_execution_plan is None
+    assert result.requires_replan is True
+    assert result.metadata["unassigned_task_ids"] == [recovery_task.id]
+    assert "recovery_assignment_input" in persisted_payload_types
+    assert "recovery_assignment_output" in persisted_payload_types
+
+
+def test_mutate_live_plan_returns_none_for_non_mutating_intent(
+    db_session,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project()
+
+    current_task = make_task(
+        project_id=project.id,
+        title="Current task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    plan = make_execution_plan(
+        plan_version=2,
+        batches=[
+            {
+                "batch_id": "batch_1",
+                "task_ids": [current_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            }
+        ],
+    )
+    batch = plan.execution_batches[0]
+
+    resolved_intent = types.SimpleNamespace(
+        intent_type="continue",
+        legacy_action="continue_current_plan",
+        remaining_plan_still_valid=True,
+    )
+
+    result = mutate_live_plan(
+        db=db_session,
+        project=project,
+        plan=plan,
+        batch=batch,
+        resolved_intent=resolved_intent,
+        evaluation_decision=types.SimpleNamespace(),
+        recovery_context=types.SimpleNamespace(
+            recovery_decisions=[],
+            recovery_created_tasks=[],
+        ),
+        created_recovery_task_ids=[],
+        executed_task_ids=[current_task.id],
+        successful_task_ids=[current_task.id],
+        problematic_run_ids=[],
+        task_run_summaries=[],
+        build_recovery_assignment_input_fn=lambda **kwargs: None,
+        persist_recovery_assignment_payload_fn=lambda **kwargs: None,
+    )
+
+    assert result.mutation_kind == "none"
+    assert result.patched_execution_plan is None
+    assert result.requires_replan is False
