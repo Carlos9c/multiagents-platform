@@ -3,14 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from app.schemas.post_batch_intent import (
+    LegacyResolvedPostBatchAction,
+    ResolvedPostBatchIntent,
+)
 
-ResolvedPostBatchAction = Literal[
-    "continue_current_plan",
-    "resequence_remaining_batches",
-    "replan_remaining_work",
-    "manual_review",
-    "close_stage",
-]
+
+ResolvedPostBatchAction = LegacyResolvedPostBatchAction
 
 
 @dataclass(kw_only=True)
@@ -49,8 +48,16 @@ class PostBatchDecisionSignals:
     notes: list[str]
     decision_signals: list[str]
 
+
 @dataclass(kw_only=True)
 class ResolvedPostBatchDecision:
+    """
+    Transitional legacy adapter.
+
+    Keep this while post_batch_service and workflow code still consume the older
+    booleans. The canonical resolution is ResolvedPostBatchIntent.
+    """
+
     action: ResolvedPostBatchAction
     continue_execution: bool
     requires_replanning: bool
@@ -172,40 +179,53 @@ def _join_notes(signals: PostBatchDecisionSignals, *extra: str) -> str:
     parts.extend(note for note in signals.notes if note)
     parts.extend(item for item in extra if item)
 
-    return " ".join(part.strip() for part in parts if part and part.strip()) or "Checkpoint evaluation completed."
+    return " ".join(part.strip() for part in parts if part and part.strip()) or (
+        "Checkpoint evaluation completed."
+    )
 
 
-def resolve_post_batch_decision(
-    signals: PostBatchDecisionSignals,
-) -> ResolvedPostBatchDecision:
-    # 1. Cierre de stage
-    if signals.project_stage_closed or signals.decision == "stage_completed":
-        return ResolvedPostBatchDecision(
-            action="close_stage",
-            continue_execution=False,
-            requires_replanning=False,
-            requires_resequencing=False,
-            requires_manual_review=False,
-            is_stage_closed=True,
-            reopened_finalization=False,
-            notes=_join_notes(signals),
-        )
+def _append_signal(signals: PostBatchDecisionSignals, *extra_signals: str) -> list[str]:
+    values = list(signals.decision_signals)
+    for item in extra_signals:
+        item = item.strip()
+        if item and item not in values:
+            values.append(item)
+    return values
 
-    # 2. Revisión manual
-    if signals.manual_review_required or signals.decision == "manual_review_required":
-        return ResolvedPostBatchDecision(
-            action="manual_review",
-            continue_execution=False,
-            requires_replanning=False,
-            requires_resequencing=False,
-            requires_manual_review=True,
-            is_stage_closed=False,
-            reopened_finalization=False,
-            notes=_join_notes(signals),
-        )
 
-    # 3. Replan estructural
-    structural_replan = (
+def _should_close_stage(signals: PostBatchDecisionSignals) -> bool:
+    """
+    Close only when closure is actually legal.
+
+    A stage may close only if:
+    - evaluator requested closure,
+    - this is the final batch of the current live plan,
+    - there are no remaining batches,
+    - and there is no newly created recovery work that still needs assignment.
+    """
+    evaluator_requests_close = (
+        signals.project_stage_closed
+        or signals.decision == "stage_completed"
+        or signals.recommended_next_action == "close_stage"
+    )
+
+    if not evaluator_requests_close:
+        return False
+
+    if not signals.is_final_batch:
+        return False
+
+    if signals.remaining_batch_count > 0:
+        return False
+
+    if signals.has_new_recovery_pending_tasks or signals.new_recovery_tasks_created:
+        return False
+
+    return True
+
+
+def _is_structural_replan(signals: PostBatchDecisionSignals) -> bool:
+    return (
         not signals.remaining_plan_still_valid
         or signals.plan_change_scope == "high_level_replan"
         or (signals.replan_required and signals.replan_level == "high_level")
@@ -213,23 +233,9 @@ def resolve_post_batch_decision(
         or signals.recovery_strategy == "replan_from_high_level"
     )
 
-    if structural_replan:
-        return ResolvedPostBatchDecision(
-            action="replan_remaining_work",
-            continue_execution=False,
-            requires_replanning=True,
-            requires_resequencing=False,
-            requires_manual_review=False,
-            is_stage_closed=False,
-            reopened_finalization=True,
-            notes=_join_notes(
-                signals,
-                "The remaining plan is no longer structurally valid and must be rebuilt.",
-            ),
-        )
 
-    # 4. Resequencing local / inserción operativa de trabajo nuevo
-    local_resequence = (
+def _is_local_resequence(signals: PostBatchDecisionSignals) -> bool:
+    explicit_local_resequence = (
         signals.plan_change_scope in {"local_resequencing", "remaining_plan_rebuild"}
         or signals.recommended_next_action == "resequence_remaining_batches"
         or signals.new_recovery_tasks_blocking is True
@@ -238,62 +244,257 @@ def resolve_post_batch_decision(
             and signals.followup_atomic_tasks_required
             and not signals.has_preexisting_pending_valid_tasks
         )
-        or (
-            signals.has_new_recovery_pending_tasks
-            and signals.single_task_tail_risk
-        )
     )
 
-    if local_resequence:
-        return ResolvedPostBatchDecision(
-            action="resequence_remaining_batches",
-            continue_execution=False,
-            requires_replanning=False,
-            requires_resequencing=True,
-            requires_manual_review=False,
-            is_stage_closed=False,
-            reopened_finalization=True,
-            notes=_join_notes(
-                signals,
-                "The remaining plan is still valid, but the pending execution order must be adjusted.",
-            ),
-        )
+    weak_tail_risk_only = (
+        signals.has_new_recovery_pending_tasks
+        and signals.single_task_tail_risk
+        and not signals.has_preexisting_pending_valid_tasks
+    )
 
-    # 5. Continuidad por defecto cuando el plan sigue siendo válido
-    if (
-        signals.remaining_plan_still_valid
-        and signals.new_recovery_tasks_blocking is not True
-        and signals.recommended_next_action not in {
-            "manual_review",
-            "resequence_remaining_batches",
-            "replan_remaining_work",
-        }
-    ):
-        return ResolvedPostBatchDecision(
-            action="continue_current_plan",
-            continue_execution=True,
-            requires_replanning=False,
-            requires_resequencing=False,
-            requires_manual_review=False,
-            is_stage_closed=False,
+    return explicit_local_resequence or weak_tail_risk_only
+
+
+def _should_assign_new_work(signals: PostBatchDecisionSignals) -> bool:
+    """
+    Assignment is the canonical continuation path when:
+    - the remaining plan is still valid,
+    - there is newly created recovery work,
+    - that work does not block immediate progress strongly enough to require resequence,
+    - and we must not leave any new task unassigned before the next batch.
+    """
+    if not signals.remaining_plan_still_valid:
+        return False
+
+    if not (signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks):
+        return False
+
+    if signals.new_recovery_tasks_blocking is True:
+        return False
+
+    if signals.recommended_next_action in {
+        "manual_review",
+        "resequence_remaining_batches",
+        "replan_remaining_work",
+        "close_stage",
+    }:
+        return False
+
+    if signals.plan_change_scope in {"local_resequencing", "remaining_plan_rebuild", "high_level_replan"}:
+        return False
+
+    return True
+
+
+def _should_continue_current_plan(signals: PostBatchDecisionSignals) -> bool:
+    if not signals.remaining_plan_still_valid:
+        return False
+
+    if signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks:
+        return False
+
+    if signals.new_recovery_tasks_blocking is True:
+        return False
+
+    if signals.recommended_next_action in {
+        "manual_review",
+        "resequence_remaining_batches",
+        "replan_remaining_work",
+        "close_stage",
+    }:
+        return False
+
+    if signals.plan_change_scope in {
+        "local_resequencing",
+        "remaining_plan_rebuild",
+        "high_level_replan",
+    }:
+        return False
+
+    return True
+
+
+def resolve_post_batch_intent(
+    signals: PostBatchDecisionSignals,
+) -> ResolvedPostBatchIntent:
+    # 1. Manual review wins immediately.
+    if signals.manual_review_required or signals.decision == "manual_review_required":
+        return ResolvedPostBatchIntent(
+            intent_type="manual_review",
+            legacy_action="manual_review",
+            mutation_scope="none",
+            remaining_plan_still_valid=signals.remaining_plan_still_valid,
+            has_new_recovery_tasks=(
+                signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
+            ),
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=False,
+            should_close_stage=False,
+            requires_manual_review=True,
             reopened_finalization=False,
             notes=_join_notes(
                 signals,
-                "The current remaining plan is still valid and execution can continue without structural changes.",
+                "Manual review is required before the workflow can continue.",
             ),
+            decision_signals=list(signals.decision_signals),
         )
-    
-    # 6. Fallback conservador
-    return ResolvedPostBatchDecision(
-        action="manual_review",
-        continue_execution=False,
-        requires_replanning=False,
-        requires_resequencing=False,
+
+    # 2. Structural replan.
+    if _is_structural_replan(signals):
+        return ResolvedPostBatchIntent(
+            intent_type="replan",
+            legacy_action="replan_remaining_work",
+            mutation_scope="replan",
+            remaining_plan_still_valid=False,
+            has_new_recovery_tasks=(
+                signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
+            ),
+            requires_plan_mutation=True,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=False,
+            should_close_stage=False,
+            requires_manual_review=False,
+            reopened_finalization=True,
+            notes=_join_notes(
+                signals,
+                "The remaining plan is no longer structurally valid and must be rebuilt.",
+            ),
+            decision_signals=list(signals.decision_signals),
+        )
+
+    # 3. Local resequence / immediate blocking patch semantics.
+    if _is_local_resequence(signals):
+        return ResolvedPostBatchIntent(
+            intent_type="resequence",
+            legacy_action="resequence_remaining_batches",
+            mutation_scope="resequence",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=(
+                signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
+            ),
+            requires_plan_mutation=True,
+            requires_all_new_tasks_assigned=(
+                signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
+            ),
+            can_continue_after_application=False,
+            should_close_stage=False,
+            requires_manual_review=False,
+            reopened_finalization=True,
+            notes=_join_notes(
+                signals,
+                "The remaining plan is still valid, but the pending execution order must be adjusted locally.",
+            ),
+            decision_signals=list(signals.decision_signals),
+        )
+
+    # 4. Controlled assignment of newly created work into the live plan.
+    if _should_assign_new_work(signals):
+        return ResolvedPostBatchIntent(
+            intent_type="assign",
+            legacy_action="continue_current_plan",
+            mutation_scope="assignment",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=True,
+            requires_plan_mutation=True,
+            requires_all_new_tasks_assigned=True,
+            can_continue_after_application=True,
+            should_close_stage=False,
+            requires_manual_review=False,
+            reopened_finalization=signals.is_final_batch,
+            notes=_join_notes(
+                signals,
+                "New recovery work must be assigned into the active plan before the next batch starts.",
+            ),
+            decision_signals=list(signals.decision_signals),
+        )
+
+    # 5. Legal stage closure.
+    if _should_close_stage(signals):
+        return ResolvedPostBatchIntent(
+            intent_type="close",
+            legacy_action="close_stage",
+            mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=False,
+            should_close_stage=True,
+            requires_manual_review=False,
+            reopened_finalization=False,
+            notes=_join_notes(
+                signals,
+                "The current live plan is exhausted and the stage can be closed.",
+            ),
+            decision_signals=list(signals.decision_signals),
+        )
+
+    # 6. Plain continuation with no new recovery work to place.
+    if _should_continue_current_plan(signals):
+        return ResolvedPostBatchIntent(
+            intent_type="continue",
+            legacy_action="continue_current_plan",
+            mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=True,
+            should_close_stage=False,
+            requires_manual_review=False,
+            reopened_finalization=False,
+            notes=_join_notes(
+                signals,
+                "The current remaining plan is still valid and can continue without mutation.",
+            ),
+            decision_signals=list(signals.decision_signals),
+        )
+
+    # 7. Conservative fallback.
+    return ResolvedPostBatchIntent(
+        intent_type="manual_review",
+        legacy_action="manual_review",
+        mutation_scope="none",
+        remaining_plan_still_valid=signals.remaining_plan_still_valid,
+        has_new_recovery_tasks=(
+            signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
+        ),
+        requires_plan_mutation=False,
+        requires_all_new_tasks_assigned=False,
+        can_continue_after_application=False,
+        should_close_stage=False,
         requires_manual_review=True,
-        is_stage_closed=False,
         reopened_finalization=False,
         notes=_join_notes(
             signals,
             "The checkpoint signals were not strong enough to continue automatically.",
         ),
+        decision_signals=_append_signal(signals, "manual_review_fallback"),
+    )
+
+
+def resolve_post_batch_decision(
+    signals: PostBatchDecisionSignals,
+) -> ResolvedPostBatchDecision:
+    """
+    Legacy adapter.
+
+    Keep this function during the migration so existing callers still work while
+    the rest of the workflow moves to ResolvedPostBatchIntent.
+    """
+    intent = resolve_post_batch_intent(signals)
+
+    return ResolvedPostBatchDecision(
+        action=intent.legacy_action,
+        continue_execution=(
+            intent.intent_type in {"continue", "assign"}
+            and intent.can_continue_after_application
+        ),
+        requires_replanning=intent.intent_type == "replan",
+        requires_resequencing=intent.intent_type == "resequence",
+        requires_manual_review=intent.intent_type == "manual_review",
+        is_stage_closed=intent.intent_type == "close",
+        reopened_finalization=intent.reopened_finalization,
+        notes=intent.notes,
     )

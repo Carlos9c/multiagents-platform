@@ -1,5 +1,4 @@
 import json
-from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -26,6 +25,7 @@ from app.models.task import (
 )
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.post_batch import PostBatchResult, PostBatchTaskRunSummary
+from app.schemas.post_batch_intent import ResolvedPostBatchIntent
 from app.schemas.recovery import RecoveryContext
 from app.schemas.recovery_assignment import (
     AssignmentEvaluationSignals,
@@ -49,7 +49,7 @@ from app.services.execution_plan_patch_service import (
 )
 from app.services.post_batch_decision_service import (
     build_post_batch_decision_signals,
-    resolve_post_batch_decision,
+    resolve_post_batch_intent,
 )
 from app.services.recovery_assignment_client import call_recovery_assignment_model
 from app.services.recovery_assignment_compiler_service import (
@@ -85,17 +85,6 @@ CODE_VALIDATION_RESULT_ARTIFACT_TYPE = "code_validation_result"
 
 class PostBatchServiceError(Exception):
     """Base exception for post-batch orchestration errors."""
-
-
-@dataclass
-class NormalizedEvaluationOutcome:
-    continue_execution: bool
-    requires_replanning: bool
-    requires_resequencing: bool
-    requires_manual_review: bool
-    is_stage_closed: bool
-    reopened_finalization: bool
-    notes: str
 
 
 def _serialize_workflow_iteration_trace(trace: WorkflowIterationTrace) -> str:
@@ -528,330 +517,86 @@ def _is_new_stage_evaluation_output(evaluation_decision: Any) -> bool:
     )
 
 
-def _build_notes(
-    *,
-    decision_summary: str,
-    recommended_next_action_reason: str,
-    notes_list: Any,
-    fallback: str,
-) -> str:
-    parts: list[str] = []
-
-    if decision_summary:
-        parts.append(decision_summary)
-
-    if recommended_next_action_reason:
-        parts.append(recommended_next_action_reason)
-
-    if isinstance(notes_list, list):
-        parts.extend(str(item).strip() for item in notes_list if str(item).strip())
-
-    notes = " ".join(parts).strip()
-    return notes or fallback
-
-
-def _normalize_legacy_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
-    decision_type = _normalize_string(_read_attr(evaluation_decision, "decision_type"))
-    continue_execution = _normalize_bool(
-        _read_attr(evaluation_decision, "continue_execution"),
-        default=False,
-    )
-
-    requires_replanning = decision_type == "replan_from_level"
-    requires_resequencing = (
-        decision_type in {"insert_new_tasks", "resequence_remaining_tasks", "replan_from_level"}
-        or _normalize_bool(_read_attr(evaluation_decision, "resequence_remaining_tasks"), default=False)
-    )
-    requires_manual_review = decision_type == "manual_review"
-    is_stage_closed = decision_type == "approve_continue" and not continue_execution
-
-    if decision_type == "approve_continue":
-        notes = "Legacy evaluator approved continuation or closure."
-    elif decision_type == "request_corrections":
-        notes = "Legacy evaluator requested corrections before continuing."
-    elif decision_type == "insert_new_tasks":
-        notes = "Legacy evaluator requested insertion of new tasks."
-    elif decision_type == "resequence_remaining_tasks":
-        notes = "Legacy evaluator requested resequencing of remaining tasks."
-    elif decision_type == "replan_from_level":
-        notes = "Legacy evaluator requested replanning from a prior level."
-    elif decision_type == "manual_review":
-        notes = "Legacy evaluator requested manual review."
-    else:
-        notes = "Legacy evaluator produced an unrecognized decision type."
-
-    return NormalizedEvaluationOutcome(
-        continue_execution=continue_execution,
-        requires_replanning=requires_replanning,
-        requires_resequencing=requires_resequencing,
-        requires_manual_review=requires_manual_review,
-        is_stage_closed=is_stage_closed,
-        reopened_finalization=requires_resequencing or requires_replanning,
-        notes=notes,
-    )
-
-
-def _normalize_new_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
-    decision = _normalize_string(_read_attr(evaluation_decision, "decision"), "")
-    decision_summary = _normalize_string(_read_attr(evaluation_decision, "decision_summary"), "")
-    notes_list = _read_attr(evaluation_decision, "notes", None)
-
-    project_stage_closed = _normalize_bool(
-        _read_attr(evaluation_decision, "project_stage_closed"),
-        False,
-    )
-    manual_review_required = _normalize_bool(
-        _read_attr(evaluation_decision, "manual_review_required"),
-        False,
-    )
-    followup_atomic_tasks_required = _normalize_bool(
-        _read_attr(evaluation_decision, "followup_atomic_tasks_required"),
-        False,
-    )
-
-    recovery_strategy = _normalize_string(
-        _read_attr(evaluation_decision, "recovery_strategy"),
-        "none",
-    )
-
-    replan = _read_attr(evaluation_decision, "replan", None)
-    replan_required = False
-    replan_level = ""
-    if replan is not None:
-        replan_required = _normalize_bool(_read_attr(replan, "required"), False)
-        replan_level = _normalize_string(_read_attr(replan, "level"), "")
-
-    recommended_next_action = _normalize_string(
-        _read_attr(evaluation_decision, "recommended_next_action"),
-        "",
-    )
-    recommended_next_action_reason = _normalize_string(
-        _read_attr(evaluation_decision, "recommended_next_action_reason"),
-        "",
-    )
-
-    is_stage_closed = project_stage_closed
-    requires_manual_review = manual_review_required
-    continue_execution = False
-    requires_resequencing = False
-    requires_replanning = False
-    reopened_finalization = False
-
-    if recommended_next_action == "close_stage":
-        is_stage_closed = True
-        continue_execution = False
-
-    elif recommended_next_action == "manual_review":
-        requires_manual_review = True
-        continue_execution = False
-
-    elif recommended_next_action == "continue_current_plan":
-        continue_execution = True
-        requires_replanning = False
-        requires_resequencing = False
-
-    elif recommended_next_action == "resequence_remaining_batches":
-        continue_execution = False
-        requires_resequencing = True
-        requires_replanning = False
-        reopened_finalization = True
-
-    elif recommended_next_action == "replan_remaining_work":
-        continue_execution = False
-        requires_replanning = True
-        requires_resequencing = False
-        reopened_finalization = True
-
-    else:
-        if decision == "stage_completed":
-            is_stage_closed = True
-            continue_execution = False
-
-        elif decision == "manual_review_required":
-            requires_manual_review = True
-            continue_execution = False
-
-        elif decision == "stage_incomplete":
-            if replan_required and replan_level == "high_level":
-                requires_replanning = True
-                continue_execution = False
-                reopened_finalization = True
-            elif (
-                followup_atomic_tasks_required
-                or recovery_strategy in {
-                    "insert_followup_atomic_tasks",
-                    "reatomize_failed_tasks",
-                }
-                or (replan_required and replan_level == "atomic")
-            ):
-                requires_resequencing = True
-                continue_execution = False
-                reopened_finalization = True
-            elif requires_manual_review:
-                continue_execution = False
-            else:
-                continue_execution = True
-
-        else:
-            raise PostBatchServiceError(
-                "Checkpoint evaluation produced an unsupported StageEvaluationOutput decision "
-                f"without a usable recommended_next_action. decision='{decision}'."
-            )
-
-    if requires_manual_review:
-        continue_execution = False
-
-    if is_stage_closed:
-        continue_execution = False
-        requires_replanning = False
-        requires_resequencing = False
-        reopened_finalization = False
-
-    if requires_replanning and requires_resequencing:
+def _require_new_stage_evaluation_output(evaluation_decision: Any) -> None:
+    if not _is_new_stage_evaluation_output(evaluation_decision):
         raise PostBatchServiceError(
-            "Checkpoint evaluation normalization produced both replanning and resequencing. "
-            "These actions must be mutually exclusive at post-batch orchestration time."
+            "post_batch_service no longer supports legacy checkpoint evaluation outputs. "
+            "evaluate_checkpoint() must return the current StageEvaluationOutput contract."
         )
 
-    notes = _build_notes(
-        decision_summary=decision_summary,
-        recommended_next_action_reason=recommended_next_action_reason,
-        notes_list=notes_list,
-        fallback="Checkpoint evaluation completed.",
+
+def _derive_legacy_flags_from_intent(
+    intent: ResolvedPostBatchIntent,
+) -> tuple[bool, bool, bool, bool, bool]:
+    continue_execution = (
+        intent.intent_type in {"continue", "assign"}
+        and intent.can_continue_after_application
+    )
+    requires_replanning = intent.intent_type == "replan"
+    requires_resequencing = intent.intent_type == "resequence"
+    requires_manual_review = intent.intent_type == "manual_review"
+    is_stage_closed = intent.intent_type == "close"
+
+    return (
+        continue_execution,
+        requires_replanning,
+        requires_resequencing,
+        requires_manual_review,
+        is_stage_closed,
     )
 
-    return NormalizedEvaluationOutcome(
-        continue_execution=continue_execution,
-        requires_replanning=requires_replanning,
-        requires_resequencing=requires_resequencing,
-        requires_manual_review=requires_manual_review,
-        is_stage_closed=is_stage_closed,
-        reopened_finalization=reopened_finalization,
-        notes=notes,
-    )
 
-
-def _normalize_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
-    if evaluation_decision is None:
-        raise PostBatchServiceError("Checkpoint evaluation returned no decision object.")
-
-    if _is_new_stage_evaluation_output(evaluation_decision):
-        return _normalize_new_evaluation_outcome(evaluation_decision)
-
-    return _normalize_legacy_evaluation_outcome(evaluation_decision)
-
-
-def _should_materialize_patch_batch(
+def _normalize_non_final_close_intent(
     *,
-    normalized: NormalizedEvaluationOutcome,
-    evaluation_decision: Any,
-    created_recovery_task_ids: list[int],
-) -> bool:
-    if not created_recovery_task_ids:
-        return False
-
-    if not normalized.requires_resequencing or normalized.requires_replanning:
-        return False
-
-    if not _normalize_bool(_read_attr(evaluation_decision, "remaining_plan_still_valid"), True):
-        return False
-
-    if not _normalize_bool(_read_attr(evaluation_decision, "new_recovery_tasks_blocking"), False):
-        return False
-
-    return True
-
-
-def _should_run_recovery_assignment(
-    *,
-    resolved_action: str | None,
-    normalized: NormalizedEvaluationOutcome,
-    evaluation_decision: Any,
-    created_recovery_task_ids: list[int],
-) -> bool:
-    if not created_recovery_task_ids:
-        return False
-
-    if resolved_action != "continue_current_plan":
-        return False
-
-    if normalized.requires_replanning or normalized.requires_resequencing or normalized.requires_manual_review:
-        return False
-
-    if not _normalize_bool(_read_attr(evaluation_decision, "remaining_plan_still_valid"), True):
-        return False
-
-    if _normalize_bool(_read_attr(evaluation_decision, "new_recovery_tasks_blocking"), False):
-        return False
-
-    return True
-
-
-def _degrade_illegal_stage_closure_for_non_final_batch(
-    *,
-    normalized: NormalizedEvaluationOutcome,
+    intent: ResolvedPostBatchIntent,
     is_final_batch: bool,
-) -> NormalizedEvaluationOutcome:
-    if is_final_batch or not normalized.is_stage_closed:
-        return normalized
+) -> ResolvedPostBatchIntent:
+    if is_final_batch or intent.intent_type != "close":
+        return intent
 
-    return NormalizedEvaluationOutcome(
-        continue_execution=True,
-        requires_replanning=False,
-        requires_resequencing=False,
+    decision_signals = list(dict.fromkeys(intent.decision_signals + ["non_final_close_degraded"]))
+
+    return ResolvedPostBatchIntent(
+        intent_type="continue",
+        legacy_action="continue_current_plan",
+        mutation_scope="none",
+        remaining_plan_still_valid=intent.remaining_plan_still_valid,
+        has_new_recovery_tasks=False,
+        requires_plan_mutation=False,
+        requires_all_new_tasks_assigned=False,
+        can_continue_after_application=True,
+        should_close_stage=False,
         requires_manual_review=False,
-        is_stage_closed=False,
         reopened_finalization=False,
         notes=(
             "Evaluator proposed closing the stage at a non-final batch. "
             "Stage closure was deferred because only the final batch can close the stage in the current workflow."
         ),
+        decision_signals=decision_signals,
     )
 
 
-def _reconcile_hierarchy_after_batch_changes(
-    db: Session,
+def _should_run_immediate_resequence_patch(
     *,
-    executed_task_ids: list[int],
+    intent: ResolvedPostBatchIntent,
     created_recovery_task_ids: list[int],
-) -> None:
-    affected_task_ids = list(dict.fromkeys(executed_task_ids + created_recovery_task_ids))
+    evaluation_decision: Any,
+) -> bool:
+    if intent.intent_type != "resequence":
+        return False
 
-    try:
-        reconcile_task_hierarchy_after_changes(
-            db=db,
-            affected_task_ids=affected_task_ids,
-        )
-    except TaskHierarchyReconciliationServiceError as exc:
+    if not created_recovery_task_ids:
+        return False
+
+    if not _normalize_bool(_read_attr(evaluation_decision, "new_recovery_tasks_blocking"), False):
+        return False
+
+    if not intent.remaining_plan_still_valid:
         raise PostBatchServiceError(
-            f"Post-batch hierarchy reconciliation failed: {str(exc)}"
-        ) from exc
-
-
-def _get_tasks_by_ids(
-    db: Session,
-    *,
-    project_id: int,
-    task_ids: list[int],
-) -> list[Task]:
-    if not task_ids:
-        return []
-
-    tasks = (
-        db.query(Task)
-        .filter(
-            Task.project_id == project_id,
-            Task.id.in_(task_ids),
+            "Cannot apply an immediate resequence patch when the remaining plan is not valid."
         )
-        .all()
-    )
-    by_id = {task.id: task for task in tasks}
-    missing = [task_id for task_id in task_ids if task_id not in by_id]
-    if missing:
-        raise PostBatchServiceError(
-            f"Recovery assignment could not find tasks in project {project_id}: {missing}"
-        )
-    return [by_id[task_id] for task_id in task_ids]
+
+    return True
 
 
 def _build_recovery_assignment_executed_batch_summary(
@@ -916,6 +661,32 @@ def _build_recovery_assignment_recovery_signals(
     return AssignmentRecoverySignals(entries=entries)
 
 
+def _get_tasks_by_ids(
+    db: Session,
+    *,
+    project_id: int,
+    task_ids: list[int],
+) -> list[Task]:
+    if not task_ids:
+        return []
+
+    tasks = (
+        db.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.id.in_(task_ids),
+        )
+        .all()
+    )
+    by_id = {task.id: task for task in tasks}
+    missing = [task_id for task_id in task_ids if task_id not in by_id]
+    if missing:
+        raise PostBatchServiceError(
+            f"Recovery assignment could not find tasks in project {project_id}: {missing}"
+        )
+    return [by_id[task_id] for task_id in task_ids]
+
+
 def _build_recovery_assignment_new_tasks(
     db: Session,
     *,
@@ -973,7 +744,9 @@ def _build_recovery_assignment_live_plan_summary(
     batch: ExecutionBatch,
 ) -> LivePlanSummaryForAssignment:
     current_index = next(
-        index for index, current_batch in enumerate(plan.execution_batches) if current_batch.batch_id == batch.batch_id
+        index
+        for index, current_batch in enumerate(plan.execution_batches)
+        if current_batch.batch_id == batch.batch_id
     )
     remaining_batches = plan.execution_batches[current_index + 1 :]
 
@@ -1003,7 +776,9 @@ def _build_recovery_assignment_next_useful_progress(
     batch: ExecutionBatch,
 ) -> NextUsefulProgressSummary | None:
     current_index = next(
-        index for index, current_batch in enumerate(plan.execution_batches) if current_batch.batch_id == batch.batch_id
+        index
+        for index, current_batch in enumerate(plan.execution_batches)
+        if current_batch.batch_id == batch.batch_id
     )
     if current_index + 1 >= len(plan.execution_batches):
         return None
@@ -1096,7 +871,7 @@ def _build_recovery_assignment_input(
             or getattr(project, "name", None)
             or "Continue the current project safely."
         ),
-        current_stage_summary=project.description,
+        current_stage_summary=getattr(project, "description", None),
         resolved_action=resolved_action,
         assignment_mode="continue_with_assignment",
         executed_batch_summary=_build_recovery_assignment_executed_batch_summary(
@@ -1151,6 +926,25 @@ def _build_recovery_assignment_input(
         ),
         known_relationships=KnownAssignmentRelationships(),
     )
+
+
+def _reconcile_hierarchy_after_batch_changes(
+    db: Session,
+    *,
+    executed_task_ids: list[int],
+    created_recovery_task_ids: list[int],
+) -> None:
+    affected_task_ids = list(dict.fromkeys(executed_task_ids + created_recovery_task_ids))
+
+    try:
+        reconcile_task_hierarchy_after_changes(
+            db=db,
+            affected_task_ids=affected_task_ids,
+        )
+    except TaskHierarchyReconciliationServiceError as exc:
+        raise PostBatchServiceError(
+            f"Post-batch hierarchy reconciliation failed: {str(exc)}"
+        ) from exc
 
 
 def process_batch_after_execution(
@@ -1322,83 +1116,71 @@ def process_batch_after_execution(
         decision=evaluation_decision,
     )
 
-    resolved_action: str | None = None
-    resolved_decision_signals: list[str] = []
-    patched_execution_plan: ExecutionPlan | None = None
+    _require_new_stage_evaluation_output(evaluation_decision)
 
-    if _is_new_stage_evaluation_output(evaluation_decision):
-        current_batch_index = next(
-            index
-            for index, current_batch in enumerate(plan.execution_batches)
-            if current_batch.batch_id == batch_id
-        )
-        remaining_batch_count = len(plan.execution_batches) - (current_batch_index + 1)
+    current_batch_index = next(
+        index
+        for index, current_batch in enumerate(plan.execution_batches)
+        if current_batch.batch_id == batch_id
+    )
+    remaining_batch_count = len(plan.execution_batches) - (current_batch_index + 1)
 
-        preexisting_pending_valid_task_count = _count_preexisting_valid_pending_tasks(
-            db=db,
-            project_id=project_id,
-            executed_task_ids=executed_task_ids,
-            created_recovery_task_ids=created_recovery_task_ids,
-        )
+    preexisting_pending_valid_task_count = _count_preexisting_valid_pending_tasks(
+        db=db,
+        project_id=project_id,
+        executed_task_ids=executed_task_ids,
+        created_recovery_task_ids=created_recovery_task_ids,
+    )
 
-        new_recovery_pending_task_count = _count_valid_pending_tasks_for_ids(
-            db=db,
-            project_id=project_id,
-            task_ids=created_recovery_task_ids,
-        )
+    new_recovery_pending_task_count = _count_valid_pending_tasks_for_ids(
+        db=db,
+        project_id=project_id,
+        task_ids=created_recovery_task_ids,
+    )
 
-        has_pending_valid_tasks = (
-            preexisting_pending_valid_task_count + new_recovery_pending_task_count
-        ) > 0
+    has_pending_valid_tasks = (
+        preexisting_pending_valid_task_count + new_recovery_pending_task_count
+    ) > 0
 
-        decision_signals = build_post_batch_decision_signals(
-            evaluation_decision=evaluation_decision,
-            recovery_context=aggregated_recovery_context,
-            has_pending_valid_tasks=has_pending_valid_tasks,
-            remaining_batch_count=remaining_batch_count,
-            is_final_batch=is_final_batch,
-        )
-
-        decision_signals.has_preexisting_pending_valid_tasks = (
-            preexisting_pending_valid_task_count > 0
-        )
-        decision_signals.preexisting_pending_valid_task_count = (
-            preexisting_pending_valid_task_count
-        )
-        decision_signals.has_new_recovery_pending_tasks = (
-            new_recovery_pending_task_count > 0
-        )
-        decision_signals.new_recovery_pending_task_count = (
-            new_recovery_pending_task_count
-        )
-
-        resolved = resolve_post_batch_decision(decision_signals)
-
-        resolved_action = resolved.action
-        resolved_decision_signals = list(getattr(decision_signals, "decision_signals", []) or [])
-
-        normalized = NormalizedEvaluationOutcome(
-            continue_execution=resolved.continue_execution,
-            requires_replanning=resolved.requires_replanning,
-            requires_resequencing=resolved.requires_resequencing,
-            requires_manual_review=resolved.requires_manual_review,
-            is_stage_closed=resolved.is_stage_closed,
-            reopened_finalization=resolved.reopened_finalization,
-            notes=resolved.notes,
-        )
-    else:
-        normalized = _normalize_evaluation_outcome(evaluation_decision)
-
-    normalized = _degrade_illegal_stage_closure_for_non_final_batch(
-        normalized=normalized,
+    decision_signals = build_post_batch_decision_signals(
+        evaluation_decision=evaluation_decision,
+        recovery_context=aggregated_recovery_context,
+        has_pending_valid_tasks=has_pending_valid_tasks,
+        remaining_batch_count=remaining_batch_count,
         is_final_batch=is_final_batch,
     )
 
-    requires_replanning = normalized.requires_replanning
-    requires_resequencing = normalized.requires_resequencing
-    requires_manual_review = normalized.requires_manual_review
-    continue_execution = normalized.continue_execution
+    decision_signals.has_preexisting_pending_valid_tasks = (
+        preexisting_pending_valid_task_count > 0
+    )
+    decision_signals.preexisting_pending_valid_task_count = (
+        preexisting_pending_valid_task_count
+    )
+    decision_signals.has_new_recovery_pending_tasks = (
+        new_recovery_pending_task_count > 0
+    )
+    decision_signals.new_recovery_pending_task_count = (
+        new_recovery_pending_task_count
+    )
 
+    resolved_intent = resolve_post_batch_intent(decision_signals)
+    resolved_intent = _normalize_non_final_close_intent(
+        intent=resolved_intent,
+        is_final_batch=is_final_batch,
+    )
+
+    resolved_action = resolved_intent.legacy_action
+    resolved_decision_signals = list(resolved_intent.decision_signals)
+
+    (
+        continue_execution,
+        requires_replanning,
+        requires_resequencing,
+        requires_manual_review,
+        is_stage_closed,
+    ) = _derive_legacy_flags_from_intent(resolved_intent)
+
+    patched_execution_plan: ExecutionPlan | None = None
     finalization_guard_triggered = False
 
     if continue_execution:
@@ -1406,13 +1188,42 @@ def process_batch_after_execution(
     else:
         status = "checkpoint_blocked"
 
-    notes = normalized.notes or "Post-batch processing completed with explicit checkpoint evaluation."
+    notes = resolved_intent.notes or "Post-batch processing completed with explicit checkpoint evaluation."
 
-    if _should_materialize_patch_batch(
-        normalized=normalized,
-        evaluation_decision=evaluation_decision,
-        created_recovery_task_ids=created_recovery_task_ids,
-    ):
+    if resolved_intent.intent_type == "resequence":
+        if _should_run_immediate_resequence_patch(
+            intent=resolved_intent,
+            created_recovery_task_ids=created_recovery_task_ids,
+            evaluation_decision=evaluation_decision,
+        ):
+            patched_execution_plan = insert_patch_batch_after_batch(
+                plan=plan,
+                anchor_batch_id=batch.batch_id,
+                task_ids=created_recovery_task_ids,
+                goal="Execute recovery work required before continuing the pending plan.",
+                checkpoint_reason=(
+                    "Validate the inserted recovery patch batch before continuing the remaining plan."
+                ),
+            )
+
+            persist_patched_execution_plan(
+                db=db,
+                project_id=project_id,
+                plan=patched_execution_plan,
+            )
+
+            notes = (
+                f"{notes} A local patch batch was inserted into the current plan to execute "
+                f"recovery-created work before continuing."
+            )
+        else:
+            continue_execution = False
+            requires_replanning = False
+            requires_resequencing = True
+            requires_manual_review = False
+            is_stage_closed = False
+            status = "checkpoint_blocked"
+
         patched_execution_plan = insert_patch_batch_after_batch(
             plan=plan,
             anchor_batch_id=batch.batch_id,
@@ -1434,12 +1245,12 @@ def process_batch_after_execution(
             f"recovery-created work before continuing."
         )
 
-    elif _should_run_recovery_assignment(
-        resolved_action=resolved_action,
-        normalized=normalized,
-        evaluation_decision=evaluation_decision,
-        created_recovery_task_ids=created_recovery_task_ids,
-    ):
+    elif resolved_intent.intent_type == "assign":
+        if not created_recovery_task_ids:
+            raise PostBatchServiceError(
+                "Resolved assign intent requires newly created recovery tasks, but none were found."
+            )
+
         assignment_input = _build_recovery_assignment_input(
             db=db,
             project=project,
@@ -1452,7 +1263,7 @@ def process_batch_after_execution(
             successful_task_ids=successful_task_ids,
             problematic_run_ids=problematic_run_ids,
             task_run_summaries=task_run_summaries,
-            resolved_action=resolved_action or "continue_current_plan",
+            resolved_action=resolved_action,
         )
 
         _persist_recovery_assignment_payload(
@@ -1489,11 +1300,15 @@ def process_batch_after_execution(
             requires_resequencing = False
             requires_manual_review = False
             continue_execution = False
+            is_stage_closed = False
             resolved_action = "replan_remaining_work"
             status = "checkpoint_blocked"
             notes = (
                 f"{notes} Recovery assignment escalated to replanning because the newly created "
                 f"work revealed a structural conflict: {' '.join(compiled_assignment.notes).strip() or 'no extra notes'}"
+            )
+            resolved_decision_signals = list(
+                dict.fromkeys(resolved_decision_signals + ["assignment_escalated_to_replan"])
             )
         else:
             if compiled_assignment.patched_execution_plan is None:
@@ -1542,23 +1357,56 @@ def process_batch_after_execution(
             requires_replanning = False
             requires_resequencing = False
             requires_manual_review = False
+            is_stage_closed = False
             status = "completed_with_evaluation"
-
-            if normalized.is_stage_closed:
-                normalized = NormalizedEvaluationOutcome(
-                    continue_execution=True,
-                    requires_replanning=False,
-                    requires_resequencing=False,
-                    requires_manual_review=False,
-                    is_stage_closed=False,
-                    reopened_finalization=False,
-                    notes=normalized.notes,
-                )
 
             cluster_count = len(compiled_assignment.compiled_cluster_assignments)
             notes = (
                 f"{notes} Recovery assignment placed all new tasks before continuing. "
                 f"clusters_assigned={cluster_count}; assigned_task_ids={compiled_assignment.assigned_task_ids}."
+            )
+
+    elif resolved_intent.intent_type == "replan":
+        continue_execution = False
+        requires_replanning = True
+        requires_resequencing = False
+        requires_manual_review = False
+        is_stage_closed = False
+        status = "checkpoint_blocked"
+
+    elif resolved_intent.intent_type == "manual_review":
+        continue_execution = False
+        requires_replanning = False
+        requires_resequencing = False
+        requires_manual_review = True
+        is_stage_closed = False
+        status = "checkpoint_blocked"
+
+    elif resolved_intent.intent_type == "close":
+        continue_execution = False
+        requires_replanning = False
+        requires_resequencing = False
+        requires_manual_review = False
+        is_stage_closed = True
+
+    elif resolved_intent.intent_type == "continue":
+        continue_execution = True
+        requires_replanning = False
+        requires_resequencing = False
+        requires_manual_review = False
+        is_stage_closed = False
+        status = "completed_with_evaluation"
+
+    else:
+        raise PostBatchServiceError(
+            f"Unsupported resolved intent_type '{resolved_intent.intent_type}'."
+        )
+
+    if resolved_intent.requires_all_new_tasks_assigned:
+        if created_recovery_task_ids and patched_execution_plan is None and not requires_replanning:
+            raise PostBatchServiceError(
+                "Post-batch intent required assignment of all new recovery tasks, "
+                "but no patched execution plan was produced."
             )
 
     if resolved_action:
@@ -1574,14 +1422,14 @@ def process_batch_after_execution(
                 f"{notes} The original final batch no longer closes the stage because new work "
                 "was assigned into the live plan. The stage remains open until the new final batch is evaluated."
             )
-        elif normalized.is_stage_closed:
+        elif is_stage_closed:
             continue_execution = False
             status = "project_stage_closed"
             notes = (
-                normalized.notes
+                resolved_intent.notes
                 or "The evaluator considered the final batch sufficient to close this project stage."
             )
-        elif normalized.reopened_finalization or requires_replanning or requires_resequencing:
+        elif resolved_intent.reopened_finalization or requires_replanning or requires_resequencing:
             next_finalization_iteration_count = finalization_iteration_count + 1
 
             if next_finalization_iteration_count > max_finalization_iterations:
@@ -1600,16 +1448,12 @@ def process_batch_after_execution(
                 continue_execution = False
                 status = "finalization_reopened"
                 notes = (
-                    normalized.notes
+                    resolved_intent.notes
                     or "The evaluator reopened finalization. A new final iteration must be sequenced, "
                     "and the resulting plan must again end with an explicit final checkpoint."
                 )
         else:
-            if continue_execution:
-                status = "completed_with_evaluation"
-            else:
-                status = "checkpoint_blocked"
-            notes = normalized.notes or "Final batch evaluated but stage was not closed."
+            status = "completed_with_evaluation" if continue_execution else "checkpoint_blocked"
 
     result = PostBatchResult(
         project_id=project_id,
