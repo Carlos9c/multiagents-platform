@@ -1,3 +1,4 @@
+import types
 import pytest
 
 import json
@@ -8,6 +9,10 @@ from app.models.task import (
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_PENDING,
+)
+from app.services.post_batch_service import (
+    PostBatchServiceError,
+    process_batch_after_execution,
 )
 from app.services.post_batch_service import (
     PostBatchServiceError,
@@ -1116,3 +1121,402 @@ def test_post_batch_creates_patch_batch_for_blocking_recovery_work(
     assert patch_batch.name == "Plan 1 · Batch 1.1"
     assert len(patch_batch.task_ids) == 1
     assert patch_batch.task_ids[0] > 0
+
+
+def test_post_batch_runs_recovery_assignment_when_new_non_blocking_tasks_must_be_assigned(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+    make_recovery_decision,
+):
+    project = make_project()
+
+    failed_task = make_task(
+        project_id=project.id,
+        title="Task with recovery follow-up",
+        status=TASK_STATUS_FAILED,
+    )
+    next_batch_task = make_task(
+        project_id=project.id,
+        title="Next batch task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    make_execution_run(
+        task_id=failed_task.id,
+        status="failed",
+        failure_type="validation",
+        failure_code="missing_followup",
+        work_summary="Task failed but produced enough signal for recovery.",
+    )
+    make_artifact(
+        project_id=project.id,
+        task_id=failed_task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"failed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=2,
+        batches=[
+            {
+                "batch_id": "plan_2_batch_1",
+                "task_ids": [failed_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "plan_2_batch_2",
+                "task_ids": [next_batch_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    created_recovery_task = make_task(
+        project_id=project.id,
+        title="Recovery-created task",
+        status=TASK_STATUS_PENDING,
+        parent_task_id=None,
+    )
+
+    recovery_decision = make_recovery_decision(
+        source_task_id=failed_task.id,
+        source_run_id=_get_latest_run_id_for_task(db_session, failed_task.id),
+        action="insert_followup",
+        still_blocks_progress=False,
+        created_tasks=[
+            {
+                "title": created_recovery_task.title,
+                "description": created_recovery_task.description,
+                "implementation_notes": created_recovery_task.implementation_notes,
+                "acceptance_criteria": created_recovery_task.acceptance_criteria,
+                "priority": created_recovery_task.priority,
+                "task_type": created_recovery_task.task_type,
+            }
+        ],
+        reason="Recovery created one non-blocking follow-up task.",
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="continue_current_plan",
+        recommended_next_action_reason="The plan can continue if the new task is assigned first.",
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=False,
+        notes=["Continue, but do not leave the new recovery task unassigned."],
+    )
+
+    compiled_plan = make_execution_plan(
+        plan_version=2,
+        batches=[
+            {
+                "batch_id": "plan_2_batch_1",
+                "task_ids": [failed_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "plan_2_batch_1_patch_1",
+                "batch_internal_id": "2_1_p1",
+                "batch_index": 1,
+                "plan_version": 2,
+                "task_ids": [created_recovery_task.id],
+                "checkpoint_id": "checkpoint_plan_2_batch_1_patch_1",
+                "checkpoint_name": "Patch checkpoint 1.1",
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "plan_2_batch_2",
+                "task_ids": [next_batch_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.generate_recovery_decision",
+        lambda **kwargs: recovery_decision,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_recovery_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.materialize_recovery_decision",
+        lambda **kwargs: [created_recovery_task],
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.call_recovery_assignment_model",
+        lambda **kwargs: types.SimpleNamespace(
+            strategy="continue_with_assignment",
+            model_dump=lambda mode="json": {
+                "strategy": "continue_with_assignment",
+                "clusters": [{"cluster_id": "cluster_1"}],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.compile_recovery_assignment_plan",
+        lambda **kwargs: types.SimpleNamespace(
+            strategy="continue_with_assignment",
+            requires_replan=False,
+            patched_execution_plan=compiled_plan,
+            assigned_task_ids=[created_recovery_task.id],
+            unassigned_task_ids=[],
+            compiled_cluster_assignments=[
+                types.SimpleNamespace(
+                    cluster_id="cluster_1",
+                    task_ids_in_execution_order=[created_recovery_task.id],
+                    impact_type="additive_deferred",
+                    placement_relation="after_current_tail",
+                    batch_assignment_mode="new_patch_batch",
+                    target_batch_id="plan_2_batch_1_patch_1",
+                    target_batch_name="Plan 2 · Batch 1.1",
+                    intrabatch_placement_mode="not_applicable",
+                    anchor_task_id=None,
+                    rationale="Append the new task as a patch batch.",
+                )
+            ],
+            notes=["All new work was assigned safely."],
+        ),
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="plan_2_batch_1",
+        persist_result=True,
+    )
+
+    assert result.status == "completed_with_evaluation"
+    assert result.continue_execution is True
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+    assert result.requires_manual_review is False
+    assert result.patched_execution_plan is not None
+    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
+        "plan_2_batch_1",
+        "plan_2_batch_1_patch_1",
+        "plan_2_batch_2",
+    ]
+    assert "Recovery assignment placed all new tasks before continuing" in result.notes
+
+    artifact_types = [
+        artifact.artifact_type
+        for artifact in db_session.query(Artifact)
+        .filter(Artifact.project_id == project.id)
+        .order_by(Artifact.id.asc())
+        .all()
+    ]
+    assert "recovery_assignment_input" in artifact_types
+    assert "recovery_assignment_output" in artifact_types
+    assert "recovery_assignment_compiled_plan" in artifact_types
+    assert "execution_plan_patch" in artifact_types
+
+
+def test_post_batch_final_batch_stays_open_when_recovery_assignment_extends_the_live_plan(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_artifact,
+    make_execution_plan,
+    make_stage_evaluation_output,
+    make_recovery_decision,
+):
+    project = make_project()
+
+    failed_final_task = make_task(
+        project_id=project.id,
+        title="Final batch task with recovery follow-up",
+        status=TASK_STATUS_FAILED,
+    )
+
+    make_execution_run(
+        task_id=failed_final_task.id,
+        status="failed",
+        failure_type="validation",
+        failure_code="needs_followup",
+        work_summary="The final batch surfaced one remaining follow-up task.",
+    )
+    make_artifact(
+        project_id=project.id,
+        task_id=failed_final_task.id,
+        artifact_type="code_validation_result",
+        content='{"decision":"failed"}',
+    )
+
+    plan = make_execution_plan(
+        plan_version=3,
+        batches=[
+            {
+                "batch_id": "plan_3_batch_1",
+                "task_ids": [failed_final_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            }
+        ],
+    )
+
+    created_recovery_task = make_task(
+        project_id=project.id,
+        title="Recovery-created tail task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    recovery_decision = make_recovery_decision(
+        source_task_id=failed_final_task.id,
+        source_run_id=_get_latest_run_id_for_task(db_session, failed_final_task.id),
+        action="insert_followup",
+        still_blocks_progress=False,
+        created_tasks=[
+            {
+                "title": created_recovery_task.title,
+                "description": created_recovery_task.description,
+                "implementation_notes": created_recovery_task.implementation_notes,
+                "acceptance_criteria": created_recovery_task.acceptance_criteria,
+                "priority": created_recovery_task.priority,
+                "task_type": created_recovery_task.task_type,
+            }
+        ],
+        reason="Recovery created one additional task after the previously final batch.",
+    )
+
+    evaluation_output = make_stage_evaluation_output(
+        decision="stage_incomplete",
+        project_stage_closed=False,
+        stage_goals_satisfied=False,
+        recommended_next_action="continue_current_plan",
+        recommended_next_action_reason=(
+            "The original final batch no longer closes the stage because the new recovery work "
+            "must be assigned before completion."
+        ),
+        remaining_plan_still_valid=True,
+        new_recovery_tasks_blocking=False,
+        notes=["Recovery introduced new pending work, so the stage must remain open."],
+    )
+
+    compiled_plan = make_execution_plan(
+        plan_version=3,
+        batches=[
+            {
+                "batch_id": "plan_3_batch_1",
+                "task_ids": [failed_final_task.id],
+                "evaluation_focus": ["functional_coverage"],
+            },
+            {
+                "batch_id": "plan_3_batch_1_patch_1",
+                "batch_internal_id": "3_1_p1",
+                "batch_index": 1,
+                "plan_version": 3,
+                "task_ids": [created_recovery_task.id],
+                "checkpoint_id": "checkpoint_plan_3_batch_1_patch_1",
+                "checkpoint_name": "Patch checkpoint 1.1",
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.post_batch_service.generate_recovery_decision",
+        lambda **kwargs: recovery_decision,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_recovery_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.materialize_recovery_decision",
+        lambda **kwargs: [created_recovery_task],
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.evaluate_checkpoint",
+        lambda **kwargs: evaluation_output,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.persist_evaluation_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.call_recovery_assignment_model",
+        lambda **kwargs: types.SimpleNamespace(
+            strategy="continue_with_assignment",
+            model_dump=lambda mode="json": {
+                "strategy": "continue_with_assignment",
+                "clusters": [{"cluster_id": "cluster_1"}],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.post_batch_service.compile_recovery_assignment_plan",
+        lambda **kwargs: types.SimpleNamespace(
+            strategy="continue_with_assignment",
+            requires_replan=False,
+            patched_execution_plan=compiled_plan,
+            assigned_task_ids=[created_recovery_task.id],
+            unassigned_task_ids=[],
+            compiled_cluster_assignments=[
+                types.SimpleNamespace(
+                    cluster_id="cluster_1",
+                    task_ids_in_execution_order=[created_recovery_task.id],
+                    impact_type="additive_deferred",
+                    placement_relation="after_current_tail",
+                    batch_assignment_mode="new_patch_batch",
+                    target_batch_id="plan_3_batch_1_patch_1",
+                    target_batch_name="Plan 3 · Batch 1.1",
+                    intrabatch_placement_mode="not_applicable",
+                    anchor_task_id=None,
+                    rationale="Append the tail task after the old final batch.",
+                )
+            ],
+            notes=["The stage stays open until the new final batch is evaluated."],
+        ),
+    )
+
+    result = process_batch_after_execution(
+        db_session,
+        project_id=project.id,
+        plan=plan,
+        batch_id="plan_3_batch_1",
+        persist_result=False,
+    )
+
+    assert result.is_final_batch is True
+    assert result.status == "completed_with_evaluation"
+    assert result.continue_execution is True
+    assert result.requires_replanning is False
+    assert result.requires_resequencing is False
+    assert result.patched_execution_plan is not None
+    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
+        "plan_3_batch_1",
+        "plan_3_batch_1_patch_1",
+    ]
+    assert "original final batch no longer closes the stage" in result.notes
+
+
+def _get_latest_run_id_for_task(db_session, task_id: int) -> int:
+    from app.models.execution_run import ExecutionRun
+
+    run = (
+        db_session.query(ExecutionRun)
+        .filter(ExecutionRun.task_id == task_id)
+        .order_by(ExecutionRun.id.desc())
+        .first()
+    )
+    assert run is not None
+    return run.id

@@ -447,7 +447,6 @@ def _run_execution_iteration(
     while current_index < len(current_plan.execution_batches):
         batch = current_plan.execution_batches[current_index]
 
-        # Guardia defensiva: evita reprocesar el mismo batch si el plan cambia durante la iteración
         if batch.batch_id in processed_batch_ids_set:
             raise ProjectWorkflowServiceError(
                 f"Workflow detected an attempt to reprocess batch '{batch.batch_id}' "
@@ -516,17 +515,12 @@ def _run_execution_iteration(
             resulting_status = "execution_in_progress"
             break
 
-        # Caso especial: resequence local materializado como patch batch dentro del mismo plan.
-        # Cambiamos al plan parcheado y avanzamos al siguiente índice para ejecutar el patch recién insertado,
-        # evitando volver a caer sobre el batch ya procesado.
         patched_execution_plan = getattr(post_batch_result, "patched_execution_plan", None)
-        resolved_action = getattr(post_batch_result, "resolved_action", None)
         requires_replanning = getattr(post_batch_result, "requires_replanning", False)
         requires_manual_review = getattr(post_batch_result, "requires_manual_review", False)
 
         if (
             patched_execution_plan is not None
-            and resolved_action == "resequence_remaining_batches"
             and not requires_replanning
             and not requires_manual_review
         ):
@@ -536,7 +530,6 @@ def _run_execution_iteration(
             current_index += 1
             continue
 
-        # Resequence sin plan parcheado: salir para que una nueva iteración recalcule el plan.
         if getattr(post_batch_result, "requires_resequencing", False):
             reopened_finalization = True
             resulting_status = "execution_in_progress"
@@ -550,7 +543,6 @@ def _run_execution_iteration(
         resulting_status = "awaiting_manual_review"
         break
 
-
     iteration_summary = WorkflowIterationSummary(
         iteration_number=iteration_number,
         plan_version=plan.plan_version,
@@ -560,7 +552,7 @@ def _run_execution_iteration(
         notes=(
             "Iteration ended because the stage was closed."
             if resulting_status == "stage_closed"
-            else "Iteration ended because an automatic resequencing/replanning step is required."
+            else "Iteration ended because the live plan was extended, resequenced, or replanning is required."
             if reopened_finalization
             else "Iteration ended because manual review is required."
             if manual_review_required

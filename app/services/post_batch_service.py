@@ -24,12 +24,38 @@ from app.models.task import (
     TERMINAL_TASK_STATUSES,
     Task,
 )
-from app.schemas.workflow_iteration_trace import WorkflowIterationTrace
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.post_batch import PostBatchResult, PostBatchTaskRunSummary
 from app.schemas.recovery import RecoveryContext
+from app.schemas.recovery_assignment import (
+    AssignmentEvaluationSignals,
+    AssignmentRecoverySignal,
+    AssignmentRecoverySignals,
+    ExecutedBatchAssignmentSummary,
+    KnownAssignmentRelationships,
+    LivePlanSummaryForAssignment,
+    NextUsefulProgressSummary,
+    PendingTaskSummary,
+    RecoveryAssignmentInput,
+    RecoveryTaskForAssignment,
+    RemainingBatchSummary,
+)
+from app.schemas.workflow_iteration_trace import WorkflowIterationTrace
 from app.services.artifacts import create_artifact
 from app.services.evaluation_service import evaluate_checkpoint, persist_evaluation_decision
+from app.services.execution_plan_patch_service import (
+    insert_patch_batch_after_batch,
+    persist_patched_execution_plan,
+)
+from app.services.post_batch_decision_service import (
+    build_post_batch_decision_signals,
+    resolve_post_batch_decision,
+)
+from app.services.recovery_assignment_client import call_recovery_assignment_model
+from app.services.recovery_assignment_compiler_service import (
+    RecoveryAssignmentCompilerError,
+    compile_recovery_assignment_plan,
+)
 from app.services.recovery_service import (
     build_recovery_context_entry,
     generate_recovery_decision,
@@ -40,14 +66,6 @@ from app.services.recovery_service import (
 from app.services.task_hierarchy_reconciliation_service import (
     TaskHierarchyReconciliationServiceError,
     reconcile_task_hierarchy_after_changes,
-)
-from app.services.post_batch_decision_service import (
-    build_post_batch_decision_signals,
-    resolve_post_batch_decision,
-)
-from app.services.execution_plan_patch_service import (
-    insert_patch_batch_after_batch,
-    persist_patched_execution_plan,
 )
 
 TERMINAL_RUN_STATUSES = {
@@ -78,6 +96,7 @@ class NormalizedEvaluationOutcome:
     is_stage_closed: bool
     reopened_finalization: bool
     notes: str
+
 
 def _serialize_workflow_iteration_trace(trace: WorkflowIterationTrace) -> str:
     return json.dumps(trace.model_dump(mode="json"), ensure_ascii=False, indent=2)
@@ -135,6 +154,28 @@ def _persist_workflow_iteration_trace(
 
 def _serialize_post_batch_result(result: PostBatchResult) -> str:
     return json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2)
+
+
+def _serialize_json_payload(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _persist_recovery_assignment_payload(
+    db: Session,
+    *,
+    project_id: int,
+    artifact_type: str,
+    payload: dict,
+    created_by: str = "post_batch_processor",
+) -> Artifact:
+    return create_artifact(
+        db=db,
+        project_id=project_id,
+        task_id=None,
+        artifact_type=artifact_type,
+        content=_serialize_json_payload(payload),
+        created_by=created_by,
+    )
 
 
 def _get_batch(plan: ExecutionPlan, batch_id: str) -> ExecutionBatch:
@@ -285,6 +326,7 @@ def _get_artifact_ids_for_tasks(
         .all()
     )
     return [artifact.id for artifact in artifacts]
+
 
 def _get_artifact_ids_in_checkpoint_window(
     db: Session,
@@ -451,6 +493,7 @@ def _count_preexisting_valid_pending_tasks(
         exclude_task_ids=exclude_ids,
     )
 
+
 def _is_final_batch(plan: ExecutionPlan, batch_id: str) -> bool:
     if not plan.execution_batches:
         return False
@@ -483,6 +526,7 @@ def _is_new_stage_evaluation_output(evaluation_decision: Any) -> bool:
         and hasattr(evaluation_decision, "remaining_plan_still_valid")
         and hasattr(evaluation_decision, "recommended_next_action")
     )
+
 
 def _build_notes(
     *,
@@ -548,16 +592,6 @@ def _normalize_legacy_evaluation_outcome(evaluation_decision: Any) -> Normalized
 
 
 def _normalize_new_evaluation_outcome(evaluation_decision: Any) -> NormalizedEvaluationOutcome:
-    """
-    Normalize the new stage evaluation output.
-
-    Primary source of truth:
-    - recommended_next_action
-
-    Compatibility fallback:
-    - if recommended_next_action is absent/empty, infer the operational action
-      from decision/replan/followup/manual_review flags.
-    """
     decision = _normalize_string(_read_attr(evaluation_decision, "decision"), "")
     decision_summary = _normalize_string(_read_attr(evaluation_decision, "decision_summary"), "")
     notes_list = _read_attr(evaluation_decision, "notes", None)
@@ -629,7 +663,6 @@ def _normalize_new_evaluation_outcome(evaluation_decision: Any) -> NormalizedEva
         reopened_finalization = True
 
     else:
-        # Defensive compatibility path for partially migrated outputs.
         if decision == "stage_completed":
             is_stage_closed = True
             continue_execution = False
@@ -729,6 +762,31 @@ def _should_materialize_patch_batch(
     return True
 
 
+def _should_run_recovery_assignment(
+    *,
+    resolved_action: str | None,
+    normalized: NormalizedEvaluationOutcome,
+    evaluation_decision: Any,
+    created_recovery_task_ids: list[int],
+) -> bool:
+    if not created_recovery_task_ids:
+        return False
+
+    if resolved_action != "continue_current_plan":
+        return False
+
+    if normalized.requires_replanning or normalized.requires_resequencing or normalized.requires_manual_review:
+        return False
+
+    if not _normalize_bool(_read_attr(evaluation_decision, "remaining_plan_still_valid"), True):
+        return False
+
+    if _normalize_bool(_read_attr(evaluation_decision, "new_recovery_tasks_blocking"), False):
+        return False
+
+    return True
+
+
 def _degrade_illegal_stage_closure_for_non_final_batch(
     *,
     normalized: NormalizedEvaluationOutcome,
@@ -768,6 +826,331 @@ def _reconcile_hierarchy_after_batch_changes(
         raise PostBatchServiceError(
             f"Post-batch hierarchy reconciliation failed: {str(exc)}"
         ) from exc
+
+
+def _get_tasks_by_ids(
+    db: Session,
+    *,
+    project_id: int,
+    task_ids: list[int],
+) -> list[Task]:
+    if not task_ids:
+        return []
+
+    tasks = (
+        db.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.id.in_(task_ids),
+        )
+        .all()
+    )
+    by_id = {task.id: task for task in tasks}
+    missing = [task_id for task_id in task_ids if task_id not in by_id]
+    if missing:
+        raise PostBatchServiceError(
+            f"Recovery assignment could not find tasks in project {project_id}: {missing}"
+        )
+    return [by_id[task_id] for task_id in task_ids]
+
+
+def _build_recovery_assignment_executed_batch_summary(
+    *,
+    batch: ExecutionBatch,
+    executed_task_ids: list[int],
+    successful_task_ids: list[int],
+    problematic_run_ids: list[int],
+    task_run_summaries: list[PostBatchTaskRunSummary],
+) -> ExecutedBatchAssignmentSummary:
+    partial_or_failed_task_ids = [
+        summary.task_id
+        for summary in task_run_summaries
+        if summary.task_id in executed_task_ids and summary.task_id not in successful_task_ids
+    ]
+
+    key_findings: list[str] = []
+    if successful_task_ids:
+        key_findings.append(
+            f"Successful tasks in current batch: {', '.join(str(task_id) for task_id in successful_task_ids)}."
+        )
+    if problematic_run_ids:
+        key_findings.append(
+            f"Problematic execution runs detected: {', '.join(str(run_id) for run_id in problematic_run_ids)}."
+        )
+
+    summary = (
+        f"Batch '{batch.batch_id}' finished execution and checkpoint evaluation is assigning "
+        "new recovery work into the live plan before the next batch starts."
+    )
+
+    return ExecutedBatchAssignmentSummary(
+        batch_id=batch.batch_id,
+        batch_name=batch.name,
+        goal=batch.goal,
+        executed_task_ids=list(executed_task_ids),
+        completed_task_ids=list(successful_task_ids),
+        partial_task_ids=list(partial_or_failed_task_ids),
+        failed_task_ids=[],
+        summary=summary,
+        key_findings=key_findings,
+    )
+
+
+def _build_recovery_assignment_recovery_signals(
+    recovery_context: RecoveryContext,
+) -> AssignmentRecoverySignals:
+    entries: list[AssignmentRecoverySignal] = []
+    for decision in recovery_context.recovery_decisions:
+        entries.append(
+            AssignmentRecoverySignal(
+                source_task_id=decision.source_task_id,
+                source_run_id=decision.source_run_id,
+                recovery_action=decision.action,
+                recovery_reason=decision.reason,
+                covered_gap_summary=decision.reason,
+                still_blocks_progress=decision.still_blocks_progress,
+                execution_guidance=None,
+                evaluation_guidance=None,
+            )
+        )
+    return AssignmentRecoverySignals(entries=entries)
+
+
+def _build_recovery_assignment_new_tasks(
+    db: Session,
+    *,
+    project_id: int,
+    created_recovery_task_ids: list[int],
+    recovery_context: RecoveryContext,
+) -> list[RecoveryTaskForAssignment]:
+    created_task_records_by_id = {
+        record.created_task_id: record for record in recovery_context.recovery_created_tasks
+    }
+    tasks = _get_tasks_by_ids(
+        db=db,
+        project_id=project_id,
+        task_ids=created_recovery_task_ids,
+    )
+
+    parent_ids = [task.parent_task_id for task in tasks if task.parent_task_id is not None]
+    parent_titles: dict[int, str] = {}
+    if parent_ids:
+        parent_tasks = _get_tasks_by_ids(
+            db=db,
+            project_id=project_id,
+            task_ids=list(dict.fromkeys(parent_ids)),
+        )
+        parent_titles = {task.id: task.title for task in parent_tasks}
+
+    output: list[RecoveryTaskForAssignment] = []
+    for task in tasks:
+        record = created_task_records_by_id.get(task.id)
+        output.append(
+            RecoveryTaskForAssignment(
+                task_id=task.id,
+                title=task.title,
+                description=task.description or task.summary or task.title,
+                objective=task.objective,
+                implementation_notes=task.implementation_notes,
+                acceptance_criteria=task.acceptance_criteria,
+                technical_constraints=task.technical_constraints,
+                out_of_scope=task.out_of_scope,
+                task_type=task.task_type,
+                priority=task.priority,
+                parent_task_id=task.parent_task_id,
+                parent_task_title=parent_titles.get(task.parent_task_id) if task.parent_task_id else None,
+                sequence_order=task.sequence_order,
+                source_task_id=record.source_task_id if record else None,
+                source_run_id=record.source_run_id if record else None,
+            )
+        )
+    return output
+
+
+def _build_recovery_assignment_live_plan_summary(
+    *,
+    plan: ExecutionPlan,
+    batch: ExecutionBatch,
+) -> LivePlanSummaryForAssignment:
+    current_index = next(
+        index for index, current_batch in enumerate(plan.execution_batches) if current_batch.batch_id == batch.batch_id
+    )
+    remaining_batches = plan.execution_batches[current_index + 1 :]
+
+    return LivePlanSummaryForAssignment(
+        plan_version=plan.plan_version,
+        current_batch_id=batch.batch_id,
+        current_batch_name=batch.name,
+        remaining_batches=[
+            RemainingBatchSummary(
+                batch_id=item.batch_id,
+                batch_name=item.name,
+                batch_index=item.batch_index,
+                goal=item.goal,
+                task_ids=list(item.task_ids),
+                task_titles=[str(task_id) for task_id in item.task_ids],
+                checkpoint_reason=item.checkpoint_reason,
+                is_patch_batch=item.is_patch_batch,
+            )
+            for item in remaining_batches
+        ],
+    )
+
+
+def _build_recovery_assignment_next_useful_progress(
+    *,
+    plan: ExecutionPlan,
+    batch: ExecutionBatch,
+) -> NextUsefulProgressSummary | None:
+    current_index = next(
+        index for index, current_batch in enumerate(plan.execution_batches) if current_batch.batch_id == batch.batch_id
+    )
+    if current_index + 1 >= len(plan.execution_batches):
+        return None
+
+    next_batch = plan.execution_batches[current_index + 1]
+    return NextUsefulProgressSummary(
+        summary=(
+            f"The next useful progress is the next pending execution batch '{next_batch.name}'."
+        ),
+        task_ids=list(next_batch.task_ids),
+        batch_id=next_batch.batch_id,
+        batch_name=next_batch.name,
+    )
+
+
+def _build_recovery_assignment_pending_valid_tasks(
+    db: Session,
+    *,
+    project_id: int,
+    exclude_task_ids: list[int],
+) -> list[PendingTaskSummary]:
+    tasks = (
+        db.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.status == TASK_STATUS_PENDING,
+            Task.is_blocked.is_(False),
+            ~Task.id.in_(exclude_task_ids) if exclude_task_ids else True,
+        )
+        .order_by(Task.id.asc())
+        .all()
+    )
+
+    parent_ids = [task.parent_task_id for task in tasks if task.parent_task_id is not None]
+    parent_titles: dict[int, str] = {}
+    if parent_ids:
+        parent_tasks = (
+            db.query(Task)
+            .filter(
+                Task.project_id == project_id,
+                Task.id.in_(list(dict.fromkeys(parent_ids))),
+            )
+            .all()
+        )
+        parent_titles = {task.id: task.title for task in parent_tasks}
+
+    return [
+        PendingTaskSummary(
+            task_id=task.id,
+            title=task.title,
+            parent_task_id=task.parent_task_id,
+            parent_task_title=parent_titles.get(task.parent_task_id) if task.parent_task_id else None,
+            status=task.status,
+            is_blocked=bool(task.is_blocked),
+            sequence_order=task.sequence_order,
+        )
+        for task in tasks
+    ]
+
+
+def _build_recovery_assignment_input(
+    db: Session,
+    *,
+    project: Project,
+    plan: ExecutionPlan,
+    batch: ExecutionBatch,
+    evaluation_decision: Any,
+    recovery_context: RecoveryContext,
+    created_recovery_task_ids: list[int],
+    executed_task_ids: list[int],
+    successful_task_ids: list[int],
+    problematic_run_ids: list[int],
+    task_run_summaries: list[PostBatchTaskRunSummary],
+    resolved_action: str,
+) -> RecoveryAssignmentInput:
+    new_tasks = _build_recovery_assignment_new_tasks(
+        db=db,
+        project_id=project.id,
+        created_recovery_task_ids=created_recovery_task_ids,
+        recovery_context=recovery_context,
+    )
+
+    exclude_ids = list(dict.fromkeys(executed_task_ids + created_recovery_task_ids))
+
+    return RecoveryAssignmentInput(
+        project_id=project.id,
+        project_goal=(
+            getattr(project, "goal", None)
+            or getattr(project, "objective", None)
+            or getattr(project, "name", None)
+            or "Continue the current project safely."
+        ),
+        current_stage_summary=project.description,
+        resolved_action=resolved_action,
+        assignment_mode="continue_with_assignment",
+        executed_batch_summary=_build_recovery_assignment_executed_batch_summary(
+            batch=batch,
+            executed_task_ids=executed_task_ids,
+            successful_task_ids=successful_task_ids,
+            problematic_run_ids=problematic_run_ids,
+            task_run_summaries=task_run_summaries,
+        ),
+        evaluation_signals=AssignmentEvaluationSignals(
+            decision=_normalize_string(_read_attr(evaluation_decision, "decision"), "stage_incomplete"),
+            decision_summary=_normalize_string(
+                _read_attr(evaluation_decision, "decision_summary"),
+                "Checkpoint evaluation decided that the current plan can continue with controlled assignment.",
+            ),
+            recommended_next_action=_normalize_string(
+                _read_attr(evaluation_decision, "recommended_next_action"),
+                resolved_action,
+            ),
+            recommended_next_action_reason=_normalize_string(
+                _read_attr(evaluation_decision, "recommended_next_action_reason"),
+                "New recovery work must be assigned before the next batch starts.",
+            ),
+            plan_change_scope=_read_attr(evaluation_decision, "plan_change_scope", "none"),
+            remaining_plan_still_valid=_normalize_bool(
+                _read_attr(evaluation_decision, "remaining_plan_still_valid"),
+                True,
+            ),
+            new_recovery_tasks_blocking=_read_attr(evaluation_decision, "new_recovery_tasks_blocking"),
+            single_task_tail_risk=_normalize_bool(
+                _read_attr(evaluation_decision, "single_task_tail_risk"),
+                False,
+            ),
+            decision_signals=list(_read_attr(evaluation_decision, "decision_signals", []) or []),
+            key_risks=list(_read_attr(evaluation_decision, "key_risks", []) or []),
+            notes=list(_read_attr(evaluation_decision, "notes", []) or []),
+        ),
+        recovery_signals=_build_recovery_assignment_recovery_signals(recovery_context),
+        new_tasks=new_tasks,
+        live_plan_summary=_build_recovery_assignment_live_plan_summary(
+            plan=plan,
+            batch=batch,
+        ),
+        next_useful_progress=_build_recovery_assignment_next_useful_progress(
+            plan=plan,
+            batch=batch,
+        ),
+        pending_valid_tasks=_build_recovery_assignment_pending_valid_tasks(
+            db=db,
+            project_id=project.id,
+            exclude_task_ids=exclude_ids,
+        ),
+        known_relationships=KnownAssignmentRelationships(),
+    )
 
 
 def process_batch_after_execution(
@@ -917,8 +1300,6 @@ def process_batch_after_execution(
             start_exclusive=checkpoint_artifact_window_start_exclusive,
         )
     else:
-        # Fallback defensivo para llamadas legacy o tests que no capturen todavía
-        # el cutoff real al inicio del batch.
         checkpoint_artifact_window_ids = _get_artifact_ids_for_tasks(
             db=db,
             project_id=project_id,
@@ -934,7 +1315,7 @@ def process_batch_after_execution(
         checkpoint_artifact_window_ids=checkpoint_artifact_window_ids,
         recovery_context=aggregated_recovery_context,
     )
-    
+
     persist_evaluation_decision(
         db=db,
         project_id=project_id,
@@ -978,7 +1359,6 @@ def process_batch_after_execution(
             is_final_batch=is_final_batch,
         )
 
-        # Enriquecimiento determinista local: distingue backlog previo vs trabajo nuevo recovery
         decision_signals.has_preexisting_pending_valid_tasks = (
             preexisting_pending_valid_task_count > 0
         )
@@ -1054,6 +1434,133 @@ def process_batch_after_execution(
             f"recovery-created work before continuing."
         )
 
+    elif _should_run_recovery_assignment(
+        resolved_action=resolved_action,
+        normalized=normalized,
+        evaluation_decision=evaluation_decision,
+        created_recovery_task_ids=created_recovery_task_ids,
+    ):
+        assignment_input = _build_recovery_assignment_input(
+            db=db,
+            project=project,
+            plan=plan,
+            batch=batch,
+            evaluation_decision=evaluation_decision,
+            recovery_context=aggregated_recovery_context,
+            created_recovery_task_ids=created_recovery_task_ids,
+            executed_task_ids=executed_task_ids,
+            successful_task_ids=successful_task_ids,
+            problematic_run_ids=problematic_run_ids,
+            task_run_summaries=task_run_summaries,
+            resolved_action=resolved_action or "continue_current_plan",
+        )
+
+        _persist_recovery_assignment_payload(
+            db=db,
+            project_id=project_id,
+            artifact_type="recovery_assignment_input",
+            payload=assignment_input.model_dump(mode="json"),
+        )
+
+        assignment_output = call_recovery_assignment_model(
+            assignment_input=assignment_input,
+        )
+
+        _persist_recovery_assignment_payload(
+            db=db,
+            project_id=project_id,
+            artifact_type="recovery_assignment_output",
+            payload=assignment_output.model_dump(mode="json"),
+        )
+
+        try:
+            compiled_assignment = compile_recovery_assignment_plan(
+                plan=plan,
+                assignment_input=assignment_input,
+                assignment_output=assignment_output,
+            )
+        except RecoveryAssignmentCompilerError as exc:
+            raise PostBatchServiceError(
+                f"Recovery assignment compilation failed: {str(exc)}"
+            ) from exc
+
+        if compiled_assignment.requires_replan:
+            requires_replanning = True
+            requires_resequencing = False
+            requires_manual_review = False
+            continue_execution = False
+            resolved_action = "replan_remaining_work"
+            status = "checkpoint_blocked"
+            notes = (
+                f"{notes} Recovery assignment escalated to replanning because the newly created "
+                f"work revealed a structural conflict: {' '.join(compiled_assignment.notes).strip() or 'no extra notes'}"
+            )
+        else:
+            if compiled_assignment.patched_execution_plan is None:
+                raise PostBatchServiceError(
+                    "Recovery assignment completed without a patched execution plan."
+                )
+
+            patched_execution_plan = compiled_assignment.patched_execution_plan
+
+            persist_patched_execution_plan(
+                db=db,
+                project_id=project_id,
+                plan=patched_execution_plan,
+                created_by="recovery_assignment_compiler_service",
+            )
+
+            _persist_recovery_assignment_payload(
+                db=db,
+                project_id=project_id,
+                artifact_type="recovery_assignment_compiled_plan",
+                payload={
+                    "strategy": compiled_assignment.strategy,
+                    "requires_replan": compiled_assignment.requires_replan,
+                    "assigned_task_ids": compiled_assignment.assigned_task_ids,
+                    "unassigned_task_ids": compiled_assignment.unassigned_task_ids,
+                    "compiled_cluster_assignments": [
+                        {
+                            "cluster_id": item.cluster_id,
+                            "task_ids_in_execution_order": item.task_ids_in_execution_order,
+                            "impact_type": item.impact_type,
+                            "placement_relation": item.placement_relation,
+                            "batch_assignment_mode": item.batch_assignment_mode,
+                            "target_batch_id": item.target_batch_id,
+                            "target_batch_name": item.target_batch_name,
+                            "intrabatch_placement_mode": item.intrabatch_placement_mode,
+                            "anchor_task_id": item.anchor_task_id,
+                            "rationale": item.rationale,
+                        }
+                        for item in compiled_assignment.compiled_cluster_assignments
+                    ],
+                    "notes": compiled_assignment.notes,
+                },
+            )
+
+            continue_execution = True
+            requires_replanning = False
+            requires_resequencing = False
+            requires_manual_review = False
+            status = "completed_with_evaluation"
+
+            if normalized.is_stage_closed:
+                normalized = NormalizedEvaluationOutcome(
+                    continue_execution=True,
+                    requires_replanning=False,
+                    requires_resequencing=False,
+                    requires_manual_review=False,
+                    is_stage_closed=False,
+                    reopened_finalization=False,
+                    notes=normalized.notes,
+                )
+
+            cluster_count = len(compiled_assignment.compiled_cluster_assignments)
+            notes = (
+                f"{notes} Recovery assignment placed all new tasks before continuing. "
+                f"clusters_assigned={cluster_count}; assigned_task_ids={compiled_assignment.assigned_task_ids}."
+            )
+
     if resolved_action:
         signal_suffix = ""
         if resolved_decision_signals:
@@ -1061,7 +1568,13 @@ def process_batch_after_execution(
         notes = f"[resolved_action={resolved_action}] {notes}{signal_suffix}"
 
     if is_final_batch:
-        if normalized.is_stage_closed:
+        if patched_execution_plan is not None and continue_execution and not requires_replanning and not requires_resequencing:
+            status = "completed_with_evaluation"
+            notes = (
+                f"{notes} The original final batch no longer closes the stage because new work "
+                "was assigned into the live plan. The stage remains open until the new final batch is evaluated."
+            )
+        elif normalized.is_stage_closed:
             continue_execution = False
             status = "project_stage_closed"
             notes = (
