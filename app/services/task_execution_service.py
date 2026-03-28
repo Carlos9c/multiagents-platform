@@ -1,7 +1,6 @@
 from dataclasses import dataclass
-import logging
-from pathlib import Path
 import json
+import logging
 
 from sqlalchemy.orm import Session
 
@@ -11,17 +10,13 @@ from app.execution_engine import (
     get_execution_engine,
 )
 from app.execution_engine.contracts import (
-    CHANGE_TYPE_CREATED,
-    CHANGE_TYPE_DELETED,
-    CHANGE_TYPE_MODIFIED,
     EXECUTION_DECISION_COMPLETED,
     EXECUTION_DECISION_FAILED,
     EXECUTION_DECISION_PARTIAL,
     EXECUTION_DECISION_REJECTED,
-    ExecutionRequest,
-    ExecutionResult,
 )
 from app.execution_engine.request_adapter import build_execution_request
+from app.models.artifact import Artifact
 from app.models.execution_run import (
     FAILURE_TYPE_INTERNAL,
     RECOVERY_ACTION_MANUAL_REVIEW,
@@ -33,23 +28,10 @@ from app.models.task import (
     EXECUTABLE_TASK_STATUSES,
     PLANNING_LEVEL_ATOMIC,
     PENDING_ENGINE_ROUTING_EXECUTOR,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PARTIAL,
     Task,
-)
-from app.schemas.code_execution import (
-    CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
-    CODE_EXECUTION_STATUS_FAILED,
-    CODE_EXECUTION_STATUS_REJECTED,
-    CodeExecutorInput,
-    CodeExecutorResult,
-    CodeFileEditPlan,
-    CodeWorkingSet,
-    ExecutionJournal,
-    WorkspaceChangeSet,
-)
-from app.schemas.code_validation import (
-    CODE_VALIDATION_DECISION_COMPLETED,
-    CODE_VALIDATION_DECISION_FAILED,
-    CODE_VALIDATION_DECISION_PARTIAL,
 )
 from app.services.execution_runs import (
     create_execution_run,
@@ -65,27 +47,19 @@ from app.services.task_hierarchy_reconciliation_service import (
     TaskHierarchyReconciliationServiceError,
     reconcile_task_hierarchy_after_changes,
 )
-from app.services.task_validation_service import (
-    TaskValidationServiceError,
-    apply_validation_decision_to_task,
-    validate_code_task,
-    validate_terminal_code_task,
-)
 from app.services.tasks import (
     mark_task_failed,
     mark_task_running,
+)
+from app.services.validation.service import (
+    ValidationServiceError,
+    validate_execution_result,
 )
 
 logger = logging.getLogger(__name__)
 
 
 SUPPORTED_EXECUTORS = {EXECUTION_ENGINE}
-
-VALID_EXECUTOR_FINAL_STATUSES = {
-    CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
-    CODE_EXECUTION_STATUS_FAILED,
-    CODE_EXECUTION_STATUS_REJECTED,
-}
 
 
 class TaskExecutionServiceError(Exception):
@@ -120,6 +94,13 @@ def _get_task_or_raise(db: Session, task_id: int) -> Task:
     return task
 
 
+def _get_execution_run_or_raise(db: Session, run_id: int) -> ExecutionRun:
+    run = get_execution_run(db, run_id)
+    if not run:
+        raise TaskExecutionServiceError(f"ExecutionRun {run_id} not found")
+    return run
+
+
 def _validate_task_is_executable(task: Task) -> None:
     if task.is_blocked:
         raise TaskExecutionServiceError(
@@ -127,9 +108,7 @@ def _validate_task_is_executable(task: Task) -> None:
         )
 
     if task.planning_level != PLANNING_LEVEL_ATOMIC:
-        raise TaskExecutionServiceError(
-            "Only atomic tasks can be executed."
-        )
+        raise TaskExecutionServiceError("Only atomic tasks can be executed.")
 
     if task.status not in EXECUTABLE_TASK_STATUSES:
         raise TaskExecutionServiceError(
@@ -188,7 +167,9 @@ def _build_sync_result(
     )
 
 
-def _serialize_execution_agent_sequence(execution_agent_sequence: list[str] | None) -> str:
+def _serialize_execution_agent_sequence(
+    execution_agent_sequence: list[str] | None,
+) -> str:
     return json.dumps(execution_agent_sequence or [], ensure_ascii=False)
 
 
@@ -204,23 +185,11 @@ def _store_task_execution_agent_sequence(
     db.refresh(task)
 
 
-def _extract_artifacts_created(executor_result: CodeExecutorResult) -> str | None:
-    artifact_refs: list[str] = []
-
-    for note in executor_result.journal.notes_for_validator:
-        if "artifact_id=" in note:
-            artifact_refs.append(note.strip())
-
+def _extract_artifacts_created_from_engine_result(result) -> str | None:
+    artifact_refs = list(result.evidence.artifacts_created or [])
     if not artifact_refs:
         return None
-
     return " | ".join(artifact_refs)
-
-
-def _split_blockers(blockers_found: str | None) -> list[str]:
-    if not blockers_found:
-        return []
-    return [item.strip() for item in blockers_found.split(";") if item.strip()]
 
 
 def _prepare_execution_workspace(
@@ -259,209 +228,6 @@ def _prepare_execution_workspace(
         raise TaskExecutionServiceError(
             f"Could not prepare execution workspace for task {task.id}, run {run_id}: {str(exc)}"
         ) from exc
-
-
-def _build_synthetic_executor_result(
-    *,
-    task: Task,
-    execution_status: str,
-    summary: str,
-    work_details: str | None = None,
-    remaining_scope: str | None = None,
-    blockers_found: str | None = None,
-    validation_notes: list[str] | None = None,
-    output_snapshot: str | None = None,
-) -> CodeExecutorResult:
-    return CodeExecutorResult(
-        task_id=task.id,
-        execution_status=execution_status,
-        input=CodeExecutorInput(
-            task_id=task.id,
-            project_id=task.project_id,
-            title=task.title,
-            description=task.description,
-            objective=task.objective,
-            acceptance_criteria=task.acceptance_criteria,
-            technical_constraints=task.technical_constraints,
-            out_of_scope=task.out_of_scope,
-            execution_goal=(
-                task.objective
-                or task.summary
-                or task.description
-                or f"Execute task {task.id}: {task.title}"
-            ),
-            repo_root="",
-            relevant_decisions=[],
-            candidate_modules=[],
-            candidate_files=[],
-            primary_targets=[],
-            related_files=[],
-            reference_files=[],
-            related_test_files=[],
-            relevant_symbols=[],
-            unresolved_questions=[],
-            selection_rationale=(
-                "Synthetic execution context created by task_execution_service "
-                "to persist terminal validation evidence after pre-validation failure."
-            ),
-            selection_confidence=0.0,
-        ),
-        working_set=CodeWorkingSet(
-            repo_root="",
-            target_files=[],
-            related_files=[],
-            reference_files=[],
-            test_files=[],
-            files=[],
-            repo_guidance=[],
-        ),
-        edit_plan=CodeFileEditPlan(
-            task_id=task.id,
-            summary=work_details or "No executable edit plan was completed before termination.",
-            planned_changes=[],
-            assumptions=[],
-            local_risks=[],
-            notes=[
-                "Synthetic edit plan generated after terminal executor failure/rejection.",
-            ],
-        ),
-        workspace_changes=WorkspaceChangeSet(
-            created_files=[],
-            modified_files=[],
-            deleted_files=[],
-            renamed_files=[],
-            diff_summary=None,
-            impacted_areas=[],
-        ),
-        journal=ExecutionJournal(
-            task_id=task.id,
-            summary=summary,
-            local_decisions=[],
-            claimed_completed_scope=None,
-            claimed_remaining_scope=remaining_scope,
-            encountered_uncertainties=_split_blockers(blockers_found),
-            notes_for_validator=validation_notes or [],
-        ),
-        output_snapshot=output_snapshot,
-    )
-
-
-def _map_engine_decision_to_execution_status(decision: str) -> str:
-    if decision in {EXECUTION_DECISION_PARTIAL, EXECUTION_DECISION_COMPLETED}:
-        return CODE_EXECUTION_STATUS_AWAITING_VALIDATION
-    if decision == EXECUTION_DECISION_FAILED:
-        return CODE_EXECUTION_STATUS_FAILED
-    if decision == EXECUTION_DECISION_REJECTED:
-        return CODE_EXECUTION_STATUS_REJECTED
-
-    raise TaskExecutionServiceError(
-        f"Unsupported execution engine decision '{decision}'."
-    )
-
-
-def _build_executor_result_from_engine_result(
-    *,
-    task: Task,
-    request: ExecutionRequest,
-    result: ExecutionResult,
-) -> CodeExecutorResult:
-    created_files = [
-        item.path
-        for item in result.evidence.changed_files
-        if item.change_type == CHANGE_TYPE_CREATED
-    ]
-    modified_files = [
-        item.path
-        for item in result.evidence.changed_files
-        if item.change_type == CHANGE_TYPE_MODIFIED
-    ]
-    deleted_files = [
-        item.path
-        for item in result.evidence.changed_files
-        if item.change_type == CHANGE_TYPE_DELETED
-    ]
-
-    impacted_areas = sorted(
-        {
-            Path(path).parts[0] if Path(path).parts else path
-            for path in created_files + modified_files + deleted_files
-        }
-    )
-
-    validator_notes = list(result.validation_notes)
-    validator_notes.append(f"execution_engine_decision={result.decision}")
-    validator_notes.extend(result.evidence.artifacts_created)
-
-    return CodeExecutorResult(
-        task_id=task.id,
-        execution_status=_map_engine_decision_to_execution_status(result.decision),
-        input=CodeExecutorInput(
-            task_id=task.id,
-            project_id=task.project_id,
-            title=request.task_title,
-            description=request.task_description,
-            objective=request.objective,
-            acceptance_criteria=request.acceptance_criteria,
-            technical_constraints=request.technical_constraints,
-            out_of_scope=request.out_of_scope,
-            execution_goal=(
-                request.objective
-                or request.task_summary
-                or request.task_description
-                or f"Execute task {task.id}: {task.title}"
-            ),
-            repo_root=request.context.workspace_path,
-            relevant_decisions=request.context.key_decisions,
-            candidate_modules=[],
-            candidate_files=request.context.relevant_files,
-            primary_targets=request.allowed_paths,
-            related_files=request.context.relevant_files,
-            reference_files=[],
-            related_test_files=[],
-            relevant_symbols=[],
-            unresolved_questions=[],
-            selection_rationale=(
-                "Execution request adapted from execution_engine boundary "
-                "into legacy validator-compatible executor result."
-            ),
-            selection_confidence=1.0,
-        ),
-        working_set=CodeWorkingSet(
-            repo_root=request.context.workspace_path,
-            target_files=request.allowed_paths,
-            related_files=request.context.relevant_files,
-            reference_files=[],
-            test_files=[],
-            files=[],
-            repo_guidance=[],
-        ),
-        edit_plan=CodeFileEditPlan(
-            task_id=task.id,
-            summary=result.details or result.summary,
-            planned_changes=[],
-            assumptions=[],
-            local_risks=[],
-            notes=list(result.evidence.notes),
-        ),
-        workspace_changes=WorkspaceChangeSet(
-            created_files=created_files,
-            modified_files=modified_files,
-            deleted_files=deleted_files,
-            renamed_files=[],
-            diff_summary=None,
-            impacted_areas=impacted_areas,
-        ),
-        journal=ExecutionJournal(
-            task_id=task.id,
-            summary=result.summary,
-            local_decisions=[],
-            claimed_completed_scope=result.completed_scope,
-            claimed_remaining_scope=result.remaining_scope,
-            encountered_uncertainties=list(result.blockers_found),
-            notes_for_validator=validator_notes,
-        ),
-        output_snapshot=result.output_snapshot,
-    )
 
 
 def _promote_validated_workspace_to_source(
@@ -511,60 +277,162 @@ def _reconcile_hierarchy_or_raise(
         ) from exc
 
 
+def _collect_persisted_artifacts_for_task(
+    db: Session,
+    *,
+    task_id: int,
+) -> list[Artifact]:
+    return (
+        db.query(Artifact)
+        .filter(Artifact.task_id == task_id)
+        .order_by(Artifact.id.asc())
+        .all()
+    )
+
+
+def _persist_task_status(
+    db: Session,
+    *,
+    task_id: int,
+    status: str,
+) -> str:
+    task = _get_task_or_raise(db, task_id)
+    task.status = status
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task.status
+
+
+def _apply_validation_result_to_task(
+    db: Session,
+    *,
+    task_id: int,
+    validation_decision: str,
+    final_task_status: str | None,
+) -> str:
+    if final_task_status:
+        return _persist_task_status(
+            db,
+            task_id=task_id,
+            status=final_task_status,
+        )
+
+    if validation_decision == "completed":
+        return _persist_task_status(
+            db,
+            task_id=task_id,
+            status=TASK_STATUS_COMPLETED,
+        )
+
+    if validation_decision == "partial":
+        return _persist_task_status(
+            db,
+            task_id=task_id,
+            status=TASK_STATUS_PARTIAL,
+        )
+
+    if validation_decision in {"failed", "manual_review"}:
+        mark_task_failed(db, task_id)
+        return _get_task_or_raise(db, task_id).status
+
+    raise TaskExecutionServiceError(
+        f"Unsupported validation decision '{validation_decision}'."
+    )
+
+
 def _validate_after_execution(
     db: Session,
     *,
     task: Task,
     run_id: int,
     resolved_executor_type: str,
-    executor_result: CodeExecutorResult,
+    execution_request,
+    execution_result,
 ) -> SyncTaskExecutionResult:
+    execution_run = _get_execution_run_or_raise(db, run_id)
+    persisted_artifacts = _collect_persisted_artifacts_for_task(
+        db,
+        task_id=task.id,
+    )
+
     try:
-        validation_service_result = validate_code_task(
-            db=db,
-            task_id=task.id,
-            execution_run_id=run_id,
-            executor_result=executor_result,
-            apply_final_status=False,
+        validation_service_result = validate_execution_result(
+            task=task,
+            execution_request=execution_request,
+            execution_result=execution_result,
+            execution_run=execution_run,
+            persisted_artifacts=persisted_artifacts,
         )
-    except TaskValidationServiceError as exc:
+    except ValidationServiceError as exc:
         mark_task_failed(db, task.id)
         raise TaskExecutionServiceError(
             f"Execution finished but validation could not be completed for task {task.id}: {str(exc)}"
         ) from exc
 
-    decision = validation_service_result.validation_result.decision
+    validation_result = validation_service_result.validation_result
+    decision = validation_result.decision
 
-    if decision == CODE_VALIDATION_DECISION_COMPLETED:
+    logger.info(
+        "task_validation_completed task_id=%s run_id=%s validator=%s discipline=%s decision=%s followup_required=%s",
+        task.id,
+        run_id,
+        validation_result.validator_key,
+        validation_result.discipline,
+        decision,
+        validation_result.followup_validation_required,
+    )
+
+    if decision == "completed":
         refreshed_task_for_promotion = _get_task_or_raise(db, task.id)
         _promote_validated_workspace_to_source(
             db=db,
             task=refreshed_task_for_promotion,
             run_id=run_id,
         )
-        final_task_status = apply_validation_decision_to_task(
+        final_task_status = _apply_validation_result_to_task(
             db=db,
             task_id=task.id,
-            decision=decision,
+            validation_decision=decision,
+            final_task_status=validation_result.final_task_status,
         )
         message = (
             "Execution and validation completed successfully, and the validated workspace "
             "was promoted to source before closing the task."
         )
-    elif decision == CODE_VALIDATION_DECISION_PARTIAL:
-        final_task_status = apply_validation_decision_to_task(
+    elif decision == "partial":
+        final_task_status = _apply_validation_result_to_task(
             db=db,
             task_id=task.id,
-            decision=decision,
+            validation_decision=decision,
+            final_task_status=validation_result.final_task_status,
         )
-        message = "Execution finished and validation concluded the task is partial."
-    elif decision == CODE_VALIDATION_DECISION_FAILED:
-        final_task_status = apply_validation_decision_to_task(
+        if validation_result.followup_validation_required:
+            message = (
+                "Execution finished and validation is partial. Additional validation "
+                "follow-up is required for evidence not consumed by this validator."
+            )
+        else:
+            message = "Execution finished and validation concluded the task is partial."
+    elif decision == "failed":
+        final_task_status = _apply_validation_result_to_task(
             db=db,
             task_id=task.id,
-            decision=decision,
+            validation_decision=decision,
+            final_task_status=validation_result.final_task_status,
         )
         message = "Execution finished but validation concluded the task failed."
+    elif decision == "manual_review":
+        final_task_status = _apply_validation_result_to_task(
+            db=db,
+            task_id=task.id,
+            validation_decision=decision,
+            final_task_status=validation_result.final_task_status,
+        )
+        message = (
+            "Execution finished but validation requires manual review before the task "
+            "can be considered complete."
+        )
     else:
         raise TaskExecutionServiceError(
             f"Unsupported validation decision '{decision}'."
@@ -581,55 +449,107 @@ def _validate_after_execution(
         task=refreshed_task,
         run_id=run_id,
         resolved_executor_type=resolved_executor_type,
-        run_status=CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
-        output_snapshot=executor_result.output_snapshot,
+        run_status=execution_run.status,
+        output_snapshot=execution_result.output_snapshot,
         message=message,
         final_task_status=final_task_status,
         validation_decision=decision,
     )
 
 
-def _finalize_prevalidation_terminal_outcome(
+def _handle_terminal_execution_outcome(
     db: Session,
     *,
     task: Task,
     run_id: int,
     resolved_executor_type: str,
-    run_status: str,
-    executor_result: CodeExecutorResult,
-    message: str,
+    engine_result,
 ) -> SyncTaskExecutionResult:
-    try:
-        validation_service_result = validate_terminal_code_task(
-            db=db,
-            task_id=task.id,
-            execution_run_id=run_id,
-            executor_result=executor_result,
-            apply_final_status=True,
-        )
-    except TaskValidationServiceError as exc:
-        mark_task_failed(db, task.id)
-        raise TaskExecutionServiceError(
-            "Execution reached a terminal state before validation, and the service "
-            f"could not persist the required validation artifact for task {task.id}: {str(exc)}"
-        ) from exc
-
-    _reconcile_hierarchy_or_raise(
+    execution_agent_sequence_json = _serialize_execution_agent_sequence(
+        engine_result.execution_agent_sequence
+    )
+    _store_task_execution_agent_sequence(
         db=db,
-        affected_task_ids=[task.id],
+        task=task,
+        execution_agent_sequence_json=execution_agent_sequence_json,
     )
 
-    refreshed_task = _get_task_or_raise(db, task.id)
+    blockers_found = (
+        "; ".join(engine_result.blockers_found)
+        if engine_result.blockers_found
+        else None
+    )
 
-    return _build_sync_result(
-        task=refreshed_task,
-        run_id=run_id,
-        resolved_executor_type=resolved_executor_type,
-        run_status=run_status,
-        output_snapshot=executor_result.output_snapshot,
-        message=message,
-        final_task_status=validation_service_result.final_task_status,
-        validation_decision=validation_service_result.validation_result.decision,
+    if engine_result.decision == EXECUTION_DECISION_FAILED:
+        mark_execution_run_failed(
+            db=db,
+            run_id=run_id,
+            error_message=engine_result.summary or "Execution engine reported a failed execution.",
+            failure_type=FAILURE_TYPE_INTERNAL,
+            failure_code="execution_engine_failed",
+            recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
+            work_summary=engine_result.summary,
+            work_details=engine_result.details,
+            execution_agent_sequence=execution_agent_sequence_json,
+            artifacts_created=_extract_artifacts_created_from_engine_result(engine_result),
+            completed_scope=engine_result.completed_scope,
+            remaining_scope=engine_result.remaining_scope,
+            blockers_found=blockers_found,
+            validation_notes="; ".join(engine_result.validation_notes or []),
+        )
+        mark_task_failed(db, task.id)
+        _reconcile_hierarchy_or_raise(
+            db=db,
+            affected_task_ids=[task.id],
+        )
+        refreshed_task = _get_task_or_raise(db, task.id)
+        refreshed_run = _get_execution_run_or_raise(db, run_id)
+
+        return _build_sync_result(
+            task=refreshed_task,
+            run_id=run_id,
+            resolved_executor_type=resolved_executor_type,
+            run_status=refreshed_run.status,
+            output_snapshot=engine_result.output_snapshot,
+            message="Execution failed and the task was routed for recovery without validation.",
+            final_task_status=refreshed_task.status,
+            validation_decision=None,
+        )
+
+    if engine_result.decision == EXECUTION_DECISION_REJECTED:
+        mark_execution_run_rejected(
+            db=db,
+            run_id=run_id,
+            error_message=engine_result.summary or "Execution engine rejected the task.",
+            failure_code="execution_engine_rejected",
+            recovery_action=RECOVERY_ACTION_REATOMIZE,
+            work_summary=engine_result.summary,
+            work_details=engine_result.details,
+            execution_agent_sequence=execution_agent_sequence_json,
+            blockers_found=blockers_found,
+            validation_notes="; ".join(engine_result.validation_notes or []),
+        )
+        mark_task_failed(db, task.id)
+        _reconcile_hierarchy_or_raise(
+            db=db,
+            affected_task_ids=[task.id],
+        )
+        refreshed_task = _get_task_or_raise(db, task.id)
+        refreshed_run = _get_execution_run_or_raise(db, run_id)
+
+        return _build_sync_result(
+            task=refreshed_task,
+            run_id=run_id,
+            resolved_executor_type=resolved_executor_type,
+            run_status=refreshed_run.status,
+            output_snapshot=engine_result.output_snapshot,
+            message="Execution was rejected and the task was routed for recovery without validation.",
+            final_task_status=refreshed_task.status,
+            validation_decision=None,
+        )
+
+    raise TaskExecutionServiceError(
+        f"Unsupported terminal execution decision '{engine_result.decision}'."
     )
 
 
@@ -686,9 +606,6 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         )
 
         engine_result = execution_engine.execute(execution_request)
-        execution_agent_sequence_json = _serialize_execution_agent_sequence(
-            engine_result.execution_agent_sequence
-        )        
 
         logger.info(
             "execution_engine_completed task_id=%s run_id=%s decision=%s summary=%s",
@@ -698,29 +615,26 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             engine_result.summary,
         )
 
-        executor_result = _build_executor_result_from_engine_result(
-            task=task,
-            request=execution_request,
-            result=engine_result,
+        execution_agent_sequence_json = _serialize_execution_agent_sequence(
+            engine_result.execution_agent_sequence
         )
 
-        if executor_result.execution_status not in VALID_EXECUTOR_FINAL_STATUSES:
-            raise TaskExecutionServiceError(
-                f"Unsupported executor result status '{executor_result.execution_status}' returned by execution engine. "
-                f"Allowed statuses: {sorted(VALID_EXECUTOR_FINAL_STATUSES)}"
-            )
-
-        if executor_result.execution_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION:
+        if engine_result.decision in {
+            EXECUTION_DECISION_COMPLETED,
+            EXECUTION_DECISION_PARTIAL,
+        }:
             mark_execution_run_succeeded(
                 db=db,
                 run_id=run_id,
-                output_snapshot=executor_result.output_snapshot,
-                work_summary=executor_result.journal.summary,
-                work_details=executor_result.edit_plan.summary,
+                output_snapshot=engine_result.output_snapshot,
+                work_summary=engine_result.summary,
+                work_details=engine_result.details,
                 execution_agent_sequence=execution_agent_sequence_json,
-                artifacts_created=_extract_artifacts_created(executor_result),
-                completed_scope=executor_result.journal.claimed_completed_scope,
-                validation_notes="; ".join(executor_result.journal.notes_for_validator),
+                artifacts_created=_extract_artifacts_created_from_engine_result(
+                    engine_result
+                ),
+                completed_scope=engine_result.completed_scope,
+                validation_notes="; ".join(engine_result.validation_notes or []),
             )
             _store_task_execution_agent_sequence(
                 db=db,
@@ -733,87 +647,24 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 task=task,
                 run_id=run_id,
                 resolved_executor_type=resolved_executor_type,
-                executor_result=executor_result,
+                execution_request=execution_request,
+                execution_result=engine_result,
             )
 
-        if executor_result.execution_status == CODE_EXECUTION_STATUS_FAILED:
-            blockers_found = (
-                "; ".join(executor_result.journal.encountered_uncertainties)
-                if executor_result.journal.encountered_uncertainties
-                else None
-            )
-
-            mark_execution_run_failed(
-                db=db,
-                run_id=run_id,
-                error_message=executor_result.journal.summary or "Execution engine reported a failed execution.",
-                failure_type=FAILURE_TYPE_INTERNAL,
-                failure_code="execution_engine_failed",
-                recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
-                work_summary=executor_result.journal.summary,
-                work_details=executor_result.edit_plan.summary,
-                execution_agent_sequence=execution_agent_sequence_json,
-                artifacts_created=_extract_artifacts_created(executor_result),
-                completed_scope=executor_result.journal.claimed_completed_scope,
-                remaining_scope=executor_result.journal.claimed_remaining_scope,
-                blockers_found=blockers_found,
-                validation_notes="; ".join(executor_result.journal.notes_for_validator),
-            )
-            _store_task_execution_agent_sequence(
-                db=db,
-                task=task,
-                execution_agent_sequence_json=execution_agent_sequence_json,
-            )
-            mark_task_failed(db, task.id)
-
-            return _finalize_prevalidation_terminal_outcome(
+        if engine_result.decision in {
+            EXECUTION_DECISION_FAILED,
+            EXECUTION_DECISION_REJECTED,
+        }:
+            return _handle_terminal_execution_outcome(
                 db=db,
                 task=task,
                 run_id=run_id,
                 resolved_executor_type=resolved_executor_type,
-                run_status=CODE_EXECUTION_STATUS_FAILED,
-                executor_result=executor_result,
-                message="Execution failed before normal validation, but a terminal validation artifact was persisted.",
-            )
-
-        if executor_result.execution_status == CODE_EXECUTION_STATUS_REJECTED:
-            blockers_found = (
-                "; ".join(executor_result.journal.encountered_uncertainties)
-                if executor_result.journal.encountered_uncertainties
-                else None
-            )
-
-            mark_execution_run_rejected(
-                db=db,
-                run_id=run_id,
-                error_message=executor_result.journal.summary or "Execution engine rejected the task.",
-                failure_code="execution_engine_rejected",
-                recovery_action=RECOVERY_ACTION_REATOMIZE,
-                work_summary=executor_result.journal.summary,
-                work_details=executor_result.edit_plan.summary,
-                execution_agent_sequence=execution_agent_sequence_json,
-                blockers_found=blockers_found,
-                validation_notes="; ".join(executor_result.journal.notes_for_validator),
-            )
-            _store_task_execution_agent_sequence(
-                db=db,
-                task=task,
-                execution_agent_sequence_json=execution_agent_sequence_json,
-            )
-            mark_task_failed(db, task.id)
-
-            return _finalize_prevalidation_terminal_outcome(
-                db=db,
-                task=task,
-                run_id=run_id,
-                resolved_executor_type=resolved_executor_type,
-                run_status=CODE_EXECUTION_STATUS_REJECTED,
-                executor_result=executor_result,
-                message="Execution was rejected before normal validation, but a terminal validation artifact was persisted.",
+                engine_result=engine_result,
             )
 
         raise TaskExecutionServiceError(
-            f"Unhandled executor status '{executor_result.execution_status}'."
+            f"Unsupported execution engine decision '{engine_result.decision}'."
         )
 
     except TaskExecutionServiceError:
@@ -821,7 +672,6 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
 
     except ExecutionEngineRejectedError as exc:
         execution_agent_sequence_json = _serialize_execution_agent_sequence([])
-        blockers_found = "; ".join(exc.blockers_found) if exc.blockers_found else None
 
         mark_execution_run_rejected(
             db=db,
@@ -832,7 +682,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             work_summary=exc.message,
             work_details="The execution engine deliberately rejected the task before execution.",
             execution_agent_sequence=execution_agent_sequence_json,
-            blockers_found=blockers_found,
+            blockers_found="; ".join(exc.blockers_found) if exc.blockers_found else None,
             validation_notes="; ".join(
                 exc.validation_notes or ["Execution was rejected at the execution engine boundary."]
             ),
@@ -843,34 +693,28 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             execution_agent_sequence_json=execution_agent_sequence_json,
         )
         mark_task_failed(db, task.id)
-
-        synthetic_result = _build_synthetic_executor_result(
-            task=task,
-            execution_status=CODE_EXECUTION_STATUS_REJECTED,
-            summary=exc.message,
-            work_details="The execution engine deliberately rejected the task before execution.",
-            remaining_scope=exc.remaining_scope,
-            blockers_found=blockers_found,
-            validation_notes=list(exc.validation_notes)
-            + [
-                "Execution was rejected at the execution engine boundary.",
-                f"failure_code={exc.failure_code}",
-            ],
-            output_snapshot=None,
+        _reconcile_hierarchy_or_raise(
+            db=db,
+            affected_task_ids=[task.id],
         )
 
-        return _finalize_prevalidation_terminal_outcome(
-            db=db,
-            task=task,
+        refreshed_task = _get_task_or_raise(db, task.id)
+        refreshed_run = _get_execution_run_or_raise(db, run_id)
+
+        return _build_sync_result(
+            task=refreshed_task,
             run_id=run_id,
             resolved_executor_type=_resolve_executor_type_for_task(task),
-            run_status=CODE_EXECUTION_STATUS_REJECTED,
-            executor_result=synthetic_result,
-            message="Execution was rejected before validation, and a synthetic terminal validation artifact was persisted.",
+            run_status=refreshed_run.status,
+            output_snapshot=None,
+            message="Execution was rejected at the execution engine boundary and routed for recovery without validation.",
+            final_task_status=refreshed_task.status,
+            validation_decision=None,
         )
 
     except ExecutionEngineError as exc:
         execution_agent_sequence_json = _serialize_execution_agent_sequence([])
+
         mark_execution_run_failed(
             db=db,
             run_id=run_id,
@@ -887,33 +731,28 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             execution_agent_sequence_json=execution_agent_sequence_json,
         )
         mark_task_failed(db, task.id)
-
-        synthetic_result = _build_synthetic_executor_result(
-            task=task,
-            execution_status=CODE_EXECUTION_STATUS_FAILED,
-            summary=str(exc),
-            work_details="The execution engine raised an internal error before producing a normal result.",
-            remaining_scope="Task execution stopped before a valid operational pass completed.",
-            blockers_found="Internal execution engine failure.",
-            validation_notes=[
-                "Execution engine internal failure.",
-                "failure_code=execution_engine_error",
-            ],
-            output_snapshot=None,
+        _reconcile_hierarchy_or_raise(
+            db=db,
+            affected_task_ids=[task.id],
         )
 
-        return _finalize_prevalidation_terminal_outcome(
-            db=db,
-            task=task,
+        refreshed_task = _get_task_or_raise(db, task.id)
+        refreshed_run = _get_execution_run_or_raise(db, run_id)
+
+        return _build_sync_result(
+            task=refreshed_task,
             run_id=run_id,
             resolved_executor_type=_resolve_executor_type_for_task(task),
-            run_status=CODE_EXECUTION_STATUS_FAILED,
-            executor_result=synthetic_result,
-            message="Execution failed before validation, and a synthetic terminal validation artifact was persisted.",
+            run_status=refreshed_run.status,
+            output_snapshot=None,
+            message="Execution failed due to an internal execution engine error and was routed for recovery without validation.",
+            final_task_status=refreshed_task.status,
+            validation_decision=None,
         )
 
     except Exception as exc:
         execution_agent_sequence_json = _serialize_execution_agent_sequence([])
+
         mark_execution_run_failed(
             db=db,
             run_id=run_id,
@@ -929,29 +768,23 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             execution_agent_sequence_json=execution_agent_sequence_json,
         )
         mark_task_failed(db, task.id)
-
-        synthetic_result = _build_synthetic_executor_result(
-            task=task,
-            execution_status=CODE_EXECUTION_STATUS_FAILED,
-            summary=str(exc),
-            work_details="task_execution_service caught an unexpected exception before normal validation.",
-            remaining_scope="Task execution stopped before a valid operational pass completed.",
-            blockers_found="Unexpected execution orchestration error.",
-            validation_notes=[
-                "Unexpected task execution service error.",
-                "failure_code=task_execution_service_error",
-            ],
-            output_snapshot=None,
+        _reconcile_hierarchy_or_raise(
+            db=db,
+            affected_task_ids=[task.id],
         )
 
-        return _finalize_prevalidation_terminal_outcome(
-            db=db,
-            task=task,
+        refreshed_task = _get_task_or_raise(db, task.id)
+        refreshed_run = _get_execution_run_or_raise(db, run_id)
+
+        return _build_sync_result(
+            task=refreshed_task,
             run_id=run_id,
             resolved_executor_type=_resolve_executor_type_for_task(task),
-            run_status=CODE_EXECUTION_STATUS_FAILED,
-            executor_result=synthetic_result,
-            message="Execution failed before validation due to an unexpected service error, and a synthetic terminal validation artifact was persisted.",
+            run_status=refreshed_run.status,
+            output_snapshot=None,
+            message="Execution failed due to an unexpected orchestration error and was routed for recovery without validation.",
+            final_task_status=refreshed_task.status,
+            validation_decision=None,
         )
 
 

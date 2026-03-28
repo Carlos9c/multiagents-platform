@@ -1,343 +1,352 @@
-# 🧠 Validation Routing & Validator System
+# Validation System
 
-## 📌 Overview
+## Overview
 
-El sistema de validación ha sido rediseñado para ser:
+El sistema de validación está diseñado para cumplir tres principios:
 
-* **Escalable**
-* **Explícito**
-* **Basado en evidencia real**
-* **Desacoplado del execution engine legacy**
+1. **Entrada común**
 
-El flujo completo es:
+   * Todos los validadores reciben un `TaskValidationInput`.
 
-```
-Routing LLM (estricto)
+2. **Salida común**
+
+   * Todos los validadores devuelven un `ValidationResult`.
+
+3. **Consumo especializado**
+
+   * Cada validador transforma internamente ese `TaskValidationInput` en la representación más adecuada para su proceso de validación.
+   * Esa transformación interna actúa también como guardrail de formatos y capacidades.
+
+El flujo general es:
+
+```text
+ExecutionResult + task context + execution artifacts/files
     ↓
-Builder determinista
+build_task_validation_input(...)
     ↓
-Validator LLM (estricto)
+TaskValidationInput
     ↓
-ValidationResult (canónico)
+resolve_validation_route(...)
+    ↓
+ResolvedValidationIntent
+    ↓
+validator-specific rendering / consumption
+    ↓
+validator LLM output
+    ↓
+ValidationResult
 ```
 
----
+## Current architecture
 
-## 🧩 Componentes principales
-
-### 1. Validation Router (LLM)
-
-**Responsabilidad:**
-Decidir **qué validador debe validar la tarea** y bajo qué condiciones.
-
-**NO valida la tarea.**
-
-**Input:**
-
-* Task context
-* Execution summary
-* Evidence summary
-
-**Output:**
-
-```json
-{
-  "validator_key": "code_task_validator",
-  "discipline": "code",
-  "validation_mode": "post_execution",
-  "requires_workspace": true,
-  "requires_changed_files": true
-}
-```
-
-**Propiedades clave:**
-
-* Usa LLM con schema estricto
-* No inventa validadores → usa catálogo
-* Decide qué evidencia necesita el validador
-
----
-
-### 2. Validation Builder (determinista)
-
-**Responsabilidad:**
-Construir el input completo del validador a partir de:
-
-* Task
-* ExecutionRequest
-* ExecutionResult
-* ExecutionRun
-* Artifacts
-* Workspace / Source files
-
-**NO usa LLM.**
-
-**Ejemplo de output:**
-
-```python
-CodeValidationInput(
-    task=...,
-    execution=...,
-    request_context=...,
-    evidence=...,
-    file_snapshots=...,
-    metadata=...
-)
-```
-
----
-
-### 3. Validator (LLM)
-
-**Responsabilidad:**
-Evaluar si la tarea está:
-
-* `completed`
-* `partial`
-* `failed`
-* `manual_review`
-
-**Basado en:**
-
-* evidencia real
-* archivos
-* comandos
-* artefactos
-* contexto de ejecución
-
-**Output:**
-
-```json
-{
-  "decision": "completed",
-  "summary": "...",
-  "validated_scope": "...",
-  "missing_scope": "...",
-  "findings": [...],
-  "confidence": "high"
-}
-```
-
----
-
-### 4. Dispatcher
-
-**Responsabilidad:**
-Invocar el validador correcto en función de `validator_key`.
-
-```python
-if intent.validator_key == "code_task_validator":
-    return validate_code_task_with_llm(...)
-```
-
----
-
-## 📁 Estructura de carpetas
-
-```
+```text
 app/services/validation/
+├── __init__.py
 ├── contracts.py
 ├── dispatcher.py
-├── builders/
-│   └── code_validation_input_builder.py
+├── service.py
+├── evidence/
+│   ├── __init__.py
+│   └── package_builder.py
 ├── router/
-│   ├── service.py
-│   ├── schemas.py
+│   ├── __init__.py
 │   ├── prompt.py
-│   └── registry.py
+│   ├── registry.py
+│   ├── schemas.py
+│   └── service.py
 └── validators/
     ├── __init__.py
     └── code/
-        ├── service.py
+        ├── __init__.py
+        ├── capabilities.py
+        ├── prompt.py
+        ├── renderer.py
         ├── schemas.py
-        └── prompt.py
+        └── service.py
 ```
 
----
+## Main concepts
 
-## 🧠 Principios de diseño
+### TaskValidationInput
 
-### ✔ Separación estricta de responsabilidades
+Es el contrato de entrada común a todos los validadores.
 
-| Componente | Hace                |
-| ---------- | ------------------- |
-| Router     | Decide quién valida |
-| Builder    | Prepara evidencia   |
-| Validator  | Evalúa              |
-| Dispatcher | Ejecuta             |
+Contiene:
 
----
+* `intent`
+* `task`
+* `execution`
+* `request_context`
+* `evidence_package`
+* `metadata`
 
-### ✔ LLMs con contratos estrictos
+Este contrato **no depende del tipo de validador**.
 
-* Routing → schema validado
-* Validator → schema validado
-* Sin outputs libres
+### ValidationResult
 
----
+Es el contrato de salida común a todos los validadores.
 
-### ✔ Evidencia > intuición
+Contiene, entre otros:
 
-El sistema valida usando:
+* `decision`
+* `summary`
+* `validated_scope`
+* `missing_scope`
+* `findings`
+* `validated_evidence_ids`
+* `unconsumed_evidence_ids`
+* `followup_validation_required`
+* `recommended_next_validator_keys`
 
-* archivos modificados
-* ejecución real
-* artefactos
-* contexto de workspace
+Esto deja el sistema preparado para un futuro orquestador de validación multi-validador.
 
----
+### ValidationEvidencePackage
 
-### ✔ Sin magia implícita
+Contiene la evidencia estructurada producida por la ejecución.
 
-* No auto-registro de validadores
-* No discovery dinámico
-* Todo explícito
+La unidad básica es `ValidationEvidenceItem`.
 
----
+Cada item describe una evidencia en términos universales:
 
-## ➕ Cómo añadir un nuevo validador
+* `evidence_id`
+* `evidence_kind`
+* `media_type`
+* `representation_kind`
+* `source`
+* `content_text`
+* `content_summary`
+* `structured_content`
+* `metadata`
 
-Ejemplo: `api_contract_validator`
+Esto permite que el paquete de validación sea escalable a distintos formatos.
 
----
+## Validation routing
 
-### Paso 1 — Crear carpeta
+El router de validación decide **qué validador** debe procesar la tarea.
 
+No valida la tarea en sí.
+
+Su trabajo es:
+
+* leer el contexto de la tarea
+* leer el resumen de ejecución
+* leer el resumen de evidencia
+* escoger `validator_key`
+* escoger `discipline`
+* escoger `validation_mode`
+
+Actualmente el router devuelve una `ValidationRoutingDecision` con schema estricto.
+
+## Validator responsibilities
+
+Cada validador debe hacer tres cosas:
+
+1. **Declarar capacidades**
+
+   * qué formatos y tipos de evidencia puede consumir
+
+2. **Renderizar su evidencia**
+
+   * transformar el `TaskValidationInput` al formato más eficiente para su modelo
+
+3. **Validar**
+
+   * producir una salida especializada del LLM
+   * mapearla a `ValidationResult`
+
+### Important design rule
+
+El contrato de entrada es común, pero **la forma de consumirlo no es común**.
+
+Ejemplo:
+
+* un validador textual puede imprimir ficheros de texto directamente en prompt
+* un validador multimodal de imágenes puede necesitar pasar otra representación
+* un validador futuro de audio puede requerir transcripción o una representación específica
+
+## Code validator flow
+
+El validador de código sigue este patrón:
+
+```text
+TaskValidationInput
+    ↓
+capabilities.py
+    ↓
+renderer.py
+    ↓
+CodeValidationRenderableEvidence
+    ↓
+prompt.py
+    ↓
+LLM
+    ↓
+CodeValidationLLMOutput
+    ↓
+ValidationResult
 ```
-validators/
-└── api_contract/
-    ├── service.py
-    ├── schemas.py
-    └── prompt.py
+
+### capabilities.py
+
+Declara qué evidencia puede consumir el validador de código.
+
+Ejemplo:
+
+* `produced_file`
+* `command_output`
+* `persisted_artifact`
+* `artifact_reference`
+
+Y solo para representaciones compatibles con consumo textual.
+
+### renderer.py
+
+Selecciona la evidencia que el validador sí soporta y la renderiza en el formato más legible para el modelo.
+
+También separa:
+
+* `supported_items`
+* `unsupported_items`
+
+Eso actúa como guardrail de modalidad.
+
+### prompt.py
+
+No recibe la estructura cruda del package “tal cual”.
+Recibe una representación renderizada y optimizada para ese validador.
+
+## How to add a new validator
+
+Ejemplo: `image_task_validator`
+
+### 1. Crear la carpeta del validador
+
+```text
+app/services/validation/validators/image/
+├── __init__.py
+├── capabilities.py
+├── prompt.py
+├── renderer.py
+├── schemas.py
+└── service.py
 ```
 
----
+### 2. Definir capacidades
 
-### Paso 2 — Definir schema del output LLM
+En `capabilities.py` declara qué evidencia puede consumir.
+
+Por ejemplo:
+
+* `generated_image`
+* `persisted_artifact`
+* `artifact_reference`
+
+Y media types como:
+
+* `image/png`
+* `image/jpeg`
+
+### 3. Definir schema del output del LLM
+
+En `schemas.py` define una salida especializada, por ejemplo:
+
+* `ImageValidationLLMOutput`
+
+Ese schema es interno al validador.
+
+### 4. Implementar el renderer
+
+En `renderer.py` transforma el `TaskValidationInput` al formato más adecuado para ese validador.
+
+Importante:
+
+* el renderer debe ignorar o marcar como no consumida la evidencia que no soporta
+* no debe romper el contrato común
+
+### 5. Implementar el servicio del validador
+
+En `service.py`:
+
+* recibe `TaskValidationInput`
+* aplica capacidades
+* renderiza
+* llama al LLM con schema estricto
+* convierte el resultado especializado a `ValidationResult`
+
+### 6. Exponer el validador
+
+En `validators/image/__init__.py` exporta el servicio principal.
+
+### 7. Registrar en el dispatcher
+
+En `app/services/validation/dispatcher.py` añade el nuevo `validator_key`.
+
+Ejemplo:
 
 ```python
-class ApiContractValidationOutput(BaseModel):
-    decision: Literal["completed", "partial", "failed", "manual_review"]
-    summary: str
-    findings: list[...]
-    confidence: Literal["high", "medium", "low"]
+if intent.validator_key == "image_task_validator":
+    return validate_image_task_with_llm(validation_input=validation_input)
 ```
 
----
+### 8. Registrar en el router
 
-### Paso 3 — Crear prompt del validador
+En `app/services/validation/router/registry.py` añade una entrada al catálogo del router con:
 
-Debe:
+* `validator_key`
+* `discipline`
+* descripción
+* deliverables típicos
+* evidencia típica
 
-* explicar el rol
-* definir reglas de validación
-* restringir el output al schema
+Esto permite al router decidir cuándo debe enrutar a ese validador.
 
----
+### 9. Añadir tests
 
-### Paso 4 — Implementar servicio
+Cada validador nuevo debería tener, como mínimo:
 
-```python
-def validate_api_contract_task_with_llm(validation_input: ApiValidationInput) -> ValidationResult:
-```
+* test de capacidades
+* test de renderer
+* test de service
+* test vertical de ejecución → validación si aplica
 
-Debe:
+## Multi-validator future
 
-* llamar al LLM con schema estricto
-* validar salida con Pydantic
-* mapear a `ValidationResult`
+El sistema está diseñado para que, en el futuro, un orquestador de validación pueda encadenar validadores.
 
----
+Ejemplo:
 
-### Paso 5 — Crear builder (si aplica)
+* un validador textual consume los ficheros de texto
+* deja `unconsumed_evidence_ids` con una imagen
+* marca `followup_validation_required=True`
+* recomienda `image_task_validator`
 
-```
-builders/api_validation_input_builder.py
-```
+Luego el orquestador podrá derivar esa misma tarea a otro validador con:
 
-Debe:
+* la descripción de la tarea
+* el resultado de la validación previa
+* la evidencia aún pendiente
 
-* construir input determinista
-* NO usar LLM
+## Current scope
 
----
+Actualmente el sistema soporta de forma real:
 
-### Paso 6 — Registrar en el catálogo del router
+* construcción de `TaskValidationInput`
+* routing de validación
+* validador de código
+* integración ejecución → validación para tareas completadas o parciales
 
-En:
+Las tareas fallidas o rechazadas por ejecución no pasan por validación:
 
-```
-router/registry.py
-```
+* van directamente a recovery
 
-Añadir:
+## Design rules
 
-```python
-ValidationRouterCatalogEntry(
-    validator_key="api_contract_validator",
-    discipline="api",
-    typical_deliverables=[...],
-    typical_evidence=[...],
-)
-```
+* No introducir contratos de entrada específicos por validador.
+* No mezclar el contrato común con la representación específica del prompt.
+* No hacer auto-discovery mágico de validadores.
+* No usar builders LLM.
+* No reintroducir semántica legacy de `CodeExecutor` o `task_validation_service`.
 
----
+## Recommended next steps
 
-### Paso 7 — Extender dispatcher
-
-```python
-if intent.validator_key == "api_contract_validator":
-    return validate_api_contract_task_with_llm(...)
-```
-
----
-
-### Paso 8 — Tests
-
-Cubrir:
-
-* routing
-* builder
-* validator
-* fallback
-
----
-
-## 🚫 Antipatrones (NO hacer)
-
-❌ Validar dentro del router
-❌ Usar LLM en builders
-❌ Inventar campos fuera del schema
-❌ Auto-descubrir validadores
-❌ Lógica en `__init__.py`
-❌ Mezclar ejecución y validación
-
----
-
-## 🔮 Escalabilidad futura
-
-* múltiples disciplinas (code, api, infra, data)
-* validadores especializados
-* posible `validation_engine`
-
----
-
-## ✅ Estado actual
-
-✔ Routing LLM funcional
-✔ Builder determinista de código
-✔ Validator LLM de código
-✔ Dispatcher operativo
-✔ Tests en verde
-
----
-
-## 🧭 Siguientes pasos recomendados
-
-1. Crear `validation/service.py` (orquestador)
-2. Integrar en `task_execution_service`
-3. Añadir nuevos validadores
-4. Mejorar prompts
-5. Añadir evaluación cruzada (futuro)
-
----
+1. Preparar el futuro orquestador multi-validador

@@ -21,10 +21,6 @@ from app.models.task import (
     TASK_STATUS_PENDING,
     Task,
 )
-from app.schemas.code_execution import (
-    CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
-    CODE_EXECUTION_STATUS_REJECTED,
-)
 from app.services.task_execution_service import (
     TaskExecutionServiceError,
     execute_task_sync,
@@ -141,6 +137,57 @@ def _get_latest_run_for_task(db, task_id: int) -> ExecutionRun:
     return run
 
 
+def _patch_new_validation_service(
+    monkeypatch,
+    *,
+    decision: str,
+    final_task_status: str,
+    followup_validation_required: bool = False,
+):
+    def _fake_validate_execution_result(**kwargs):
+        task = kwargs["task"]
+        db = kwargs["task"]._sa_instance_state.session
+
+        _set_task_status(db, task.id, final_task_status)
+
+        return types.SimpleNamespace(
+            routing_input=types.SimpleNamespace(),
+            routing_decision=types.SimpleNamespace(
+                validator_key="code_task_validator",
+                discipline="code",
+                validation_mode="post_execution",
+            ),
+            validator_input=types.SimpleNamespace(),
+            validation_result=types.SimpleNamespace(
+                validator_key="code_task_validator",
+                discipline="code",
+                decision=decision,
+                summary="Validation summary.",
+                validated_scope="Validated scope." if decision == "completed" else None,
+                missing_scope="Missing scope." if decision != "completed" else None,
+                blockers=[],
+                manual_review_required=(decision == "manual_review"),
+                final_task_status=final_task_status,
+                artifacts_created=[],
+                validated_evidence_ids=[],
+                unconsumed_evidence_ids=[],
+                followup_validation_required=followup_validation_required,
+                recommended_next_validator_keys=[],
+                partial_validation_summary=(
+                    "Additional follow-up validation required."
+                    if followup_validation_required
+                    else None
+                ),
+                metadata={},
+            ),
+        )
+
+    monkeypatch.setattr(
+        "app.services.task_execution_service.validate_execution_result",
+        _fake_validate_execution_result,
+    )
+
+
 def test_execute_task_sync_rejects_non_atomic_task(
     db_session,
     make_project,
@@ -187,19 +234,10 @@ def test_execute_task_sync_resolves_pending_executor_at_runtime(
         captured_request=captured,
     )
     _patch_workspace_runtime(monkeypatch)
-
-    monkeypatch.setattr(
-        "app.services.task_execution_service.validate_code_task",
-        lambda **kwargs: types.SimpleNamespace(
-            validation_result=types.SimpleNamespace(
-                decision="completed",
-            )
-        ),
-    )
-
-    monkeypatch.setattr(
-        "app.services.task_execution_service.apply_validation_decision_to_task",
-        lambda db, task_id, decision: _set_task_status(db, task_id, TASK_STATUS_COMPLETED),
+    _patch_new_validation_service(
+        monkeypatch,
+        decision="completed",
+        final_task_status=TASK_STATUS_COMPLETED,
     )
 
     result = execute_task_sync(db_session, atomic_task.id)
@@ -243,19 +281,10 @@ def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
         captured_request=captured,
     )
     _patch_workspace_runtime(monkeypatch)
-
-    monkeypatch.setattr(
-        "app.services.task_execution_service.validate_code_task",
-        lambda **kwargs: types.SimpleNamespace(
-            validation_result=types.SimpleNamespace(
-                decision="completed",
-            )
-        ),
-    )
-
-    monkeypatch.setattr(
-        "app.services.task_execution_service.apply_validation_decision_to_task",
-        lambda db, task_id, decision: _set_task_status(db, task_id, TASK_STATUS_COMPLETED),
+    _patch_new_validation_service(
+        monkeypatch,
+        decision="completed",
+        final_task_status=TASK_STATUS_COMPLETED,
     )
 
     result = execute_task_sync(db_session, atomic_task.id)
@@ -306,19 +335,10 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
         ),
     )
     _patch_workspace_runtime(monkeypatch, promoted_state=promoted)
-
-    monkeypatch.setattr(
-        "app.services.task_execution_service.validate_code_task",
-        lambda **kwargs: types.SimpleNamespace(
-            validation_result=types.SimpleNamespace(
-                decision="completed",
-            )
-        ),
-    )
-
-    monkeypatch.setattr(
-        "app.services.task_execution_service.apply_validation_decision_to_task",
-        lambda db, task_id, decision: _set_task_status(db, task_id, TASK_STATUS_COMPLETED),
+    _patch_new_validation_service(
+        monkeypatch,
+        decision="completed",
+        final_task_status=TASK_STATUS_COMPLETED,
     )
 
     result = execute_task_sync(db_session, atomic_task.id)
@@ -327,7 +347,7 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
     db_session.refresh(parent)
     latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
 
-    assert result.run_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION
+    assert result.run_status == latest_run.status
     assert result.final_task_status == TASK_STATUS_COMPLETED
     assert result.validation_decision == "completed"
     assert result.executor_type == EXECUTION_ENGINE
@@ -373,19 +393,10 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
         ),
     )
     _patch_workspace_runtime(monkeypatch)
-
-    monkeypatch.setattr(
-        "app.services.task_execution_service.validate_code_task",
-        lambda **kwargs: types.SimpleNamespace(
-            validation_result=types.SimpleNamespace(
-                decision="partial",
-            )
-        ),
-    )
-
-    monkeypatch.setattr(
-        "app.services.task_execution_service.apply_validation_decision_to_task",
-        lambda db, task_id, decision: _set_task_status(db, task_id, TASK_STATUS_PARTIAL),
+    _patch_new_validation_service(
+        monkeypatch,
+        decision="partial",
+        final_task_status=TASK_STATUS_PARTIAL,
     )
 
     result = execute_task_sync(db_session, atomic_task.id)
@@ -394,7 +405,7 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
     db_session.refresh(parent)
     latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
 
-    assert result.run_status == CODE_EXECUTION_STATUS_AWAITING_VALIDATION
+    assert result.run_status == latest_run.status
     assert result.final_task_status == TASK_STATUS_PARTIAL
     assert result.validation_decision == "partial"
     assert result.executor_type == EXECUTION_ENGINE
@@ -440,24 +451,15 @@ def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(
     )
     _patch_workspace_runtime(monkeypatch)
 
-    monkeypatch.setattr(
-        "app.services.task_execution_service.validate_terminal_code_task",
-        lambda **kwargs: types.SimpleNamespace(
-            final_task_status=TASK_STATUS_FAILED,
-            validation_result=types.SimpleNamespace(
-                decision="failed",
-            ),
-        ),
-    )
-
     result = execute_task_sync(db_session, atomic_task.id)
 
     db_session.refresh(atomic_task)
     db_session.refresh(parent)
     latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
 
+    assert result.run_status == latest_run.status
     assert result.final_task_status == TASK_STATUS_FAILED
-    assert result.validation_decision == "failed"
+    assert result.validation_decision is None
     assert result.executor_type == EXECUTION_ENGINE
     assert atomic_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_FAILED
@@ -501,24 +503,15 @@ def test_execute_task_sync_rejected_terminal_path_keeps_original_terminal(
     )
     _patch_workspace_runtime(monkeypatch)
 
-    monkeypatch.setattr(
-        "app.services.task_execution_service.validate_terminal_code_task",
-        lambda **kwargs: types.SimpleNamespace(
-            final_task_status=TASK_STATUS_FAILED,
-            validation_result=types.SimpleNamespace(
-                decision="failed",
-            ),
-        ),
-    )
-
     result = execute_task_sync(db_session, atomic_task.id)
 
     db_session.refresh(atomic_task)
     db_session.refresh(parent)
     latest_run = _get_latest_run_for_task(db_session, atomic_task.id)
 
-    assert result.run_status == CODE_EXECUTION_STATUS_REJECTED
+    assert result.run_status == latest_run.status
     assert result.final_task_status == TASK_STATUS_FAILED
+    assert result.validation_decision is None
     assert result.executor_type == EXECUTION_ENGINE
     assert atomic_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_FAILED
