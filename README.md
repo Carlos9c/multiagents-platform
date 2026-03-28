@@ -1,322 +1,232 @@
-# 🧠 Agente Desarrollador — Execution Engine
+# 🧠 Agente Desarrollador — Estado del Proyecto
 
-Sistema de ejecución autónoma basado en planificación iterativa, evaluación por checkpoints y mutación controlada del plan.
+## 📌 Visión General
 
----
+Este proyecto implementa un sistema de ejecución autónoma basado en planificación, ejecución por batches y evaluación iterativa.
 
-## 🚀 Estado actual del proyecto
+El sistema sigue un flujo:
 
-El sistema ha alcanzado un estado **estable en el core de ejecución**, con:
-
-* Decisión post-batch completamente formalizada (`ResolvedPostBatchIntent`)
-* Separación clara entre:
-
-  * decisión (post-batch)
-  * mutación (live_plan_mutation_service)
-  * orquestación (project_workflow_service)
-* Eliminación de rutas legacy de mutación de plan
-* Control explícito de:
-
-  * replan estructural vs patch local
-  * assignment vs resequence vs continue
-* `active_plan` persistente entre iteraciones
-* Tests de regresión cubriendo comportamiento crítico
+1. **Planificación** → generación de tareas (high-level / refined / atomic)
+2. **Ejecución** → ejecución por batches atómicos
+3. **Evaluación** → análisis post-batch
+4. **Mutación del plan** → patch / resequence / replan
+5. **Iteración** → hasta cierre o bloqueo
 
 ---
 
-## 🧩 Arquitectura (visión global)
+# ✅ Estado Actual
 
-Planner → Atomic Generator → Execution Plan
-↓
-Execution Engine (Workflow)
-↓
-Batch Execution (tasks)
-↓
-Post-Batch Evaluation
-↓
-ResolvedPostBatchIntent
-↓
-LivePlanMutationService (opcional)
-↓
-Workflow decide siguiente paso
+## 🔴 FASE 1 — CONTROL Y ESTABILIDAD (CERRADA)
 
----
+Se ha estabilizado completamente el núcleo del sistema.
 
-## 🧠 Componentes clave
-
-### 1. post_batch_decision_service
-
-Responsabilidad:
-
-* Interpretar señales del evaluator
-* Resolver una intención canónica
-
-Output:
-ResolvedPostBatchIntent
-
-Tipos de intent:
-
-* continue → seguir sin cambios
-* assign → introducir nuevas tareas en el plan
-* resequence → ajustar orden local
-* replan → reconstrucción estructural
-* close → cerrar etapa
-* manual_review → intervención humana
-
-⚠️ Este servicio **NO muta el plan**.
+### ✔ Reglas de post-batch
+- Eliminada la replanificación por defecto
+- Separación clara entre:
+  - decisión (`PostBatchResult`)
+  - mutación (`live_plan_mutation_service`)
+- Reglas explícitas:
+  - recovery ≠ replan
+  - preferencia por continue / resequence
 
 ---
 
-### 2. live_plan_mutation_service
-
-Responsabilidad:
-
-* Aplicar mutaciones sobre el plan activo **cuando procede**
-
-Entrada:
-
-* intent (ResolvedPostBatchIntent)
-* contexto de ejecución
-* recovery
-
-Salida:
-LivePlanMutationResult
-
-Tipos de resultado:
-
-* assignment → plan parcheado con nuevas tareas
-* resequence_patch → inserción inmediata de batch
-* resequence_deferred → no se muta plan (solo señal lógica)
-* escalated_to_replan → no se pudo mutar → requiere replan
-* none → no aplica mutación
-
-⚠️ Este servicio:
-
-* NO decide si hay que replanear
-* NO genera planes desde cero
-* SOLO modifica el plan existente o escala
+### ✔ Desacoplamiento workflow / plan
+- `active_plan` reutilizado correctamente
+- invalidación solo cuando:
+  - `iteration_requires_replan = True`
+- no regeneraciones accidentales
 
 ---
 
-### 3. post_batch_service
-
-Responsabilidad:
-
-* Orquestar evaluación + decisión + mutación
-* Persistir artefactos
-
-Flujo:
-evaluate_checkpoint → resolve_intent → mutate_live_plan → construir resultado
-
-Garantías:
-
-* Nunca deja tareas nuevas sin asignar si el intent lo requiere
-* No crea patches inválidos (ej: resequence diferido)
-* Escala correctamente a replan cuando no puede mutar
+### ✔ Ruta canónica de mutación
+- `post_batch_service` decide
+- `live_plan_mutation_service` ejecuta
+- `execution_plan_patch_service` como primitiva
 
 ---
 
-### 4. project_workflow_service (ORQUESTADOR)
-
-Responsabilidad:
-
-* Ejecutar el workflow iterativo completo
-
-Claves:
-
-#### active_plan
-
-* Se mantiene entre iteraciones
-* Se actualiza si hay patch
-* Se invalida si hay replan estructural
-
-#### iteration_requires_replan
-
-* Señal explícita desde post-batch
-* Provoca regeneración del plan en la siguiente iteración
-
-#### Flujo de iteración
-
-for iteration:
-if no active_plan:
-generar plan
-
-```
-ejecutar batches  
-
-post_batch_result  
-
-if requires_replan:  
-    active_plan = None  
-
-elif patched_plan:  
-    active_plan = patched_plan  
-
-continuar / parar según estado  
-```
+### ✔ Semántica clara de ejecución
+- planner → crea
+- mutation → modifica
+- workflow → orquesta
 
 ---
 
-## ⚖️ Semántica del sistema (CRÍTICO)
-
-### 🔴 Replan (estructural)
-
-Se produce cuando:
-
-* remaining_plan_still_valid = False
-* inconsistencia global
-* assignment no colocable
-
-Acción:
-
-* se descarta active_plan
-* el workflow genera uno nuevo
+### ✔ Tests de regresión sólidos
+Cobertura real en:
+- decisiones
+- mutaciones
+- workflow
+- invariantes
 
 ---
 
-### 🟡 Resequence (local)
+## 🟡 FASE 2 — TRAZABILIDAD Y CONSISTENCIA (PRÁCTICAMENTE CERRADA)
 
-Dos tipos:
+### ✔ Trazabilidad enriquecida
+Se han consolidado tres niveles:
 
-Patch inmediato:
+#### 1. `workflow_batch_trace`
+Incluye:
+- resultado de ejecución de tasks
+- decisión post-batch
+- señales usadas (`decision_signals_used`)
+- acción resuelta (`resolved_action`)
+- `patched_plan_version`
 
-* Se inserta batch nuevo
-* mutation_kind = resequence_patch
+#### 2. `WorkflowIterationSummary`
+Incluye:
+- transición de plan
+- batches procesados
+- batches bloqueados
+- `used_patched_plan`
+- `replan_triggered`
 
-Deferred:
-
-* No se modifica el plan
-* Solo cambia interpretación futura
-* mutation_kind = resequence_deferred
-
----
-
-### 🟢 Assignment
-
-* Introduce nuevas tareas en el plan
-* Siempre antes de continuar
-* Nunca deja tareas en limbo
-
----
-
-### 🔵 Continue
-
-* Plan intacto
-* Sin trabajo nuevo
+#### 3. `ProjectWorkflowResult`
+Vista final coherente del estado del workflow
 
 ---
 
-### ⚫ Close
-
-Solo ocurre si:
-
-* último batch
-* sin tareas pendientes
-* sin recovery nuevo
-
----
-
-## 🧪 Cobertura de tests (regresión)
-
-Cubierto:
-
-Decision layer:
-
-* selección correcta de intent
-* no replan por defecto
-* cierre legal de etapa
-
-Mutation layer:
-
-* assignment correcto
-* resequence deferred sin patch
-* escalado a replan
-* rechazo de intents no mutantes
-
-Post-batch:
-
-* integración completa decisión + mutación
-* persistencia consistente
-* no creación de patches inválidos
-
-Workflow:
-
-* reutilización de active_plan
-* invalidación en replan
-* no reejecución de batches
-* adopción de planes parcheados
+### ✔ Coherencia de estados
+- `PostBatchResult` validado
+- consistencia entre:
+  - evaluación
+  - workflow
+  - artifacts
 
 ---
 
-## 🧱 Decisiones arquitectónicas clave
+### ✔ Tests de invariantes (clave)
+Se han añadido tests estructurales:
 
-Separación estricta:
-
-* Decision → qué hacer
-* Mutation → cómo modificar el plan
-* Workflow → cuándo ejecutar
-
-Una única vía de mutación:
-
-Todo pasa por live_plan_mutation_service
-
-El workflow es el único orquestador:
-
-* decide cuándo regenerar plan
-* decide cuándo continuar
-* decide cuándo parar
+- `completed_batches` nunca se duplica
+- replan invalida `active_plan`
+- no se reejecutan batches
+- `blocked_batches` excluye completados
 
 ---
 
-## ⚠️ Riesgos conocidos (controlados)
-
-* complejidad creciente del post_batch_service
-* tamaño de project_workflow_service
-* dependencia fuerte de consistencia en signals
-
----
-
-## 🔜 Siguientes pasos recomendados
-
-Crítico:
-
-* reforzar tests de regresión
-* endurecer validaciones de mutation
-
-Alto:
-
-* trazabilidad completa plan → batch → run → recovery → evaluación
-* limpieza final de legacy
-
-Medio:
-
-* unificación de artefactos de trazas
-* portabilidad de storage/config
-* integración end-to-end
-
-Bajo:
-
-* tuning de prompts
-* refactor de servicios grandes
-* optimización del execution engine
+### ✔ Limpieza técnica
+- eliminación de metadata redundante
+- eliminación de bloques muertos
+- simplificación de payloads
+- eliminación de duplicidad en trazas
 
 ---
 
-## 🧭 Filosofía del sistema
+# 📊 Estado General
 
-1. No replanear por defecto
-2. No dejar trabajo sin asignar
-3. Separar decisión de ejecución
+El sistema ha pasado de:
+
+❌ comportamiento inestable  
+➡️ a  
+✅ ejecución determinista, trazable y validada
 
 ---
 
-## 🏁 Conclusión
+# 🚧 SIGUIENTES PASOS (BACKLOG ACTUALIZADO)
 
-El sistema actual ya no es un prototipo:
+## 🔴 BLOQUE ALTO
 
-* Tiene semántica estable
-* Tiene control de estado explícito
-* Tiene arquitectura extensible
+### 1. Limpieza final de semántica legacy
+**Objetivo:** unificar lenguaje interno
 
-A partir de aquí el foco es:
-robustez, observabilidad y mantenibilidad
+Pendiente:
+- eliminar `legacy_action`
+- limpiar `ResolvedPostBatchIntent`
+- eliminar flags heredados
+- unificar semántica entre:
+  - evaluación
+  - intent
+  - mutación
+  - workflow
+
+👉 Impacto: alto (reduce complejidad mental y bugs futuros)
+
+---
+
+### 2. Endurecer `run_command`
+**Objetivo:** seguridad y robustez
+
+Pendiente:
+- sandbox / restricciones
+- timeouts
+- control de errores
+- logging estructurado
+
+👉 Impacto: crítico si se usa en producción
+
+---
+
+### 3. Revisar `request_adapter`
+**Objetivo:** alinear input real con sistema
+
+Pendiente:
+- validar shape real de requests
+- evitar pérdida de contexto útil
+- evitar ruido innecesario
+
+---
+
+## 🟡 BLOQUE MEDIO
+
+### 4. Test end-to-end real
+**Objetivo:** validar comportamiento completo
+
+Pendiente:
+- flujo completo sin mocks
+- ejecución representativa real
+
+---
+
+### 5. Reducir duplicidad de artifacts
+**Objetivo:** simplificar trazabilidad
+
+Pendiente:
+- definir responsabilidad de:
+  - batch_trace
+  - iteration_trace
+  - post_batch_result
+- eliminar redundancia
+
+---
+
+### 6. Refactor de servicios grandes
+**Objetivo:** mantenibilidad
+
+Foco:
+- `post_batch_service`
+- `project_workflow_service`
+
+---
+
+## 🔵 BLOQUE BAJO
+
+- portabilidad config/storage
+- promoción de workspace
+- tuning de prompts
+- optimización del execution engine
+
+---
+
+# 🧠 Conclusión
+
+El sistema ya no está en fase de construcción básica.
+
+Está en fase de:
+
+> **consolidación, simplificación y endurecimiento**
+
+Lo crítico ya está resuelto:
+
+- decisiones correctas
+- ejecución estable
+- trazabilidad consistente
+- tests robustos
+
+Ahora el foco es:
+
+> **reducir complejidad, eliminar legacy y preparar para escenarios reales**
+
+---
