@@ -64,10 +64,18 @@ def _should_run_immediate_resequence_patch(
     if intent.intent_type != "resequence":
         return False
 
+    if intent.mutation_scope != "resequence":
+        raise LivePlanMutationServiceError(
+            "Resolved resequence intent must carry mutation_scope='resequence'."
+        )
+
     if not created_recovery_task_ids:
         return False
 
-    if not _normalize_bool(_read_attr(evaluation_decision, "new_recovery_tasks_blocking"), False):
+    if not _normalize_bool(
+        _read_attr(evaluation_decision, "new_recovery_tasks_blocking"),
+        False,
+    ):
         return False
 
     if not intent.remaining_plan_still_valid:
@@ -96,6 +104,21 @@ def mutate_live_plan(
     persist_recovery_assignment_payload_fn,
 ) -> LivePlanMutationResult:
     if resolved_intent.intent_type == "assign":
+        if resolved_intent.mutation_scope != "assignment":
+            raise LivePlanMutationServiceError(
+                "Resolved assign intent must carry mutation_scope='assignment'."
+            )
+
+        if not resolved_intent.requires_plan_mutation:
+            raise LivePlanMutationServiceError(
+                "Resolved assign intent must require plan mutation."
+            )
+
+        if not resolved_intent.requires_all_new_tasks_assigned:
+            raise LivePlanMutationServiceError(
+                "Resolved assign intent must require all new tasks to be assigned."
+            )
+
         if not created_recovery_task_ids:
             raise LivePlanMutationServiceError(
                 "Resolved assign intent requires newly created recovery tasks, but none were found."
@@ -113,7 +136,8 @@ def mutate_live_plan(
             successful_task_ids=successful_task_ids,
             problematic_run_ids=problematic_run_ids,
             task_run_summaries=task_run_summaries,
-            resolved_action=resolved_intent.legacy_action,
+            resolved_intent_type=resolved_intent.intent_type,
+            resolved_mutation_scope=resolved_intent.mutation_scope,
         )
 
         persist_recovery_assignment_payload_fn(
@@ -227,6 +251,16 @@ def mutate_live_plan(
         )
 
     if resolved_intent.intent_type == "resequence":
+        if resolved_intent.mutation_scope != "resequence":
+            raise LivePlanMutationServiceError(
+                "Resolved resequence intent must carry mutation_scope='resequence'."
+            )
+
+        if not resolved_intent.requires_plan_mutation:
+            raise LivePlanMutationServiceError(
+                "Resolved resequence intent must require plan mutation."
+            )
+
         if _should_run_immediate_resequence_patch(
             intent=resolved_intent,
             created_recovery_task_ids=created_recovery_task_ids,
@@ -275,10 +309,15 @@ def mutate_live_plan(
             },
         )
 
-    return LivePlanMutationResult(
-        mutation_kind="none",
-        patched_execution_plan=None,
-        requires_replan=False,
-        notes=[],
-        metadata={},
+    if resolved_intent.intent_type in {"continue", "manual_review", "close", "replan"}:
+        return LivePlanMutationResult(
+            mutation_kind="none",
+            patched_execution_plan=None,
+            requires_replan=False,
+            notes=[],
+            metadata={},
+        )
+
+    raise LivePlanMutationServiceError(
+        f"Unsupported resolved intent_type '{resolved_intent.intent_type}' for live plan mutation."
     )

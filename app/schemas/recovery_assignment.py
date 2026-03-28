@@ -5,14 +5,14 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-AssignmentResolvedAction = Literal[
-    "continue_current_plan",
-    "resequence_remaining_batches",
+AssignmentInputIntentType = Literal[
+    "assign",
+    "resequence",
 ]
 
-AssignmentMode = Literal[
-    "continue_with_assignment",
-    "resequence_with_assignment",
+AssignmentInputMutationScope = Literal[
+    "assignment",
+    "resequence",
 ]
 
 AssignmentTaskType = Literal[
@@ -423,8 +423,8 @@ class RecoveryAssignmentInput(BaseModel):
     project_goal: str = Field(..., min_length=10)
     current_stage_summary: str | None = None
 
-    resolved_action: AssignmentResolvedAction
-    assignment_mode: AssignmentMode
+    resolved_intent_type: AssignmentInputIntentType
+    resolved_mutation_scope: AssignmentInputMutationScope
 
     executed_batch_summary: ExecutedBatchAssignmentSummary
     evaluation_signals: AssignmentEvaluationSignals
@@ -451,18 +451,18 @@ class RecoveryAssignmentInput(BaseModel):
                 "RecoveryAssignmentInput requires at least one new recovery task."
             )
 
-        if self.resolved_action == "continue_current_plan":
-            if self.assignment_mode != "continue_with_assignment":
+        if self.resolved_intent_type == "assign":
+            if self.resolved_mutation_scope != "assignment":
                 raise ValueError(
-                    "assignment_mode must be 'continue_with_assignment' when "
-                    "resolved_action='continue_current_plan'."
+                    "resolved_mutation_scope must be 'assignment' when "
+                    "resolved_intent_type='assign'."
                 )
 
-        if self.resolved_action == "resequence_remaining_batches":
-            if self.assignment_mode != "resequence_with_assignment":
+        if self.resolved_intent_type == "resequence":
+            if self.resolved_mutation_scope != "resequence":
                 raise ValueError(
-                    "assignment_mode must be 'resequence_with_assignment' when "
-                    "resolved_action='resequence_remaining_batches'."
+                    "resolved_mutation_scope must be 'resequence' when "
+                    "resolved_intent_type='resequence'."
                 )
 
         new_task_ids = [task.task_id for task in self.new_tasks]

@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
-from app.schemas.post_batch_intent import (
-    LegacyResolvedPostBatchAction,
-    ResolvedPostBatchIntent,
-)
-
-
-ResolvedPostBatchAction = LegacyResolvedPostBatchAction
+from app.schemas.post_batch_intent import ResolvedPostBatchIntent
 
 
 @dataclass(kw_only=True)
@@ -44,28 +38,14 @@ class PostBatchDecisionSignals:
     has_new_recovery_pending_tasks: bool = False
     new_recovery_pending_task_count: int = 0
 
-    key_risks: list[str]
-    notes: list[str]
-    decision_signals: list[str]
+    key_risks: list[str] | None = None
+    notes: list[str] | None = None
+    decision_signals: list[str] | None = None
 
-
-@dataclass(kw_only=True)
-class ResolvedPostBatchDecision:
-    """
-    Transitional legacy adapter.
-
-    Keep this while post_batch_service and workflow code still consume the older
-    booleans. The canonical resolution is ResolvedPostBatchIntent.
-    """
-
-    action: ResolvedPostBatchAction
-    continue_execution: bool
-    requires_replanning: bool
-    requires_resequencing: bool
-    requires_manual_review: bool
-    is_stage_closed: bool
-    reopened_finalization: bool
-    notes: str
+    def __post_init__(self) -> None:
+        self.key_risks = _normalize_string_list(self.key_risks)
+        self.notes = _normalize_string_list(self.notes)
+        self.decision_signals = _normalize_string_list(self.decision_signals)
 
 
 def _read_attr(obj: Any, name: str, default: Any = None) -> Any:
@@ -90,7 +70,15 @@ def _normalize_string(value: Any, default: str = "") -> str:
 def _normalize_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    return [str(item).strip() for item in value if str(item).strip()]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+    return normalized
 
 
 def build_post_batch_decision_signals(
@@ -176,7 +164,7 @@ def _join_notes(signals: PostBatchDecisionSignals, *extra: str) -> str:
     if signals.recommended_next_action_reason:
         parts.append(signals.recommended_next_action_reason)
 
-    parts.extend(note for note in signals.notes if note)
+    parts.extend(note for note in signals.notes or [] if note)
     parts.extend(item for item in extra if item)
 
     return " ".join(part.strip() for part in parts if part and part.strip()) or (
@@ -185,7 +173,7 @@ def _join_notes(signals: PostBatchDecisionSignals, *extra: str) -> str:
 
 
 def _append_signal(signals: PostBatchDecisionSignals, *extra_signals: str) -> list[str]:
-    values = list(signals.decision_signals)
+    values = list(signals.decision_signals or [])
     for item in extra_signals:
         item = item.strip()
         if item and item not in values:
@@ -194,15 +182,6 @@ def _append_signal(signals: PostBatchDecisionSignals, *extra_signals: str) -> li
 
 
 def _should_close_stage(signals: PostBatchDecisionSignals) -> bool:
-    """
-    Close only when closure is actually legal.
-
-    A stage may close only if:
-    - evaluator requested closure,
-    - this is the final batch of the current live plan,
-    - there are no remaining batches,
-    - and there is no newly created recovery work that still needs assignment.
-    """
     evaluator_requests_close = (
         signals.project_stage_closed
         or signals.decision == "stage_completed"
@@ -256,13 +235,6 @@ def _is_local_resequence(signals: PostBatchDecisionSignals) -> bool:
 
 
 def _should_assign_new_work(signals: PostBatchDecisionSignals) -> bool:
-    """
-    Assignment is the canonical continuation path when:
-    - the remaining plan is still valid,
-    - there is newly created recovery work,
-    - that work does not block immediate progress strongly enough to require resequence,
-    - and we must not leave any new task unassigned before the next batch.
-    """
     if not signals.remaining_plan_still_valid:
         return False
 
@@ -271,6 +243,9 @@ def _should_assign_new_work(signals: PostBatchDecisionSignals) -> bool:
 
     if signals.new_recovery_tasks_blocking is True:
         return False
+
+    if signals.has_preexisting_pending_valid_tasks:
+        return True
 
     if signals.recommended_next_action in {
         "manual_review",
@@ -317,11 +292,9 @@ def _should_continue_current_plan(signals: PostBatchDecisionSignals) -> bool:
 def resolve_post_batch_intent(
     signals: PostBatchDecisionSignals,
 ) -> ResolvedPostBatchIntent:
-    # 1. Manual review wins immediately.
     if signals.manual_review_required or signals.decision == "manual_review_required":
         return ResolvedPostBatchIntent(
             intent_type="manual_review",
-            legacy_action="manual_review",
             mutation_scope="none",
             remaining_plan_still_valid=signals.remaining_plan_still_valid,
             has_new_recovery_tasks=(
@@ -337,14 +310,12 @@ def resolve_post_batch_intent(
                 signals,
                 "Manual review is required before the workflow can continue.",
             ),
-            decision_signals=list(signals.decision_signals),
+            decision_signals=list(signals.decision_signals or []),
         )
 
-    # 2. Structural replan.
     if _is_structural_replan(signals):
         return ResolvedPostBatchIntent(
             intent_type="replan",
-            legacy_action="replan_remaining_work",
             mutation_scope="replan",
             remaining_plan_still_valid=False,
             has_new_recovery_tasks=(
@@ -360,14 +331,12 @@ def resolve_post_batch_intent(
                 signals,
                 "The remaining plan is no longer structurally valid and must be rebuilt.",
             ),
-            decision_signals=list(signals.decision_signals),
+            decision_signals=list(signals.decision_signals or []),
         )
 
-    # 3. Local resequence / immediate blocking patch semantics.
     if _is_local_resequence(signals):
         return ResolvedPostBatchIntent(
             intent_type="resequence",
-            legacy_action="resequence_remaining_batches",
             mutation_scope="resequence",
             remaining_plan_still_valid=True,
             has_new_recovery_tasks=(
@@ -385,14 +354,12 @@ def resolve_post_batch_intent(
                 signals,
                 "The remaining plan is still valid, but the pending execution order must be adjusted locally.",
             ),
-            decision_signals=list(signals.decision_signals),
+            decision_signals=list(signals.decision_signals or []),
         )
 
-    # 4. Controlled assignment of newly created work into the live plan.
     if _should_assign_new_work(signals):
         return ResolvedPostBatchIntent(
             intent_type="assign",
-            legacy_action="continue_current_plan",
             mutation_scope="assignment",
             remaining_plan_still_valid=True,
             has_new_recovery_tasks=True,
@@ -406,14 +373,12 @@ def resolve_post_batch_intent(
                 signals,
                 "New recovery work must be assigned into the active plan before the next batch starts.",
             ),
-            decision_signals=list(signals.decision_signals),
+            decision_signals=list(signals.decision_signals or []),
         )
 
-    # 5. Legal stage closure.
     if _should_close_stage(signals):
         return ResolvedPostBatchIntent(
             intent_type="close",
-            legacy_action="close_stage",
             mutation_scope="none",
             remaining_plan_still_valid=True,
             has_new_recovery_tasks=False,
@@ -427,14 +392,12 @@ def resolve_post_batch_intent(
                 signals,
                 "The current live plan is exhausted and the stage can be closed.",
             ),
-            decision_signals=list(signals.decision_signals),
+            decision_signals=list(signals.decision_signals or []),
         )
 
-    # 6. Plain continuation with no new recovery work to place.
     if _should_continue_current_plan(signals):
         return ResolvedPostBatchIntent(
             intent_type="continue",
-            legacy_action="continue_current_plan",
             mutation_scope="none",
             remaining_plan_still_valid=True,
             has_new_recovery_tasks=False,
@@ -448,13 +411,11 @@ def resolve_post_batch_intent(
                 signals,
                 "The current remaining plan is still valid and can continue without mutation.",
             ),
-            decision_signals=list(signals.decision_signals),
+            decision_signals=list(signals.decision_signals or []),
         )
 
-    # 7. Conservative fallback.
     return ResolvedPostBatchIntent(
         intent_type="manual_review",
-        legacy_action="manual_review",
         mutation_scope="none",
         remaining_plan_still_valid=signals.remaining_plan_still_valid,
         has_new_recovery_tasks=(
@@ -471,30 +432,4 @@ def resolve_post_batch_intent(
             "The checkpoint signals were not strong enough to continue automatically.",
         ),
         decision_signals=_append_signal(signals, "manual_review_fallback"),
-    )
-
-
-def resolve_post_batch_decision(
-    signals: PostBatchDecisionSignals,
-) -> ResolvedPostBatchDecision:
-    """
-    Legacy adapter.
-
-    Keep this function during the migration so existing callers still work while
-    the rest of the workflow moves to ResolvedPostBatchIntent.
-    """
-    intent = resolve_post_batch_intent(signals)
-
-    return ResolvedPostBatchDecision(
-        action=intent.legacy_action,
-        continue_execution=(
-            intent.intent_type in {"continue", "assign"}
-            and intent.can_continue_after_application
-        ),
-        requires_replanning=intent.intent_type == "replan",
-        requires_resequencing=intent.intent_type == "resequence",
-        requires_manual_review=intent.intent_type == "manual_review",
-        is_stage_closed=intent.intent_type == "close",
-        reopened_finalization=intent.reopened_finalization,
-        notes=intent.notes,
     )

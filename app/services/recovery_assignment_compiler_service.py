@@ -362,15 +362,25 @@ def _cross_validate_input_and_output(
             f"unexpected_in_output={unexpected_in_output}"
         )
 
-    if assignment_output.strategy == "requires_replan":
-        if assignment_input.resolved_action not in {
-            "continue_current_plan",
-            "resequence_remaining_batches",
-        }:
+    if assignment_input.resolved_intent_type == "assign":
+        if assignment_input.resolved_mutation_scope != "assignment":
             raise RecoveryAssignmentCompilerError(
-                "requires_replan is not compatible with the provided resolved_action."
+                "resolved_intent_type='assign' requires resolved_mutation_scope='assignment'."
             )
+        expected_strategy = "continue_with_assignment"
+    elif assignment_input.resolved_intent_type == "resequence":
+        if assignment_input.resolved_mutation_scope != "resequence":
+            raise RecoveryAssignmentCompilerError(
+                "resolved_intent_type='resequence' requires resolved_mutation_scope='resequence'."
+            )
+        expected_strategy = "resequence_with_assignment"
+    else:
+        raise RecoveryAssignmentCompilerError(
+            "RecoveryAssignmentInput only supports resolved_intent_type in "
+            "{'assign', 'resequence'}."
+        )
 
+    if assignment_output.strategy == "requires_replan":
         structural_clusters = [
             cluster
             for cluster in assignment_output.clusters
@@ -381,10 +391,10 @@ def _cross_validate_input_and_output(
                 "strategy='requires_replan' requires at least one structural_conflict cluster."
             )
     else:
-        if assignment_input.assignment_mode != assignment_output.strategy:
+        if assignment_output.strategy != expected_strategy:
             raise RecoveryAssignmentCompilerError(
-                "LLM output strategy does not match the resolved assignment mode. "
-                f"expected='{assignment_input.assignment_mode}', "
+                "LLM output strategy does not match the resolved assignment intent. "
+                f"expected='{expected_strategy}', "
                 f"got='{assignment_output.strategy}'."
             )
 
@@ -457,7 +467,7 @@ def _find_first_consumer_batch_or_raise(
             f"Cluster '{cluster.cluster_id}' requires a future consumer batch, but there are no remaining batches."
         )
 
-    must_come_after_existing, must_come_before_existing = _existing_dependency_sets_for_cluster(
+    _, must_come_before_existing = _existing_dependency_sets_for_cluster(
         cluster=cluster,
         assessment_by_task_id=assessment_by_task_id,
         assignment_input=assignment_input,
@@ -483,9 +493,6 @@ def _find_first_consumer_batch_or_raise(
         }
         return sorted(candidate_batches, key=lambda item: remaining_order[item.batch_id])[0]
 
-    # Conservative fallback:
-    # if there is no explicit consumer relation but there are remaining batches,
-    # use the earliest remaining batch only for non-structural placement relations.
     return remaining_batches[0]
 
 

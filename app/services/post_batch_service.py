@@ -16,10 +16,10 @@ from app.models.execution_run import (
 from app.models.project import Project
 from app.models.task import (
     TASK_STATUS_AWAITING_VALIDATION,
-    TASK_STATUS_PENDING,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
+    TASK_STATUS_PENDING,
     TERMINAL_TASK_STATUSES,
     Task,
 )
@@ -43,6 +43,10 @@ from app.schemas.recovery_assignment import (
 from app.schemas.workflow_iteration_trace import WorkflowIterationTrace
 from app.services.artifacts import create_artifact
 from app.services.evaluation_service import evaluate_checkpoint, persist_evaluation_decision
+from app.services.live_plan_mutation_service import (
+    LivePlanMutationServiceError,
+    mutate_live_plan,
+)
 from app.services.post_batch_decision_service import (
     build_post_batch_decision_signals,
     resolve_post_batch_intent,
@@ -57,10 +61,6 @@ from app.services.recovery_service import (
 from app.services.task_hierarchy_reconciliation_service import (
     TaskHierarchyReconciliationServiceError,
     reconcile_task_hierarchy_after_changes,
-)
-from app.services.live_plan_mutation_service import (
-    LivePlanMutationServiceError,
-    mutate_live_plan,
 )
 
 TERMINAL_RUN_STATUSES = {
@@ -93,8 +93,6 @@ def _build_workflow_iteration_trace(
     checkpoint_id: str,
     created_recovery_task_ids: list[int],
     result: PostBatchResult,
-    mutation_kind: str | None,
-    patched_execution_plan: ExecutionPlan | None,
     assigned_task_ids: list[int],
     unassigned_task_ids: list[int],
     source_run_ids_with_recovery: list[int],
@@ -108,23 +106,32 @@ def _build_workflow_iteration_trace(
         batch_id=batch.batch_id,
         batch_index=batch.batch_index,
         checkpoint_id=checkpoint_id,
+        post_batch_status=result.status,
         executed_task_ids=list(result.executed_task_ids),
         successful_task_ids=list(result.successful_task_ids),
         problematic_run_ids=list(result.problematic_run_ids),
         created_recovery_task_ids=list(created_recovery_task_ids),
         source_run_ids_with_recovery=list(source_run_ids_with_recovery),
-        resolved_action=result.resolved_action,
-        decision_signals_used=list(result.decision_signals_used),
-        mutation_kind=mutation_kind,
-        patched_plan_version=patched_execution_plan.plan_version if patched_execution_plan else None,
+        resolved_intent_type=result.resolved_intent_type,
+        resolved_mutation_scope=result.resolved_mutation_scope,
+        remaining_plan_still_valid=result.remaining_plan_still_valid,
+        has_new_recovery_tasks=result.has_new_recovery_tasks,
+        requires_plan_mutation=result.requires_plan_mutation,
+        requires_all_new_tasks_assigned=result.requires_all_new_tasks_assigned,
+        can_continue_after_application=result.can_continue_after_application,
+        should_close_stage=result.should_close_stage,
+        requires_manual_review=result.requires_manual_review,
+        reopened_finalization=result.reopened_finalization,
+        decision_signals=list(result.decision_signals),
+        patched_plan_version=(
+            result.patched_execution_plan.plan_version
+            if result.patched_execution_plan is not None
+            else None
+        ),
         assigned_task_ids=list(assigned_task_ids),
         unassigned_task_ids=list(unassigned_task_ids),
         preexisting_pending_valid_task_count=preexisting_pending_valid_task_count,
         new_recovery_pending_task_count=new_recovery_pending_task_count,
-        continue_execution=result.continue_execution,
-        requires_resequencing=result.requires_resequencing,
-        requires_replanning=result.requires_replanning,
-        requires_manual_review=result.requires_manual_review,
         is_final_batch=result.is_final_batch,
         finalization_iteration_count=result.finalization_iteration_count,
         max_finalization_iterations=result.max_finalization_iterations,
@@ -491,6 +498,7 @@ def _count_preexisting_valid_pending_tasks(
         exclude_task_ids=exclude_ids,
     )
 
+
 def _validate_stage_evaluation_coherence(
     *,
     evaluation_decision: Any,
@@ -562,27 +570,6 @@ def _require_new_stage_evaluation_output(evaluation_decision: Any) -> None:
         )
 
 
-def _derive_legacy_flags_from_intent(
-    intent: ResolvedPostBatchIntent,
-) -> tuple[bool, bool, bool, bool, bool]:
-    continue_execution = (
-        intent.intent_type in {"continue", "assign"}
-        and intent.can_continue_after_application
-    )
-    requires_replanning = intent.intent_type == "replan"
-    requires_resequencing = intent.intent_type == "resequence"
-    requires_manual_review = intent.intent_type == "manual_review"
-    is_stage_closed = intent.intent_type == "close"
-
-    return (
-        continue_execution,
-        requires_replanning,
-        requires_resequencing,
-        requires_manual_review,
-        is_stage_closed,
-    )
-
-
 def _normalize_non_final_close_intent(
     *,
     intent: ResolvedPostBatchIntent,
@@ -595,7 +582,6 @@ def _normalize_non_final_close_intent(
 
     return ResolvedPostBatchIntent(
         intent_type="continue",
-        legacy_action="continue_current_plan",
         mutation_scope="none",
         remaining_plan_still_valid=intent.remaining_plan_still_valid,
         has_new_recovery_tasks=False,
@@ -611,29 +597,6 @@ def _normalize_non_final_close_intent(
         ),
         decision_signals=decision_signals,
     )
-
-
-def _should_run_immediate_resequence_patch(
-    *,
-    intent: ResolvedPostBatchIntent,
-    created_recovery_task_ids: list[int],
-    evaluation_decision: Any,
-) -> bool:
-    if intent.intent_type != "resequence":
-        return False
-
-    if not created_recovery_task_ids:
-        return False
-
-    if not _normalize_bool(_read_attr(evaluation_decision, "new_recovery_tasks_blocking"), False):
-        return False
-
-    if not intent.remaining_plan_still_valid:
-        raise PostBatchServiceError(
-            "Cannot apply an immediate resequence patch when the remaining plan is not valid."
-        )
-
-    return True
 
 
 def _build_recovery_assignment_executed_batch_summary(
@@ -889,7 +852,8 @@ def _build_recovery_assignment_input(
     successful_task_ids: list[int],
     problematic_run_ids: list[int],
     task_run_summaries: list[PostBatchTaskRunSummary],
-    resolved_action: str,
+    resolved_intent_type: str,
+    resolved_mutation_scope: str,
 ) -> RecoveryAssignmentInput:
     new_tasks = _build_recovery_assignment_new_tasks(
         db=db,
@@ -909,8 +873,8 @@ def _build_recovery_assignment_input(
             or "Continue the current project safely."
         ),
         current_stage_summary=getattr(project, "description", None),
-        resolved_action=resolved_action,
-        assignment_mode="continue_with_assignment",
+        resolved_intent_type=resolved_intent_type,
+        resolved_mutation_scope=resolved_mutation_scope,
         executed_batch_summary=_build_recovery_assignment_executed_batch_summary(
             batch=batch,
             executed_task_ids=executed_task_ids,
@@ -926,7 +890,7 @@ def _build_recovery_assignment_input(
             ),
             recommended_next_action=_normalize_string(
                 _read_attr(evaluation_decision, "recommended_next_action"),
-                resolved_action,
+                resolved_intent_type,
             ),
             recommended_next_action_reason=_normalize_string(
                 _read_attr(evaluation_decision, "recommended_next_action_reason"),
@@ -1207,21 +1171,8 @@ def process_batch_after_execution(
         is_final_batch=is_final_batch,
     )
 
-    resolved_action = resolved_intent.legacy_action
-    resolved_decision_signals = list(resolved_intent.decision_signals)
-
-    (
-        continue_execution,
-        requires_replanning,
-        requires_resequencing,
-        requires_manual_review,
-        is_stage_closed,
-    ) = _derive_legacy_flags_from_intent(resolved_intent)
-
     patched_execution_plan: ExecutionPlan | None = None
     finalization_guard_triggered = False
-
-    mutation_kind: str | None = None
     assigned_task_ids: list[int] = []
     unassigned_task_ids: list[int] = []
     source_run_ids_with_recovery = [
@@ -1229,14 +1180,12 @@ def process_batch_after_execution(
         for decision in aggregated_recovery_context.recovery_decisions
     ]
 
-    if continue_execution:
-        status = "completed_with_evaluation"
-    else:
-        status = "checkpoint_blocked"
+    notes = (
+        resolved_intent.notes
+        or "Post-batch processing completed with explicit checkpoint evaluation."
+    )
 
-    notes = resolved_intent.notes or "Post-batch processing completed with explicit checkpoint evaluation."
-
-    if resolved_intent.intent_type in {"resequence", "assign"}:
+    if resolved_intent.intent_type in {"assign", "resequence"}:
         try:
             mutation_result = mutate_live_plan(
                 db=db,
@@ -1259,177 +1208,172 @@ def process_batch_after_execution(
                 f"Live plan mutation failed: {str(exc)}"
             ) from exc
 
-        mutation_kind = mutation_result.mutation_kind
         assigned_task_ids = list(mutation_result.metadata.get("assigned_task_ids", []))
         unassigned_task_ids = list(mutation_result.metadata.get("unassigned_task_ids", []))
 
         if mutation_result.mutation_kind == "assignment":
             patched_execution_plan = mutation_result.patched_execution_plan
-
             cluster_assignments = mutation_result.metadata.get(
                 "compiled_cluster_assignments",
                 [],
             )
             cluster_count = len(cluster_assignments)
 
-            if resolved_intent.intent_type == "assign":
-                continue_execution = True
-                requires_replanning = False
-                requires_resequencing = False
-                requires_manual_review = False
-                is_stage_closed = False
-                status = "completed_with_evaluation"
-                notes = (
-                    f"{notes} Recovery assignment placed all new tasks before continuing. "
-                    f"clusters_assigned={cluster_count}; assigned_task_ids={assigned_task_ids}."
-                )
-            elif resolved_intent.intent_type == "resequence":
-                continue_execution = False
-                requires_replanning = False
-                requires_resequencing = True
-                requires_manual_review = False
-                is_stage_closed = False
-                status = "checkpoint_blocked"
-                notes = (
-                    f"{notes} Recovery assignment placed the blocking tasks into the live plan, "
-                    "but continuation remains paused until the resequenced plan is applied. "
-                    f"clusters_assigned={cluster_count}; assigned_task_ids={assigned_task_ids}."
-                )
-            else:
-                raise PostBatchServiceError(
-                    f"Mutation result 'assignment' is inconsistent with resolved intent '{resolved_intent.intent_type}'."
-                )
+            notes = (
+                f"{notes} Recovery assignment placed all new tasks before continuing. "
+                f"clusters_assigned={cluster_count}; assigned_task_ids={assigned_task_ids}."
+            )
 
         elif mutation_result.mutation_kind == "escalated_to_replan":
             patched_execution_plan = None
-            continue_execution = False
-            requires_replanning = True
-            requires_resequencing = False
-            requires_manual_review = False
-            is_stage_closed = False
-            resolved_action = "replan_remaining_work"
-            status = "checkpoint_blocked"
-            notes = (
-                f"{notes} Recovery assignment escalated to replanning because the newly created "
-                f"work revealed a structural conflict: {' '.join(mutation_result.notes).strip() or 'no extra notes'}"
+            resolved_intent = ResolvedPostBatchIntent(
+                intent_type="replan",
+                mutation_scope="replan",
+                remaining_plan_still_valid=False,
+                has_new_recovery_tasks=resolved_intent.has_new_recovery_tasks,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
+                requires_manual_review=False,
+                reopened_finalization=True,
+                notes=(
+                    f"{notes} Recovery assignment escalated to replanning because the newly created "
+                    f"work revealed a structural conflict: "
+                    f"{' '.join(mutation_result.notes).strip() or 'no extra notes'}"
+                ),
+                decision_signals=list(
+                    dict.fromkeys(
+                        list(resolved_intent.decision_signals)
+                        + ["assignment_escalated_to_replan"]
+                    )
+                ),
             )
-            resolved_decision_signals = list(
-                dict.fromkeys(resolved_decision_signals + ["assignment_escalated_to_replan"])
-            )
+            notes = resolved_intent.notes
 
         elif mutation_result.mutation_kind == "resequence_patch":
             patched_execution_plan = mutation_result.patched_execution_plan
-            continue_execution = False
-            requires_replanning = False
-            requires_resequencing = True
-            requires_manual_review = False
-            is_stage_closed = False
-            status = "checkpoint_blocked"
-            if mutation_result.notes:
-                notes = f"{notes} {' '.join(mutation_result.notes)}"
+            notes = (
+                f"{notes} "
+                "A local patch batch was inserted into the current plan to execute recovery-created work before continuing."
+            )
 
         elif mutation_result.mutation_kind == "resequence_deferred":
             patched_execution_plan = None
-            continue_execution = False
-            requires_replanning = False
-            requires_resequencing = True
-            requires_manual_review = False
-            is_stage_closed = False
-            status = "checkpoint_blocked"
+            notes = (
+                f"{notes} "
+                "The remaining plan requires resequencing, but no immediate local patch batch was materialized."
+            )
 
         else:
             raise PostBatchServiceError(
                 f"Unsupported mutation result '{mutation_result.mutation_kind}' for intent '{resolved_intent.intent_type}'."
             )
-        
-    elif resolved_intent.intent_type == "replan":
-        continue_execution = False
-        requires_replanning = True
-        requires_resequencing = False
-        requires_manual_review = False
-        is_stage_closed = False
-        status = "checkpoint_blocked"
 
-    elif resolved_intent.intent_type == "manual_review":
-        continue_execution = False
-        requires_replanning = False
-        requires_resequencing = False
-        requires_manual_review = True
-        is_stage_closed = False
-        status = "checkpoint_blocked"
-
-    elif resolved_intent.intent_type == "close":
-        continue_execution = False
-        requires_replanning = False
-        requires_resequencing = False
-        requires_manual_review = False
-        is_stage_closed = True
-
-    elif resolved_intent.intent_type == "continue":
-        continue_execution = True
-        requires_replanning = False
-        requires_resequencing = False
-        requires_manual_review = False
-        is_stage_closed = False
-        status = "completed_with_evaluation"
-
-    else:
+    if (
+        resolved_intent.requires_all_new_tasks_assigned
+        and created_recovery_task_ids
+        and patched_execution_plan is None
+        and resolved_intent.intent_type != "replan"
+    ):
         raise PostBatchServiceError(
-            f"Unsupported resolved intent_type '{resolved_intent.intent_type}'."
+            "Post-batch intent required assignment of all new recovery tasks, "
+            "but no patched execution plan was produced."
         )
 
-    if resolved_intent.requires_all_new_tasks_assigned:
-        if created_recovery_task_ids and patched_execution_plan is None and not requires_replanning:
-            raise PostBatchServiceError(
-                "Post-batch intent required assignment of all new recovery tasks, "
-                "but no patched execution plan was produced."
-            )
-
-    if resolved_action:
-        signal_suffix = ""
-        if resolved_decision_signals:
-            signal_suffix = f" Signals: {', '.join(resolved_decision_signals)}."
-        notes = f"[resolved_action={resolved_action}] {notes}{signal_suffix}"
-
     if is_final_batch:
-        if patched_execution_plan is not None and continue_execution and not requires_replanning and not requires_resequencing:
-            status = "completed_with_evaluation"
-            notes = (
-                f"{notes} The original final batch no longer closes the stage because new work "
-                "was assigned into the live plan. The stage remains open until the new final batch is evaluated."
+        if (
+            patched_execution_plan is not None
+            and resolved_intent.can_continue_after_application
+            and resolved_intent.intent_type == "assign"
+        ):
+            status = "finalization_reopened"
+            resolved_intent = ResolvedPostBatchIntent(
+                intent_type=resolved_intent.intent_type,
+                mutation_scope=resolved_intent.mutation_scope,
+                remaining_plan_still_valid=resolved_intent.remaining_plan_still_valid,
+                has_new_recovery_tasks=resolved_intent.has_new_recovery_tasks,
+                requires_plan_mutation=resolved_intent.requires_plan_mutation,
+                requires_all_new_tasks_assigned=resolved_intent.requires_all_new_tasks_assigned,
+                can_continue_after_application=resolved_intent.can_continue_after_application,
+                should_close_stage=False,
+                requires_manual_review=False,
+                reopened_finalization=True,
+                notes=(
+                    f"{notes} The original final batch no longer closes the stage because new work "
+                    "was assigned into the live plan. The stage remains open until the new final batch is evaluated."
+                ),
+                decision_signals=list(resolved_intent.decision_signals),
             )
-        elif is_stage_closed:
-            continue_execution = False
+            notes = resolved_intent.notes
+
+        elif resolved_intent.intent_type == "close":
             status = "project_stage_closed"
             notes = (
                 resolved_intent.notes
                 or "The evaluator considered the final batch sufficient to close this project stage."
             )
-        elif resolved_intent.reopened_finalization or requires_replanning or requires_resequencing:
+
+        elif resolved_intent.reopened_finalization:
             next_finalization_iteration_count = finalization_iteration_count + 1
 
             if next_finalization_iteration_count > max_finalization_iterations:
                 finalization_guard_triggered = True
-                requires_manual_review = True
-                continue_execution = False
-                requires_resequencing = False
-                requires_replanning = False
-                status = "finalization_guard_blocked"
-                notes = (
-                    "Finalization guard triggered. The evaluator requested additional end-of-plan "
-                    "work beyond the allowed automatic finalization iterations. Manual review is required."
+                resolved_intent = ResolvedPostBatchIntent(
+                    intent_type="manual_review",
+                    mutation_scope="none",
+                    remaining_plan_still_valid=resolved_intent.remaining_plan_still_valid,
+                    has_new_recovery_tasks=resolved_intent.has_new_recovery_tasks,
+                    requires_plan_mutation=False,
+                    requires_all_new_tasks_assigned=False,
+                    can_continue_after_application=False,
+                    should_close_stage=False,
+                    requires_manual_review=True,
+                    reopened_finalization=False,
+                    notes=(
+                        "Finalization guard triggered. The evaluator requested additional end-of-plan "
+                        "work beyond the allowed automatic finalization iterations. Manual review is required."
+                    ),
+                    decision_signals=list(
+                        dict.fromkeys(
+                            list(resolved_intent.decision_signals)
+                            + ["finalization_guard_triggered"]
+                        )
+                    ),
                 )
+                status = "finalization_guard_blocked"
+                notes = resolved_intent.notes
             else:
                 finalization_iteration_count = next_finalization_iteration_count
-                continue_execution = False
                 status = "finalization_reopened"
                 notes = (
                     resolved_intent.notes
                     or "The evaluator reopened finalization. A new final iteration must be sequenced, "
                     "and the resulting plan must again end with an explicit final checkpoint."
                 )
+
+        elif resolved_intent.intent_type == "continue":
+            status = "completed_with_evaluation"
+        elif resolved_intent.intent_type == "manual_review":
+            status = "checkpoint_blocked"
+        elif resolved_intent.intent_type in {"assign", "resequence", "replan"}:
+            status = "checkpoint_blocked"
         else:
-            status = "completed_with_evaluation" if continue_execution else "checkpoint_blocked"
+            raise PostBatchServiceError(
+                f"Unsupported resolved intent_type '{resolved_intent.intent_type}'."
+            )
+
+    else:
+        if resolved_intent.intent_type == "continue":
+            status = "completed_with_evaluation"
+        elif resolved_intent.intent_type == "assign":
+            status = "completed_with_evaluation"
+        elif resolved_intent.intent_type in {"resequence", "replan", "manual_review", "close"}:
+            status = "checkpoint_blocked" if resolved_intent.intent_type != "close" else "project_stage_closed"
+        else:
+            raise PostBatchServiceError(
+                f"Unsupported resolved intent_type '{resolved_intent.intent_type}'."
+            )
 
     result = PostBatchResult(
         project_id=project_id,
@@ -1443,12 +1387,17 @@ def process_batch_after_execution(
         task_run_summaries=task_run_summaries,
         recovery_context=aggregated_recovery_context,
         evaluation_decision=evaluation_decision,
-        continue_execution=continue_execution,
-        requires_resequencing=requires_resequencing,
-        requires_replanning=requires_replanning,
-        requires_manual_review=requires_manual_review,
-        resolved_action=resolved_action,
-        decision_signals_used=resolved_decision_signals,
+        resolved_intent_type=resolved_intent.intent_type,
+        resolved_mutation_scope=resolved_intent.mutation_scope,
+        remaining_plan_still_valid=resolved_intent.remaining_plan_still_valid,
+        has_new_recovery_tasks=resolved_intent.has_new_recovery_tasks,
+        requires_plan_mutation=resolved_intent.requires_plan_mutation,
+        requires_all_new_tasks_assigned=resolved_intent.requires_all_new_tasks_assigned,
+        can_continue_after_application=resolved_intent.can_continue_after_application,
+        should_close_stage=resolved_intent.should_close_stage,
+        requires_manual_review=resolved_intent.requires_manual_review,
+        reopened_finalization=resolved_intent.reopened_finalization,
+        decision_signals=list(resolved_intent.decision_signals),
         patched_execution_plan=patched_execution_plan,
         is_final_batch=is_final_batch,
         finalization_iteration_count=finalization_iteration_count,
@@ -1463,8 +1412,6 @@ def process_batch_after_execution(
         checkpoint_id=checkpoint.checkpoint_id,
         created_recovery_task_ids=created_recovery_task_ids,
         result=result,
-        mutation_kind=mutation_kind,
-        patched_execution_plan=patched_execution_plan,
         assigned_task_ids=assigned_task_ids,
         unassigned_task_ids=unassigned_task_ids,
         source_run_ids_with_recovery=source_run_ids_with_recovery,

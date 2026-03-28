@@ -345,10 +345,48 @@ def _persist_workflow_batch_trace(
         "task_ids": list(task_ids),
         "task_run_summaries": task_run_summaries,
         "post_batch_status": getattr(post_batch_result, "status", None),
-        "continue_execution": getattr(post_batch_result, "continue_execution", False),
-        "requires_replanning": getattr(post_batch_result, "requires_replanning", False),
-        "requires_resequencing": getattr(post_batch_result, "requires_resequencing", False),
-        "requires_manual_review": getattr(post_batch_result, "requires_manual_review", False),
+        "resolved_intent_type": getattr(post_batch_result, "resolved_intent_type", None),
+        "resolved_mutation_scope": getattr(
+            post_batch_result,
+            "resolved_mutation_scope",
+            None,
+        ),
+        "remaining_plan_still_valid": getattr(
+            post_batch_result,
+            "remaining_plan_still_valid",
+            None,
+        ),
+        "has_new_recovery_tasks": getattr(
+            post_batch_result,
+            "has_new_recovery_tasks",
+            None,
+        ),
+        "requires_plan_mutation": getattr(
+            post_batch_result,
+            "requires_plan_mutation",
+            None,
+        ),
+        "requires_all_new_tasks_assigned": getattr(
+            post_batch_result,
+            "requires_all_new_tasks_assigned",
+            None,
+        ),
+        "can_continue_after_application": getattr(
+            post_batch_result,
+            "can_continue_after_application",
+            None,
+        ),
+        "should_close_stage": getattr(post_batch_result, "should_close_stage", None),
+        "requires_manual_review": getattr(
+            post_batch_result,
+            "requires_manual_review",
+            None,
+        ),
+        "reopened_finalization": getattr(
+            post_batch_result,
+            "reopened_finalization",
+            None,
+        ),
         "finalization_guard_triggered": getattr(
             post_batch_result,
             "finalization_guard_triggered",
@@ -359,12 +397,10 @@ def _persist_workflow_batch_trace(
             "finalization_iteration_count",
             0,
         ),
-        "resolved_action": getattr(post_batch_result, "resolved_action", None),
-        "decision_signals_used": getattr(post_batch_result, "decision_signals_used", []),
+        "decision_signals": getattr(post_batch_result, "decision_signals", []),
         "patched_plan_version": patched_plan_version,
         "notes": getattr(post_batch_result, "notes", None),
     }
-
 
     create_artifact(
         db=db,
@@ -431,6 +467,39 @@ def _process_batch_after_terminal_tasks(
         ) from exc
 
 
+def _build_iteration_notes(
+    *,
+    resulting_status: str,
+    resolved_intent_type: str,
+    reopened_finalization: bool,
+    requires_manual_review: bool,
+    should_close_stage: bool,
+    used_patched_plan: bool,
+    notes: str,
+) -> str:
+    if resulting_status == "stage_closed" or should_close_stage:
+        return "Iteration ended because the stage was closed."
+
+    if requires_manual_review:
+        return "Iteration ended because manual review is required."
+
+    if resolved_intent_type == "replan":
+        return "Iteration ended because the remaining plan must be replanned."
+
+    if resolved_intent_type == "resequence":
+        return "Iteration ended because the remaining plan must be resequenced."
+
+    if resolved_intent_type == "assign":
+        if used_patched_plan:
+            return "Iteration continued using a patched execution plan after assigning newly created recovery tasks."
+        return "Iteration ended because newly created recovery tasks require a patched execution plan."
+
+    if reopened_finalization:
+        return "Iteration ended because finalization was reopened."
+
+    return notes or "Iteration completed."
+
+
 def _run_execution_iteration(
     db: Session,
     project_id: int,
@@ -443,7 +512,6 @@ def _run_execution_iteration(
     starting_plan_version = plan.plan_version
     processed_batch_ids: list[str] = []
     reopened_finalization = False
-    manual_review_required = False
     resulting_status = "execution_in_progress"
     current_finalization_iteration_count = finalization_iteration_count
     iteration_requires_replan = False
@@ -451,10 +519,9 @@ def _run_execution_iteration(
     current_plan = plan
     current_index = 0
     used_patched_plan = False
-    requires_replanning = False
-    requires_manual_review = False
     processed_batch_ids_set: set[str] = set()
     previously_completed_batch_ids = set(previously_completed_batch_ids or ())
+    last_post_batch_result = None
 
     while current_index < len(current_plan.execution_batches):
         batch = current_plan.execution_batches[current_index]
@@ -490,6 +557,8 @@ def _run_execution_iteration(
             max_finalization_iterations=max_finalization_iterations,
             checkpoint_artifact_window_start_exclusive=checkpoint_artifact_window_start_exclusive,
         )
+        last_post_batch_result = post_batch_result
+
         batch_patched_execution_plan = getattr(post_batch_result, "patched_execution_plan", None)
         batch_patched_plan_version = (
             batch_patched_execution_plan.plan_version
@@ -516,55 +585,48 @@ def _run_execution_iteration(
             current_finalization_iteration_count,
         )
 
-        if (
-            getattr(post_batch_result, "requires_manual_review", False)
-            or getattr(post_batch_result, "finalization_guard_triggered", False)
+        resolved_intent_type = post_batch_result.resolved_intent_type
+        requires_manual_review = post_batch_result.requires_manual_review
+        should_close_stage = post_batch_result.should_close_stage
+        reopened_finalization = post_batch_result.reopened_finalization
+        patched_execution_plan = post_batch_result.patched_execution_plan
+
+        if requires_manual_review or getattr(
+            post_batch_result,
+            "finalization_guard_triggered",
+            False,
         ):
-            manual_review_required = True
             resulting_status = "awaiting_manual_review"
             break
 
-        if getattr(post_batch_result, "status", None) == "project_stage_closed":
+        if getattr(post_batch_result, "status", None) == "project_stage_closed" or should_close_stage:
             resulting_status = "stage_closed"
             break
 
-        if getattr(post_batch_result, "status", None) == "finalization_reopened":
-            reopened_finalization = True
-            resulting_status = "execution_in_progress"
-            break
-
-        if getattr(post_batch_result, "requires_replanning", False):
-            reopened_finalization = True
+        if resolved_intent_type == "replan":
             resulting_status = "execution_in_progress"
             iteration_requires_replan = True
             break
 
-        patched_execution_plan = getattr(post_batch_result, "patched_execution_plan", None)
-        requires_replanning = getattr(post_batch_result, "requires_replanning", False)
-        requires_manual_review = getattr(post_batch_result, "requires_manual_review", False)
-
         if (
             patched_execution_plan is not None
-            and not requires_replanning
+            and post_batch_result.can_continue_after_application
             and not requires_manual_review
         ):
             current_plan = patched_execution_plan
             used_patched_plan = True
-            reopened_finalization = True
             resulting_status = "execution_in_progress"
             current_index += 1
             continue
 
-        if getattr(post_batch_result, "requires_resequencing", False):
-            reopened_finalization = True
+        if resolved_intent_type in {"assign", "resequence"}:
             resulting_status = "execution_in_progress"
             break
 
-        if getattr(post_batch_result, "continue_execution", False):
+        if resolved_intent_type == "continue":
             current_index += 1
             continue
 
-        manual_review_required = True
         resulting_status = "awaiting_manual_review"
         break
 
@@ -578,6 +640,11 @@ def _run_execution_iteration(
         and current_batch.batch_id not in previously_completed_batch_ids
     ]
 
+    if last_post_batch_result is None:
+        raise ProjectWorkflowServiceError(
+            "Execution iteration finished without producing any post-batch result."
+        )
+
     iteration_summary = WorkflowIterationSummary(
         iteration_number=iteration_number,
         plan_version=current_plan.plan_version,
@@ -585,18 +652,26 @@ def _run_execution_iteration(
         ending_plan_version=ending_plan_version,
         batch_ids_processed=processed_batch_ids,
         blocked_batch_ids_after_iteration=blocked_batch_ids_after_iteration,
-        reopened_finalization=reopened_finalization,
-        manual_review_required=manual_review_required,
+        resolved_intent_type=last_post_batch_result.resolved_intent_type,
+        resolved_mutation_scope=last_post_batch_result.resolved_mutation_scope,
+        remaining_plan_still_valid=last_post_batch_result.remaining_plan_still_valid,
+        has_new_recovery_tasks=last_post_batch_result.has_new_recovery_tasks,
+        requires_plan_mutation=last_post_batch_result.requires_plan_mutation,
+        requires_all_new_tasks_assigned=last_post_batch_result.requires_all_new_tasks_assigned,
+        can_continue_after_application=last_post_batch_result.can_continue_after_application,
+        should_close_stage=last_post_batch_result.should_close_stage,
+        requires_manual_review=last_post_batch_result.requires_manual_review,
+        reopened_finalization=last_post_batch_result.reopened_finalization,
         used_patched_plan=used_patched_plan,
-        replan_triggered=iteration_requires_replan,
-        notes=(
-            "Iteration ended because the stage was closed."
-            if resulting_status == "stage_closed"
-            else "Iteration ended because the live plan was extended, resequenced, or replanning is required."
-            if reopened_finalization
-            else "Iteration ended because manual review is required."
-            if manual_review_required
-            else "Iteration completed."
+        decision_signals=last_post_batch_result.decision_signals,
+        notes=_build_iteration_notes(
+            resulting_status=resulting_status,
+            resolved_intent_type=last_post_batch_result.resolved_intent_type,
+            reopened_finalization=last_post_batch_result.reopened_finalization,
+            requires_manual_review=last_post_batch_result.requires_manual_review,
+            should_close_stage=last_post_batch_result.should_close_stage,
+            used_patched_plan=used_patched_plan,
+            notes=last_post_batch_result.notes,
         ),
     )
     return (
@@ -676,10 +751,18 @@ def run_project_workflow(
                     ending_plan_version=plan.plan_version,
                     batch_ids_processed=[],
                     blocked_batch_ids_after_iteration=[],
+                    resolved_intent_type="manual_review",
+                    resolved_mutation_scope="none",
+                    remaining_plan_still_valid=True,
+                    has_new_recovery_tasks=False,
+                    requires_plan_mutation=False,
+                    requires_all_new_tasks_assigned=False,
+                    can_continue_after_application=False,
+                    should_close_stage=False,
+                    requires_manual_review=True,
                     reopened_finalization=False,
-                    manual_review_required=True,
                     used_patched_plan=False,
-                    replan_triggered=False,
+                    decision_signals=["empty_execution_plan"],
                     notes=(
                         "Execution plan generation returned no batches. "
                         "Manual review is required because decomposition or sequencing produced no executable work."
@@ -720,7 +803,7 @@ def run_project_workflow(
             final_status = "stage_closed"
             break
 
-        if iteration_summary.manual_review_required:
+        if iteration_summary.requires_manual_review:
             manual_review_required = True
             final_status = "awaiting_manual_review"
             break
