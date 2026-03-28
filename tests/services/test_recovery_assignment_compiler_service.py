@@ -22,6 +22,33 @@ from app.services.recovery_assignment_compiler_service import (
 )
 
 
+def _plan_batch(
+    *,
+    batch_id: str,
+    task_ids: list[int],
+    plan_version: int = 2,
+    batch_index: int | None = None,
+) -> dict:
+    if batch_index is None:
+        suffix = batch_id.rsplit("_", 1)[-1]
+        batch_index = int(suffix)
+    return {
+        "batch_id": batch_id,
+        "batch_internal_id": f"{plan_version}_{batch_index}",
+        "batch_index": batch_index,
+        "plan_version": plan_version,
+        "task_ids": list(task_ids),
+    }
+
+
+def _recovery_task(task) -> RecoveryTaskForAssignment:
+    return RecoveryTaskForAssignment(
+        task_id=task.id,
+        title=task.title,
+        description=task.description,
+    )
+
+
 def _build_assignment_input(
     *,
     project_id: int,
@@ -127,37 +154,14 @@ def test_compile_recovery_assignment_plan_inserts_immediate_blocking_cluster_as_
     plan = make_execution_plan(
         plan_version=2,
         batches=[
-            {
-                "batch_id": "plan_2_batch_1",
-                "batch_internal_id": "2_1",
-                "batch_index": 1,
-                "plan_version": 2,
-                "task_ids": [current_task.id],
-            },
-            {
-                "batch_id": "plan_2_batch_2",
-                "batch_internal_id": "2_2",
-                "batch_index": 2,
-                "plan_version": 2,
-                "task_ids": [next_task.id],
-            },
+            _plan_batch(batch_id="plan_2_batch_1", task_ids=[current_task.id]),
+            _plan_batch(batch_id="plan_2_batch_2", task_ids=[next_task.id]),
         ],
     )
 
     assignment_input = _build_assignment_input(
         project_id=project.id,
-        new_tasks=[
-            RecoveryTaskForAssignment(
-                task_id=new_task_1.id,
-                title=new_task_1.title,
-                description=new_task_1.description,
-            ),
-            RecoveryTaskForAssignment(
-                task_id=new_task_2.id,
-                title=new_task_2.title,
-                description=new_task_2.description,
-            ),
-        ],
+        new_tasks=[_recovery_task(new_task_1), _recovery_task(new_task_2)],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
         resolved_intent_type="assign",
         resolved_mutation_scope="assignment",
@@ -249,20 +253,11 @@ def test_compile_recovery_assignment_plan_attaches_future_blocking_cluster_insid
     plan = make_execution_plan(
         plan_version=2,
         batches=[
-            {
-                "batch_id": "plan_2_batch_1",
-                "batch_internal_id": "2_1",
-                "batch_index": 1,
-                "plan_version": 2,
-                "task_ids": [current_task.id],
-            },
-            {
-                "batch_id": "plan_2_batch_2",
-                "batch_internal_id": "2_2",
-                "batch_index": 2,
-                "plan_version": 2,
-                "task_ids": [consumer_before.id, consumer_target.id, consumer_after.id],
-            },
+            _plan_batch(batch_id="plan_2_batch_1", task_ids=[current_task.id]),
+            _plan_batch(
+                batch_id="plan_2_batch_2",
+                task_ids=[consumer_before.id, consumer_target.id, consumer_after.id],
+            ),
         ],
     )
 
@@ -285,18 +280,7 @@ def test_compile_recovery_assignment_plan_attaches_future_blocking_cluster_insid
 
     assignment_input = _build_assignment_input(
         project_id=project.id,
-        new_tasks=[
-            RecoveryTaskForAssignment(
-                task_id=new_task_1.id,
-                title=new_task_1.title,
-                description=new_task_1.description,
-            ),
-            RecoveryTaskForAssignment(
-                task_id=new_task_2.id,
-                title=new_task_2.title,
-                description=new_task_2.description,
-            ),
-        ],
+        new_tasks=[_recovery_task(new_task_1), _recovery_task(new_task_2)],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
         resolved_intent_type="assign",
         resolved_mutation_scope="assignment",
@@ -390,32 +374,14 @@ def test_compile_recovery_assignment_plan_appends_deferred_cluster_after_current
     plan = make_execution_plan(
         plan_version=2,
         batches=[
-            {
-                "batch_id": "plan_2_batch_1",
-                "batch_internal_id": "2_1",
-                "batch_index": 1,
-                "plan_version": 2,
-                "task_ids": [current_task.id],
-            },
-            {
-                "batch_id": "plan_2_batch_2",
-                "batch_internal_id": "2_2",
-                "batch_index": 2,
-                "plan_version": 2,
-                "task_ids": [future_task.id],
-            },
+            _plan_batch(batch_id="plan_2_batch_1", task_ids=[current_task.id]),
+            _plan_batch(batch_id="plan_2_batch_2", task_ids=[future_task.id]),
         ],
     )
 
     assignment_input = _build_assignment_input(
         project_id=project.id,
-        new_tasks=[
-            RecoveryTaskForAssignment(
-                task_id=new_task.id,
-                title=new_task.title,
-                description=new_task.description,
-            )
-        ],
+        new_tasks=[_recovery_task(new_task)],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
         resolved_intent_type="assign",
         resolved_mutation_scope="assignment",
@@ -493,32 +459,14 @@ def test_compile_recovery_assignment_plan_returns_requires_replan_without_patchi
     plan = make_execution_plan(
         plan_version=2,
         batches=[
-            {
-                "batch_id": "plan_2_batch_1",
-                "batch_internal_id": "2_1",
-                "batch_index": 1,
-                "plan_version": 2,
-                "task_ids": [current_task.id],
-            },
-            {
-                "batch_id": "plan_2_batch_2",
-                "batch_internal_id": "2_2",
-                "batch_index": 2,
-                "plan_version": 2,
-                "task_ids": [future_task.id],
-            },
+            _plan_batch(batch_id="plan_2_batch_1", task_ids=[current_task.id]),
+            _plan_batch(batch_id="plan_2_batch_2", task_ids=[future_task.id]),
         ],
     )
 
     assignment_input = _build_assignment_input(
         project_id=project.id,
-        new_tasks=[
-            RecoveryTaskForAssignment(
-                task_id=conflicting_new_task.id,
-                title=conflicting_new_task.title,
-                description=conflicting_new_task.description,
-            )
-        ],
+        new_tasks=[_recovery_task(conflicting_new_task)],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
         resolved_intent_type="assign",
         resolved_mutation_scope="assignment",
@@ -579,32 +527,14 @@ def test_compile_recovery_assignment_plan_rejects_strategy_that_conflicts_with_r
     plan = make_execution_plan(
         plan_version=2,
         batches=[
-            {
-                "batch_id": "plan_2_batch_1",
-                "batch_internal_id": "2_1",
-                "batch_index": 1,
-                "plan_version": 2,
-                "task_ids": [current_task.id],
-            },
-            {
-                "batch_id": "plan_2_batch_2",
-                "batch_internal_id": "2_2",
-                "batch_index": 2,
-                "plan_version": 2,
-                "task_ids": [future_task.id],
-            },
+            _plan_batch(batch_id="plan_2_batch_1", task_ids=[current_task.id]),
+            _plan_batch(batch_id="plan_2_batch_2", task_ids=[future_task.id]),
         ],
     )
 
     assignment_input = _build_assignment_input(
         project_id=project.id,
-        new_tasks=[
-            RecoveryTaskForAssignment(
-                task_id=new_task.id,
-                title=new_task.title,
-                description=new_task.description,
-            )
-        ],
+        new_tasks=[_recovery_task(new_task)],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
         resolved_intent_type="assign",
         resolved_mutation_scope="assignment",
@@ -664,20 +594,11 @@ def test_compile_recovery_assignment_plan_rejects_intrabatch_insertion_when_depe
     plan = make_execution_plan(
         plan_version=2,
         batches=[
-            {
-                "batch_id": "plan_2_batch_1",
-                "batch_internal_id": "2_1",
-                "batch_index": 1,
-                "plan_version": 2,
-                "task_ids": [current_task.id],
-            },
-            {
-                "batch_id": "plan_2_batch_2",
-                "batch_internal_id": "2_2",
-                "batch_index": 2,
-                "plan_version": 2,
-                "task_ids": [target_before.id, target_middle.id, target_after.id],
-            },
+            _plan_batch(batch_id="plan_2_batch_1", task_ids=[current_task.id]),
+            _plan_batch(
+                batch_id="plan_2_batch_2",
+                task_ids=[target_before.id, target_middle.id, target_after.id],
+            ),
         ],
     )
 
@@ -700,13 +621,7 @@ def test_compile_recovery_assignment_plan_rejects_intrabatch_insertion_when_depe
 
     assignment_input = _build_assignment_input(
         project_id=project.id,
-        new_tasks=[
-            RecoveryTaskForAssignment(
-                task_id=new_task.id,
-                title=new_task.title,
-                description=new_task.description,
-            )
-        ],
+        new_tasks=[_recovery_task(new_task)],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
         resolved_intent_type="assign",
         resolved_mutation_scope="assignment",

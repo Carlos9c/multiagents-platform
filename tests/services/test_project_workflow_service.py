@@ -55,6 +55,22 @@ def _post_batch_result(
         notes=notes,
     )
 
+
+def _empty_execution_plan(*, plan_version: int = 1):
+    return types.SimpleNamespace(
+        plan_version=plan_version,
+        execution_batches=[],
+        checkpoints=[],
+    )
+
+
+def _successful_execution_result(*, executor_type: str = EXECUTION_ENGINE):
+    return types.SimpleNamespace(
+        final_task_status="completed",
+        validation_decision="completed",
+        executor_type=executor_type,
+    )
+
 def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_incomplete(
     db_session,
     monkeypatch,
@@ -128,11 +144,7 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
     )
 
     def _fake_execute_task_sync(db, task_id):
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -338,10 +350,7 @@ def test_workflow_uses_project_enable_technical_refinement_flag(
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
-        lambda db, project_id: types.SimpleNamespace(
-            plan_version=1,
-            execution_batches=[],
-        ),
+        lambda db, project_id: _empty_execution_plan(plan_version=1),
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.persist_execution_plan",
@@ -418,10 +427,7 @@ def test_workflow_bypasses_refinement_when_project_flag_is_false(
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
-        lambda db, project_id: types.SimpleNamespace(
-            plan_version=1,
-            execution_batches=[],
-        ),
+        lambda db, project_id: _empty_execution_plan(plan_version=1),
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.persist_execution_plan",
@@ -574,11 +580,7 @@ def test_workflow_adopts_patched_execution_plan_even_when_assignment_does_not_re
 
     def _fake_execute_task_sync(db, task_id):
         executed_task_ids.append(task_id)
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -760,11 +762,7 @@ def test_workflow_invalidates_active_plan_when_iteration_requires_replan(
 
     def _fake_execute_task_sync(db, task_id):
         executed_task_ids.append(task_id)
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type="execution_engine",
-        )
+        return _successful_execution_result(executor_type="execution_engine")
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -943,11 +941,7 @@ def test_workflow_reuses_active_plan_after_assignment_patch(
 
     def _fake_execute_task_sync(db, task_id):
         executed_task_ids.append(task_id)
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type="execution_engine",
-        )
+        return _successful_execution_result(executor_type="execution_engine")
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -1114,11 +1108,7 @@ def test_workflow_does_not_reexecute_completed_batch_after_deferred_resequence(
 
     def _fake_execute_task_sync(db, task_id):
         executed_task_ids.append(task_id)
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -1300,11 +1290,7 @@ def test_workflow_keeps_completed_batches_unique_across_multiple_deferred_resequ
 
     def _fake_execute_task_sync(db, task_id):
         executed_task_ids.append(task_id)
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -1506,11 +1492,7 @@ def test_workflow_reuses_patched_active_plan_without_regenerating_execution_plan
 
     def _fake_execute_task_sync(db, task_id):
         executed_task_ids.append(task_id)
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -1682,11 +1664,7 @@ def test_workflow_resequence_does_not_regenerate_execution_plan_or_set_structura
 
     def _fake_execute_task_sync(db, task_id):
         executed_task_ids.append(task_id)
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -1883,11 +1861,7 @@ def test_workflow_blocked_batches_reflect_remaining_batches_from_latest_active_p
 
     def _fake_execute_task_sync(db, task_id):
         executed_task_ids.append(task_id)
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -2102,11 +2076,7 @@ def test_workflow_iteration_summary_tracks_plan_transition_and_blocked_batches(
     )
 
     def _fake_execute_task_sync(db, task_id):
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -2299,11 +2269,7 @@ def test_workflow_batch_trace_includes_resolved_action_decision_signals_and_patc
     )
 
     def _fake_execute_task_sync(db, task_id):
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -2538,11 +2504,7 @@ def test_workflow_batch_trace_iteration_summary_and_result_blocked_batches_are_c
     )
 
     def _fake_execute_task_sync(db, task_id):
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -2739,11 +2701,7 @@ def test_workflow_result_matches_last_iteration_when_manual_review_stops_executi
     )
 
     def _fake_execute_task_sync(db, task_id):
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -2955,11 +2913,7 @@ def test_workflow_artifacts_and_results_tell_a_consistent_execution_story(
     )
 
     def _fake_execute_task_sync(db, task_id):
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -3166,11 +3120,7 @@ def test_workflow_completed_batches_never_contains_duplicates(
     )
 
     def _fake_execute_task_sync(db, task_id):
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -3332,11 +3282,7 @@ def test_workflow_invalidates_active_plan_and_regenerates_when_iteration_require
 
     def _fake_execute_task_sync(db, task_id):
         executed_task_ids.append(task_id)
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
@@ -3468,11 +3414,7 @@ def test_workflow_blocked_batches_never_includes_completed_batches(
     )
 
     def _fake_execute_task_sync(db, task_id):
-        return types.SimpleNamespace(
-            final_task_status="completed",
-            validation_decision="completed",
-            executor_type=EXECUTION_ENGINE,
-        )
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",

@@ -77,7 +77,6 @@ def test_post_batch_continues_on_successful_intermediate_checkpoint(
         stage_goals_satisfied=False,
         recommended_next_action="continue_current_plan",
         recommended_next_action_reason="The remaining backlog already represents the correct next work.",
-        completed_task_ids=[batch_1_task.id],
         notes=["Continue with the next batch."],
     )
 
@@ -171,7 +170,6 @@ def test_post_batch_requests_resequencing_when_evaluator_recommends_resequence_r
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=False,
         single_task_tail_risk=True,
-        completed_task_ids=[completed_task.id],
         notes=["Resequence the remaining work."],
     )
 
@@ -264,7 +262,6 @@ def test_post_batch_requests_replanning_when_evaluator_recommends_replan_remaini
         remaining_plan_still_valid=False,
         new_recovery_tasks_blocking=True,
         single_task_tail_risk=False,
-        completed_task_ids=[completed_task.id],
         notes=["Replan the remaining work from the high-level stage layer."],
     )
 
@@ -456,9 +453,7 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
             recovery_reason="Recovered work still blocks progress.",
             recommended_next_action="manual_review",
             recommended_next_action_reason="Automatic progression is not trustworthy enough after this recovery step.",
-            completed_task_ids=[],
-            failed_task_ids=[failed_task.id],
-            notes=["Recovery created follow-up tasks."],
+                    notes=["Recovery created follow-up tasks."],
         ),
     )
     monkeypatch.setattr(
@@ -542,7 +537,6 @@ def test_post_batch_uses_real_checkpoint_artifact_window_and_ignores_older_task_
         decision_signals=["stage_goals_satisfied"],
         plan_change_scope="none",
         remaining_plan_still_valid=True,
-        completed_task_ids=[task.id],
         key_risks=[],
         notes=["Close the stage."],
     )
@@ -622,7 +616,6 @@ def test_post_batch_persists_resolved_action_and_decision_signals(
         recommended_next_action="continue_current_plan",
         recommended_next_action_reason="The remaining backlog already represents the correct next work.",
         decision_signals=["remaining_plan_still_valid", "non_blocking_followup_work"],
-        completed_task_ids=[task.id],
         notes=["Continue with the next batch."],
     )
 
@@ -783,7 +776,6 @@ def test_post_batch_persists_workflow_iteration_trace_artifact(
         recommended_next_action="continue_current_plan",
         recommended_next_action_reason="The remaining backlog already represents the correct next work.",
         decision_signals=["remaining_plan_still_valid", "non_blocking_followup_work"],
-        completed_task_ids=[task.id],
         notes=["Continue with the next batch."],
     )
 
@@ -949,7 +941,7 @@ def test_post_batch_trace_persists_recovery_created_task_ids_and_resequence_acti
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=True,
         followup_atomic_tasks_required=True,
-        failed_task_ids=[failed_task.id],
+        followup_atomic_tasks_reason="A new follow-up task must run before the remaining batch can continue.",
         notes=["Resequence the remaining plan to execute recovery work first."],
     )
 
@@ -1110,7 +1102,7 @@ def test_post_batch_creates_patch_batch_for_blocking_recovery_work(
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=True,
         followup_atomic_tasks_required=True,
-        failed_task_ids=[failed_task.id],
+        followup_atomic_tasks_reason="A new follow-up task must run before the remaining batch can continue.",
         notes=["Insert a patch batch before continuing."],
     )
 
@@ -1754,8 +1746,14 @@ def test_post_batch_does_not_materialize_patch_for_deferred_resequence(
         project_stage_closed=False,
         stage_goals_satisfied=False,
         followup_atomic_tasks_required=True,
+        followup_atomic_tasks_reason=(
+            "Recovery introduced follow-up atomic work that should be resequenced "
+            "without rebuilding the remaining plan."
+        ),
         recovery_strategy="insert_followup_atomic_tasks",
-        recovery_reason="Recovery introduced local follow-up work without invalidating the overall stage plan.",
+        recovery_reason=(
+            "Recovery introduced local follow-up work without invalidating the overall stage plan."
+        ),
         recommended_next_action="resequence_remaining_batches",
         recommended_next_action_reason="The remaining work should be regrouped.",
         decision_signals=[
@@ -1767,7 +1765,6 @@ def test_post_batch_does_not_materialize_patch_for_deferred_resequence(
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=False,
         single_task_tail_risk=True,
-        completed_task_ids=[completed_task.id],
         notes=["Resequence the remaining work."],
     )
 
@@ -1985,8 +1982,11 @@ def test_post_batch_blocking_recovery_forces_stop_or_resequence(
             "followup_tasks_created",
             "new_recovery_tasks_blocking",
         ],
+        plan_change_scope="local_resequencing",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=True,
+        followup_atomic_tasks_required=True,
+        followup_atomic_tasks_reason="A blocking follow-up task must be inserted before the next remaining batch.",
         notes=["Blocking recovery must stop normal continuation."],
     )
 
@@ -2098,8 +2098,8 @@ def test_post_batch_invalid_plan_without_recovery_forces_replan(
         replan_reason=(
             "No recovery tasks were created, but the remaining plan structure is invalid and must be regenerated."
         ),
+        plan_change_scope="high_level_replan",
         remaining_plan_still_valid=False,
-        completed_task_ids=[task.id],
         notes=["Structural invalidation without recovery."],
     )
 
@@ -2123,7 +2123,7 @@ def test_post_batch_invalid_plan_without_recovery_forces_replan(
     assert result.resolved_intent_type == "replan"
     assert result.can_continue_after_application is False
 
-def test_make_stage_evaluation_output_normalizes_high_level_replan_signals(
+def test_make_stage_evaluation_output_requires_canonical_high_level_replan_signals(
     make_stage_evaluation_output,
 ):
     output = make_stage_evaluation_output(
@@ -2133,7 +2133,8 @@ def test_make_stage_evaluation_output_normalizes_high_level_replan_signals(
         replan_required=True,
         replan_level="high_level",
         replan_reason="High-level replan is required.",
-        remaining_plan_still_valid=True,  # se corrige internamente
+        plan_change_scope="high_level_replan",
+        remaining_plan_still_valid=False,
     )
 
     assert output.replan.required is True
@@ -3652,8 +3653,11 @@ def test_post_batch_finalization_guard_blocked_requires_only_manual_review(
         recommended_next_action="resequence_remaining_batches",
         recommended_next_action_reason="Finalization must be reopened again.",
         decision_signals=["remaining_plan_still_valid", "followup_tasks_created"],
+        plan_change_scope="local_resequencing",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=True,
+        followup_atomic_tasks_required=True,
+        followup_atomic_tasks_reason="Finalization requires one more local follow-up pass before closure.",
     )
 
     monkeypatch.setattr(
@@ -3740,8 +3744,11 @@ def test_post_batch_finalization_reopened_never_continues_execution(
         recommended_next_action="resequence_remaining_batches",
         recommended_next_action_reason="Finalization needs one more pass.",
         decision_signals=["remaining_plan_still_valid", "followup_tasks_created"],
+        plan_change_scope="local_resequencing",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=True,
+        followup_atomic_tasks_required=True,
+        followup_atomic_tasks_reason="Finalization requires one more local follow-up pass before closure.",
     )
 
     monkeypatch.setattr(
@@ -3826,8 +3833,11 @@ def test_post_batch_finalization_reopened_has_consistent_flags(
         recommended_next_action="resequence_remaining_batches",
         recommended_next_action_reason="One more finalization pass is needed.",
         decision_signals=["remaining_plan_still_valid", "followup_tasks_created"],
+        plan_change_scope="local_resequencing",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=True,
+        followup_atomic_tasks_required=True,
+        followup_atomic_tasks_reason="Finalization requires one more local follow-up pass before closure.",
     )
 
     monkeypatch.setattr(

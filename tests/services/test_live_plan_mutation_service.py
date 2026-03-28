@@ -53,6 +53,28 @@ def _build_task_run_summary(
     )
 
 
+def _plan_batch(
+    *,
+    batch_id: str,
+    task_ids: list[int],
+    plan_version: int,
+    batch_index: int,
+    checkpoint_id: str | None = None,
+    evaluation_focus: list[str] | None = None,
+    name: str | None = None,
+) -> dict:
+    return {
+        "batch_id": batch_id,
+        "batch_internal_id": f"{plan_version}_{batch_index}",
+        "batch_index": batch_index,
+        "plan_version": plan_version,
+        "name": name or f"Plan {plan_version} · Batch {batch_index}",
+        "task_ids": list(task_ids),
+        "checkpoint_id": checkpoint_id or f"checkpoint_{batch_id}",
+        "evaluation_focus": list(evaluation_focus or ["functional_coverage"]),
+    }
+
+
 class DummyMutationResult:
     def __init__(self, **kwargs):
         self.mutation_kind = kwargs.get("mutation_kind", "assignment")
@@ -77,20 +99,19 @@ def test_mutate_live_plan_builds_assignment_input_with_canonical_intent_fields(
     plan = make_execution_plan(
         plan_version=3,
         batches=[
-            {
-                "batch_id": "plan_3_batch_1",
-                "batch_internal_id": "3_1",
-                "batch_index": 1,
-                "plan_version": 3,
-                "task_ids": [current_task.id],
-            },
-            {
-                "batch_id": "plan_3_batch_2",
-                "batch_internal_id": "3_2",
-                "batch_index": 2,
-                "plan_version": 3,
-                "task_ids": [next_task.id],
-            },
+            _plan_batch(
+                batch_id="plan_3_batch_1",
+                task_ids=[current_task.id],
+                plan_version=3,
+                batch_index=1,
+            ),
+            _plan_batch(
+                batch_id="plan_3_batch_2",
+                task_ids=[next_task.id],
+                plan_version=3,
+                batch_index=2,
+                evaluation_focus=["functional_coverage", "stage_closure"],
+            ),
         ],
     )
     batch = plan.execution_batches[0]
@@ -173,9 +194,7 @@ def test_mutate_live_plan_builds_assignment_input_with_canonical_intent_fields(
         evaluation_decision=type(
             "EvalDecision",
             (),
-            {
-                "new_recovery_tasks_blocking": False,
-            },
+            {"new_recovery_tasks_blocking": False},
         )(),
         recovery_context=RecoveryContext(),
         created_recovery_task_ids=[recovery_task.id],
@@ -183,7 +202,7 @@ def test_mutate_live_plan_builds_assignment_input_with_canonical_intent_fields(
         successful_task_ids=[current_task.id],
         problematic_run_ids=[],
         task_run_summaries=[
-            _build_task_run_summary(task_id=current_task.id, run_id=501)
+            _build_task_run_summary(task_id=current_task.id, run_id=501),
         ],
         build_recovery_assignment_input_fn=fake_build_recovery_assignment_input_fn,
         persist_recovery_assignment_payload_fn=fake_persist_recovery_assignment_payload_fn,
@@ -246,13 +265,12 @@ def test_mutate_live_plan_returns_escalated_to_replan_when_compiler_requires_rep
     plan = make_execution_plan(
         plan_version=3,
         batches=[
-            {
-                "batch_id": "plan_3_batch_1",
-                "batch_internal_id": "3_1",
-                "batch_index": 1,
-                "plan_version": 3,
-                "task_ids": [current_task.id],
-            }
+            _plan_batch(
+                batch_id="plan_3_batch_1",
+                task_ids=[current_task.id],
+                plan_version=3,
+                batch_index=1,
+            )
         ],
     )
     batch = plan.execution_batches[0]
@@ -304,14 +322,18 @@ def test_mutate_live_plan_returns_escalated_to_replan_when_compiler_requires_rep
         plan=plan,
         batch=batch,
         resolved_intent=resolved_intent,
-        evaluation_decision=type("EvalDecision", (), {"new_recovery_tasks_blocking": False})(),
+        evaluation_decision=type(
+            "EvalDecision",
+            (),
+            {"new_recovery_tasks_blocking": False},
+        )(),
         recovery_context=RecoveryContext(),
         created_recovery_task_ids=[recovery_task.id],
         executed_task_ids=[current_task.id],
         successful_task_ids=[current_task.id],
         problematic_run_ids=[],
         task_run_summaries=[
-            _build_task_run_summary(task_id=current_task.id, run_id=501)
+            _build_task_run_summary(task_id=current_task.id, run_id=501),
         ],
         build_recovery_assignment_input_fn=lambda **kwargs: DummyAssignmentInput(),
         persist_recovery_assignment_payload_fn=lambda **kwargs: None,
@@ -339,20 +361,19 @@ def test_mutate_live_plan_resequence_inserts_patch_batch_when_blocking_recovery_
     plan = make_execution_plan(
         plan_version=4,
         batches=[
-            {
-                "batch_id": "plan_4_batch_1",
-                "batch_internal_id": "4_1",
-                "batch_index": 1,
-                "plan_version": 4,
-                "task_ids": [current_task.id],
-            },
-            {
-                "batch_id": "plan_4_batch_2",
-                "batch_internal_id": "4_2",
-                "batch_index": 2,
-                "plan_version": 4,
-                "task_ids": [next_task.id],
-            },
+            _plan_batch(
+                batch_id="plan_4_batch_1",
+                task_ids=[current_task.id],
+                plan_version=4,
+                batch_index=1,
+            ),
+            _plan_batch(
+                batch_id="plan_4_batch_2",
+                task_ids=[next_task.id],
+                plan_version=4,
+                batch_index=2,
+                evaluation_focus=["functional_coverage", "stage_closure"],
+            ),
         ],
     )
     batch = plan.execution_batches[0]
@@ -384,14 +405,18 @@ def test_mutate_live_plan_resequence_inserts_patch_batch_when_blocking_recovery_
         plan=plan,
         batch=batch,
         resolved_intent=resolved_intent,
-        evaluation_decision=type("EvalDecision", (), {"new_recovery_tasks_blocking": True})(),
+        evaluation_decision=type(
+            "EvalDecision",
+            (),
+            {"new_recovery_tasks_blocking": True},
+        )(),
         recovery_context=RecoveryContext(),
         created_recovery_task_ids=[recovery_task.id],
         executed_task_ids=[current_task.id],
         successful_task_ids=[current_task.id],
         problematic_run_ids=[],
         task_run_summaries=[
-            _build_task_run_summary(task_id=current_task.id, run_id=601)
+            _build_task_run_summary(task_id=current_task.id, run_id=601),
         ],
         build_recovery_assignment_input_fn=lambda **kwargs: None,
         persist_recovery_assignment_payload_fn=lambda **kwargs: None,
@@ -423,13 +448,12 @@ def test_mutate_live_plan_resequence_returns_deferred_when_no_immediate_patch_ap
     plan = make_execution_plan(
         plan_version=4,
         batches=[
-            {
-                "batch_id": "plan_4_batch_1",
-                "batch_internal_id": "4_1",
-                "batch_index": 1,
-                "plan_version": 4,
-                "task_ids": [current_task.id],
-            }
+            _plan_batch(
+                batch_id="plan_4_batch_1",
+                task_ids=[current_task.id],
+                plan_version=4,
+                batch_index=1,
+            )
         ],
     )
     batch = plan.execution_batches[0]
@@ -451,14 +475,18 @@ def test_mutate_live_plan_resequence_returns_deferred_when_no_immediate_patch_ap
         plan=plan,
         batch=batch,
         resolved_intent=resolved_intent,
-        evaluation_decision=type("EvalDecision", (), {"new_recovery_tasks_blocking": False})(),
+        evaluation_decision=type(
+            "EvalDecision",
+            (),
+            {"new_recovery_tasks_blocking": False},
+        )(),
         recovery_context=RecoveryContext(),
         created_recovery_task_ids=[recovery_task.id],
         executed_task_ids=[current_task.id],
         successful_task_ids=[current_task.id],
         problematic_run_ids=[],
         task_run_summaries=[
-            _build_task_run_summary(task_id=current_task.id, run_id=601)
+            _build_task_run_summary(task_id=current_task.id, run_id=601),
         ],
         build_recovery_assignment_input_fn=lambda **kwargs: None,
         persist_recovery_assignment_payload_fn=lambda **kwargs: None,
@@ -469,6 +497,7 @@ def test_mutate_live_plan_resequence_returns_deferred_when_no_immediate_patch_ap
     assert result.patched_execution_plan is None
     assert result.metadata["patched_task_ids"] == []
     assert result.metadata["anchor_batch_id"] == batch.batch_id
+
 
 def test_mutate_live_plan_returns_none_for_non_mutating_intents(
     db_session,
@@ -482,13 +511,12 @@ def test_mutate_live_plan_returns_none_for_non_mutating_intents(
     plan = make_execution_plan(
         plan_version=5,
         batches=[
-            {
-                "batch_id": "plan_5_batch_1",
-                "batch_internal_id": "5_1",
-                "batch_index": 1,
-                "plan_version": 5,
-                "task_ids": [current_task.id],
-            }
+            _plan_batch(
+                batch_id="plan_5_batch_1",
+                task_ids=[current_task.id],
+                plan_version=5,
+                batch_index=1,
+            )
         ],
     )
     batch = plan.execution_batches[0]
@@ -533,14 +561,18 @@ def test_mutate_live_plan_returns_none_for_non_mutating_intents(
             plan=plan,
             batch=batch,
             resolved_intent=resolved_intent,
-            evaluation_decision=type("EvalDecision", (), {"new_recovery_tasks_blocking": False})(),
+            evaluation_decision=type(
+                "EvalDecision",
+                (),
+                {"new_recovery_tasks_blocking": False},
+            )(),
             recovery_context=RecoveryContext(),
             created_recovery_task_ids=[],
             executed_task_ids=[current_task.id],
             successful_task_ids=[current_task.id],
             problematic_run_ids=[],
             task_run_summaries=[
-                _build_task_run_summary(task_id=current_task.id, run_id=701)
+                _build_task_run_summary(task_id=current_task.id, run_id=701),
             ],
             build_recovery_assignment_input_fn=lambda **kwargs: None,
             persist_recovery_assignment_payload_fn=lambda **kwargs: None,
