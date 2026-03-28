@@ -1,7 +1,7 @@
 from pydantic import ValidationError
 
 from app.execution_engine.capabilities import render_executor_capabilities_for_prompt
-from app.models.task import normalize_executor_type
+from app.models.task import VALID_EXECUTOR_TYPES
 from app.schemas.atomic_task_generator import AtomicTaskGenerationOutput
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
@@ -83,11 +83,25 @@ Self-check before finalizing each atomic task:
 """.strip()
 
 
+def _validate_available_executors(available_executors: list[str]) -> list[str]:
+    invalid_executors = [
+        executor
+        for executor in available_executors
+        if executor not in VALID_EXECUTOR_TYPES
+    ]
+    if invalid_executors:
+        raise ValueError(
+            "Invalid available_executors values: "
+            f"{invalid_executors}. Allowed values: {sorted(VALID_EXECUTOR_TYPES)}"
+        )
+    return list(available_executors)
+
+
 def _build_executor_capabilities_text(available_executors: list[str]) -> str:
+    executors = _validate_available_executors(available_executors)
     blocks: list[str] = []
-    for executor in available_executors:
-        normalized_executor = normalize_executor_type(executor) or executor
-        blocks.append(render_executor_capabilities_for_prompt(normalized_executor))
+    for executor in executors:
+        blocks.append(render_executor_capabilities_for_prompt(executor))
     return "\n\n".join(blocks)
 
 
@@ -109,12 +123,9 @@ def build_atomic_user_prompt(
     parent_task_out_of_scope: str,
     available_executors: list[str],
 ) -> str:
-    normalized_executors = [
-        normalize_executor_type(executor) or executor
-        for executor in available_executors
-    ]
-    executors_text = "\n".join(f"- {executor}" for executor in normalized_executors)
-    capability_text = _build_executor_capabilities_text(normalized_executors)
+    executors = _validate_available_executors(available_executors)
+    executors_text = "\n".join(f"- {executor}" for executor in executors)
+    capability_text = _build_executor_capabilities_text(executors)
 
     return f"""
 Project name: {project_name}
@@ -185,12 +196,9 @@ def build_atomic_retry_prompt(
     parent_task_title: str,
     available_executors: list[str],
 ) -> str:
-    normalized_executors = [
-        normalize_executor_type(executor) or executor
-        for executor in available_executors
-    ]
-    executors_text = ", ".join(normalized_executors)
-    capability_text = _build_executor_capabilities_text(normalized_executors)
+    executors = _validate_available_executors(available_executors)
+    executors_text = ", ".join(executors)
+    capability_text = _build_executor_capabilities_text(executors)
 
     return f"""
 Project name: {project_name}

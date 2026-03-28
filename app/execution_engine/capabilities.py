@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from app.models.task import EXECUTION_ENGINE, normalize_executor_type
+from app.models.task import EXECUTION_ENGINE
 
 
 class ToolCapability(BaseModel):
@@ -178,11 +178,10 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
 
 
 def get_executor_capabilities(executor_type: str | None) -> ExecutorCapabilities:
-    normalized_executor_type = normalize_executor_type(executor_type)
-    if normalized_executor_type == EXECUTION_ENGINE:
+    if executor_type == EXECUTION_ENGINE:
         return get_execution_engine_capabilities()
     return ExecutorCapabilities(
-        executor_type=normalized_executor_type or "unknown",
+        executor_type=executor_type or "unknown",
         supports_artifact_creation=False,
         supports_artifact_modification=False,
         supports_bootstrap_from_empty_workspace=False,

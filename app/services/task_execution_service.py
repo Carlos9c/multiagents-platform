@@ -34,7 +34,6 @@ from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
     PENDING_ENGINE_ROUTING_EXECUTOR,
     Task,
-    normalize_executor_type,
 )
 from app.schemas.code_execution import (
     CODE_EXECUTION_STATUS_AWAITING_VALIDATION,
@@ -143,13 +142,13 @@ def _resolve_executor_type_for_task(task: Task) -> str:
     if task.planning_level != PLANNING_LEVEL_ATOMIC:
         raise TaskExecutionServiceError("Only atomic tasks can be executed.")
 
-    normalized_executor_type = normalize_executor_type(task.executor_type)
+    executor_type = task.executor_type
 
-    if not normalized_executor_type or normalized_executor_type == PENDING_ENGINE_ROUTING_EXECUTOR:
+    if not executor_type or executor_type == PENDING_ENGINE_ROUTING_EXECUTOR:
         return EXECUTION_ENGINE
 
-    if normalized_executor_type in SUPPORTED_EXECUTORS:
-        return normalized_executor_type
+    if executor_type in SUPPORTED_EXECUTORS:
+        return executor_type
 
     raise TaskExecutionServiceError(
         f"Unsupported executor_type '{task.executor_type}'. "

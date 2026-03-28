@@ -28,11 +28,6 @@ TERMINAL_TASK_STATUSES = {
 PENDING_ENGINE_ROUTING_EXECUTOR = "pending_engine_routing"
 EXECUTION_ENGINE = "execution_engine"
 
-# Alias legacy temporal para transición de código/tests aún no migrados.
-LEGACY_EXECUTOR_TYPE_ALIASES = {
-    "code_executor": EXECUTION_ENGINE,
-}
-
 VALID_PLANNING_LEVELS = {
     PLANNING_LEVEL_HIGH_LEVEL,
     PLANNING_LEVEL_REFINED,
@@ -59,15 +54,8 @@ EXECUTABLE_TASK_STATUSES = {
 }
 
 
-def normalize_executor_type(executor_type: str | None) -> str | None:
-    if executor_type is None:
-        return None
-    return LEGACY_EXECUTOR_TYPE_ALIASES.get(executor_type, executor_type)
-
-
 def is_valid_executor_type(executor_type: str | None) -> bool:
-    normalized = normalize_executor_type(executor_type)
-    return normalized in VALID_EXECUTOR_TYPES
+    return executor_type in VALID_EXECUTOR_TYPES
 
 
 class Task(Base):
