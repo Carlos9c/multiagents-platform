@@ -17,6 +17,44 @@ from app.services.project_workflow_service import (
 )
 
 
+def _post_batch_result(
+    *,
+    status: str,
+    resolved_intent_type: str,
+    resolved_mutation_scope: str = "none",
+    remaining_plan_still_valid: bool = True,
+    has_new_recovery_tasks: bool = False,
+    requires_plan_mutation: bool = False,
+    requires_all_new_tasks_assigned: bool = False,
+    can_continue_after_application: bool = False,
+    should_close_stage: bool = False,
+    requires_manual_review: bool = False,
+    reopened_finalization: bool = False,
+    patched_execution_plan=None,
+    decision_signals: list[str] | None = None,
+    finalization_iteration_count: int = 0,
+    finalization_guard_triggered: bool = False,
+    notes: str = "post batch result",
+):
+    return types.SimpleNamespace(
+        status=status,
+        resolved_intent_type=resolved_intent_type,
+        resolved_mutation_scope=resolved_mutation_scope,
+        remaining_plan_still_valid=remaining_plan_still_valid,
+        has_new_recovery_tasks=has_new_recovery_tasks,
+        requires_plan_mutation=requires_plan_mutation,
+        requires_all_new_tasks_assigned=requires_all_new_tasks_assigned,
+        can_continue_after_application=can_continue_after_application,
+        should_close_stage=should_close_stage,
+        requires_manual_review=requires_manual_review,
+        reopened_finalization=reopened_finalization,
+        patched_execution_plan=patched_execution_plan,
+        decision_signals=decision_signals or [],
+        finalization_iteration_count=finalization_iteration_count,
+        finalization_guard_triggered=finalization_guard_triggered,
+        notes=notes,
+    )
+
 def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_incomplete(
     db_session,
     monkeypatch,
@@ -111,25 +149,43 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
+                patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
-        return types.SimpleNamespace(
+        return _post_batch_result(
             status="project_stage_closed",
-            continue_execution=False,
+            resolved_intent_type="close",
+            resolved_mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=False,
+            should_close_stage=True,
             requires_manual_review=False,
-            finalization_guard_triggered=False,
-            requires_replanning=False,
-            requires_resequencing=False,
+            reopened_finalization=False,
+            patched_execution_plan=None,
+            decision_signals=[],
             finalization_iteration_count=current_finalization_iteration_count,
-        )
+            finalization_guard_triggered=False,
+            notes="post batch result",
+            )
 
     monkeypatch.setattr(
         "app.services.project_workflow_service._process_batch_after_terminal_tasks",
@@ -539,39 +595,63 @@ def test_workflow_adopts_patched_execution_plan_even_when_assignment_does_not_re
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="assign",
+                resolved_mutation_scope="assignment",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=True,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=True,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=patched_plan,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
         if batch_id == "batch_1_patch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
-        return types.SimpleNamespace(
+        return _post_batch_result(
             status="project_stage_closed",
-            continue_execution=False,
+            resolved_intent_type="close",
+            resolved_mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=False,
+            should_close_stage=True,
             requires_manual_review=False,
-            finalization_guard_triggered=False,
-            requires_replanning=False,
-            requires_resequencing=False,
+            reopened_finalization=False,
             patched_execution_plan=None,
+            decision_signals=[],
             finalization_iteration_count=current_finalization_iteration_count,
-        )
+            finalization_guard_triggered=False,
+            notes="post batch result",
+            )
 
     monkeypatch.setattr(
         "app.services.project_workflow_service._process_batch_after_terminal_tasks",
@@ -701,27 +781,43 @@ def test_workflow_invalidates_active_plan_when_iteration_requires_replan(
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="replan",
+                resolved_mutation_scope="replan",
+                remaining_plan_still_valid=False,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=True,
-                requires_resequencing=False,
+                reopened_finalization=True,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
-        return types.SimpleNamespace(
+        return _post_batch_result(
             status="project_stage_closed",
-            continue_execution=False,
+            resolved_intent_type="close",
+            resolved_mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=False,
+            should_close_stage=True,
             requires_manual_review=False,
-            finalization_guard_triggered=False,
-            requires_replanning=False,
-            requires_resequencing=False,
+            reopened_finalization=False,
             patched_execution_plan=None,
+            decision_signals=[],
             finalization_iteration_count=current_finalization_iteration_count,
-        )
+            finalization_guard_triggered=False,
+            notes="post batch result",
+            )
 
     monkeypatch.setattr(
         "app.services.project_workflow_service._process_batch_after_terminal_tasks",
@@ -868,39 +964,63 @@ def test_workflow_reuses_active_plan_after_assignment_patch(
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="assign",
+                resolved_mutation_scope="assignment",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=True,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=True,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=patched_plan,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
         if batch_id == "batch_1_patch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
-        return types.SimpleNamespace(
+        return _post_batch_result(
             status="project_stage_closed",
-            continue_execution=False,
+            resolved_intent_type="close",
+            resolved_mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=False,
+            should_close_stage=True,
             requires_manual_review=False,
-            finalization_guard_triggered=False,
-            requires_replanning=False,
-            requires_resequencing=False,
+            reopened_finalization=False,
             patched_execution_plan=None,
+            decision_signals=[],
             finalization_iteration_count=current_finalization_iteration_count,
-        )
+            finalization_guard_triggered=False,
+            notes="post batch result",
+            )
 
     monkeypatch.setattr(
         "app.services.project_workflow_service._process_batch_after_terminal_tasks",
@@ -1019,39 +1139,63 @@ def test_workflow_does_not_reexecute_completed_batch_after_deferred_resequence(
         post_batch_calls[batch_id] += 1
 
         if batch_id == "batch_1" and post_batch_calls[batch_id] == 1:
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=False,
+                resolved_intent_type="resequence",
+                resolved_mutation_scope="resequence",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=True,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
         if batch_id == "batch_2":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="project_stage_closed",
-                continue_execution=False,
+                resolved_intent_type="close",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=True,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
-        return types.SimpleNamespace(
+        return _post_batch_result(
             status="completed_with_evaluation",
-            continue_execution=True,
+            resolved_intent_type="continue",
+            resolved_mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=True,
+            should_close_stage=False,
             requires_manual_review=False,
-            finalization_guard_triggered=False,
-            requires_replanning=False,
-            requires_resequencing=False,
+            reopened_finalization=False,
             patched_execution_plan=None,
+            decision_signals=[],
             finalization_iteration_count=current_finalization_iteration_count,
-        )
+            finalization_guard_triggered=False,
+            notes="post batch result",
+            )
 
     monkeypatch.setattr(
         "app.services.project_workflow_service._process_batch_after_terminal_tasks",
@@ -1181,39 +1325,63 @@ def test_workflow_keeps_completed_batches_unique_across_multiple_deferred_resequ
         post_batch_calls[batch_id] += 1
 
         if batch_id in {"batch_1", "batch_2"} and post_batch_calls[batch_id] == 1:
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=False,
+                resolved_intent_type="resequence",
+                resolved_mutation_scope="resequence",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=True,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
         if batch_id == "batch_3":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="project_stage_closed",
-                continue_execution=False,
+                resolved_intent_type="close",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=True,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
-        return types.SimpleNamespace(
+        return _post_batch_result(
             status="completed_with_evaluation",
-            continue_execution=True,
+            resolved_intent_type="continue",
+            resolved_mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=True,
+            should_close_stage=False,
             requires_manual_review=False,
-            finalization_guard_triggered=False,
-            requires_replanning=False,
-            requires_resequencing=False,
+            reopened_finalization=False,
             patched_execution_plan=None,
+            decision_signals=[],
             finalization_iteration_count=current_finalization_iteration_count,
-        )
+            finalization_guard_triggered=False,
+            notes="post batch result",
+            )
 
     monkeypatch.setattr(
         "app.services.project_workflow_service._process_batch_after_terminal_tasks",
@@ -1363,39 +1531,63 @@ def test_workflow_reuses_patched_active_plan_without_regenerating_execution_plan
         post_batch_calls[batch_id] += 1
 
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="assign",
+                resolved_mutation_scope="assignment",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=True,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=True,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=patched_plan,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
         if batch_id == "batch_1_patch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
-        return types.SimpleNamespace(
+        return _post_batch_result(
             status="project_stage_closed",
-            continue_execution=False,
+            resolved_intent_type="close",
+            resolved_mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=False,
+            should_close_stage=True,
             requires_manual_review=False,
-            finalization_guard_triggered=False,
-            requires_replanning=False,
-            requires_resequencing=False,
+            reopened_finalization=False,
             patched_execution_plan=None,
+            decision_signals=[],
             finalization_iteration_count=current_finalization_iteration_count,
-        )
+            finalization_guard_triggered=False,
+            notes="post batch result",
+            )
 
     monkeypatch.setattr(
         "app.services.project_workflow_service._process_batch_after_terminal_tasks",
@@ -1515,27 +1707,43 @@ def test_workflow_resequence_does_not_regenerate_execution_plan_or_set_structura
         post_batch_calls[batch_id] += 1
 
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="resequence",
+                resolved_mutation_scope="resequence",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=True,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
-        return types.SimpleNamespace(
+        return _post_batch_result(
             status="project_stage_closed",
-            continue_execution=False,
+            resolved_intent_type="close",
+            resolved_mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=False,
+            should_close_stage=True,
             requires_manual_review=False,
-            finalization_guard_triggered=False,
-            requires_replanning=False,
-            requires_resequencing=False,
+            reopened_finalization=False,
             patched_execution_plan=None,
+            decision_signals=[],
             finalization_iteration_count=current_finalization_iteration_count,
-        )
+            finalization_guard_triggered=False,
+            notes="post batch result",
+            )
 
     monkeypatch.setattr(
         "app.services.project_workflow_service._process_batch_after_terminal_tasks",
@@ -1700,51 +1908,83 @@ def test_workflow_blocked_batches_reflect_remaining_batches_from_latest_active_p
         post_batch_calls[batch_id] += 1
 
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="assign",
+                resolved_mutation_scope="assignment",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=True,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=True,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=patched_plan,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
         if batch_id == "batch_1_patch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
         if batch_id == "batch_2":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=True,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
-        return types.SimpleNamespace(
+        return _post_batch_result(
             status="completed_with_evaluation",
-            continue_execution=True,
+            resolved_intent_type="continue",
+            resolved_mutation_scope="none",
+            remaining_plan_still_valid=True,
+            has_new_recovery_tasks=False,
+            requires_plan_mutation=False,
+            requires_all_new_tasks_assigned=False,
+            can_continue_after_application=True,
+            should_close_stage=False,
             requires_manual_review=False,
-            finalization_guard_triggered=False,
-            requires_replanning=False,
-            requires_resequencing=False,
+            reopened_finalization=False,
             patched_execution_plan=None,
+            decision_signals=[],
             finalization_iteration_count=current_finalization_iteration_count,
-        )
+            finalization_guard_triggered=False,
+            notes="post batch result",
+            )
 
     monkeypatch.setattr(
         "app.services.project_workflow_service._process_batch_after_terminal_tasks",
@@ -1883,27 +2123,43 @@ def test_workflow_iteration_summary_tracks_plan_transition_and_blocked_batches(
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="assign",
+                resolved_mutation_scope="assignment",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=True,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=True,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=patched_plan,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
         if batch_id == "batch_1_patch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=True,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="post batch result",
             )
 
         raise AssertionError(f"Unexpected batch_id {batch_id}")
@@ -1928,7 +2184,7 @@ def test_workflow_iteration_summary_tracks_plan_transition_and_blocked_batches(
     assert iteration.starting_plan_version == 50
     assert iteration.ending_plan_version == 50
     assert iteration.used_patched_plan is True # se aplicó un patched plan aunque la plan_version no cambie
-    assert iteration.replan_triggered is False
+    assert (iteration.resolved_intent_type == "replan") is False
     assert iteration.batch_ids_processed == ["batch_1", "batch_1_patch_1"]
     assert iteration.blocked_batch_ids_after_iteration == ["batch_2"]
 
@@ -2064,35 +2320,45 @@ def test_workflow_batch_trace_includes_resolved_action_decision_signals_and_patc
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="assign",
+                resolved_mutation_scope="assignment",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=True,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=True,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                requires_replanning=False,
-                requires_resequencing=False,
-                finalization_guard_triggered=False,
-                finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="continue_current_plan",
-                decision_signals_used=[
+                reopened_finalization=False,
+                patched_execution_plan=patched_plan,
+                decision_signals=[
                     "remaining_plan_still_valid",
                     "followup_tasks_created",
                 ],
-                patched_execution_plan=patched_plan,
+                finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
                 notes="Recovery work was assigned into the live plan.",
             )
 
         if batch_id == "batch_1_patch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=True,
-                requires_replanning=False,
-                requires_resequencing=False,
-                finalization_guard_triggered=False,
-                finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="manual_review",
-                decision_signals_used=["manual_review_required"],
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["manual_review_required"],
+                finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
                 notes="Manual review required after patch batch.",
             )
 
@@ -2128,16 +2394,16 @@ def test_workflow_batch_trace_includes_resolved_action_decision_signals_and_patc
     second_payload = json.loads(trace_artifacts[1].content)
 
     assert first_payload["batch_id"] == "batch_1"
-    assert first_payload["resolved_action"] == "continue_current_plan"
-    assert first_payload["decision_signals_used"] == [
+    assert first_payload["resolved_intent_type"] == "assign"
+    assert first_payload["decision_signals"] == [
         "remaining_plan_still_valid",
         "followup_tasks_created",
     ]
     assert first_payload["patched_plan_version"] == 60
 
     assert second_payload["batch_id"] == "batch_1_patch_1"
-    assert second_payload["resolved_action"] == "manual_review"
-    assert second_payload["decision_signals_used"] == ["manual_review_required"]
+    assert second_payload["resolved_intent_type"] == "manual_review"
+    assert second_payload["decision_signals"] == ["manual_review_required"]
     assert second_payload["patched_plan_version"] is None
 
 
@@ -2293,47 +2559,62 @@ def test_workflow_batch_trace_iteration_summary_and_result_blocked_batches_are_c
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="assign",
+                resolved_mutation_scope="assignment",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=True,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=True,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                requires_replanning=False,
-                requires_resequencing=False,
-                finalization_guard_triggered=False,
-                finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="continue_current_plan",
-                decision_signals_used=["remaining_plan_still_valid", "followup_tasks_created"],
+                reopened_finalization=False,
                 patched_execution_plan=patched_plan,
+                decision_signals=["remaining_plan_still_valid", "followup_tasks_created"],
+                finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
                 notes="Recovery work was assigned into the live plan.",
             )
 
         if batch_id == "batch_1_patch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                requires_replanning=False,
-                requires_resequencing=False,
-                finalization_guard_triggered=False,
-                finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="continue_current_plan",
-                decision_signals_used=["patched_plan_continues"],
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["patched_plan_continues"],
+                finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
                 notes="Patch batch completed successfully.",
             )
 
         if batch_id == "batch_2":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=True,
-                requires_replanning=False,
-                requires_resequencing=False,
-                finalization_guard_triggered=False,
-                finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="manual_review",
-                decision_signals_used=["manual_review_required"],
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["manual_review_required"],
+                finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
                 notes="Manual review required before continuing to final batch.",
             )
 
@@ -2374,7 +2655,7 @@ def test_workflow_batch_trace_iteration_summary_and_result_blocked_batches_are_c
 
     last_trace_payload = json.loads(trace_artifacts[-1].content)
     assert last_trace_payload["batch_id"] == "batch_2"
-    assert last_trace_payload["resolved_action"] == "manual_review"
+    assert last_trace_payload["resolved_intent_type"] == "manual_review"
 
     assert iteration.blocked_batch_ids_after_iteration == result.blocked_batches == ["batch_3"]
 
@@ -2479,32 +2760,42 @@ def test_workflow_result_matches_last_iteration_when_manual_review_stops_executi
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["remaining_plan_still_valid"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="continue_current_plan",
-                decision_signals_used=["remaining_plan_still_valid"],
+                finalization_guard_triggered=False,
                 notes="Continue to the next batch.",
             )
 
         if batch_id == "batch_2":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=True,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["manual_review_required"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="manual_review",
-                decision_signals_used=["manual_review_required"],
+                finalization_guard_triggered=False,
                 notes="Manual review required before final batch.",
             )
 
@@ -2529,7 +2820,7 @@ def test_workflow_result_matches_last_iteration_when_manual_review_stops_executi
 
     assert len(result.iterations) == 1
     last_iteration = result.iterations[-1]
-    assert last_iteration.manual_review_required is True
+    assert last_iteration.requires_manual_review is True
     assert last_iteration.blocked_batch_ids_after_iteration == ["batch_3"]
 
 
@@ -2685,50 +2976,62 @@ def test_workflow_artifacts_and_results_tell_a_consistent_execution_story(
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="assign",
+                resolved_mutation_scope="assignment",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=True,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=True,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=patched_plan,
+                decision_signals=[],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="continue_current_plan",
-                decision_signals_used=[
-                    "remaining_plan_still_valid",
-                    "followup_tasks_created",
-                ],
+                finalization_guard_triggered=False,
                 notes="Recovery work was inserted into the live plan.",
             )
 
         if batch_id == "batch_1_patch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["patched_plan_continues"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="continue_current_plan",
-                decision_signals_used=["patched_plan_continues"],
+                finalization_guard_triggered=False,
                 notes="Patch batch completed successfully.",
             )
 
         if batch_id == "batch_2":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=True,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["manual_review_required"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="manual_review",
-                decision_signals_used=["manual_review_required"],
+                finalization_guard_triggered=False,
                 notes="Manual review required before final batch.",
             )
 
@@ -2757,8 +3060,8 @@ def test_workflow_artifacts_and_results_tell_a_consistent_execution_story(
     assert iteration.batch_ids_processed == ["batch_1", "batch_1_patch_1", "batch_2"]
     assert iteration.blocked_batch_ids_after_iteration == ["batch_3"]
     assert iteration.used_patched_plan is True
-    assert iteration.replan_triggered is False
-    assert iteration.manual_review_required is True
+    assert (iteration.resolved_intent_type == "replan") is False
+    assert iteration.requires_manual_review is True
 
     batch_trace_artifacts = (
         db_session.query(Artifact)
@@ -2780,13 +3083,13 @@ def test_workflow_artifacts_and_results_tell_a_consistent_execution_story(
     ]
 
     assert batch_trace_payloads[0]["patched_plan_version"] == 100
-    assert batch_trace_payloads[0]["resolved_action"] == "continue_current_plan"
+    assert batch_trace_payloads[0]["resolved_intent_type"] == "assign"
 
     assert batch_trace_payloads[1]["patched_plan_version"] is None
-    assert batch_trace_payloads[1]["resolved_action"] == "continue_current_plan"
+    assert batch_trace_payloads[1]["resolved_intent_type"] == "continue"
 
     assert batch_trace_payloads[2]["patched_plan_version"] is None
-    assert batch_trace_payloads[2]["resolved_action"] == "manual_review"
+    assert batch_trace_payloads[2]["resolved_intent_type"] == "manual_review"
 
     assert iteration.blocked_batch_ids_after_iteration == result.blocked_batches == ["batch_3"]
 
@@ -2884,32 +3187,42 @@ def test_workflow_completed_batches_never_contains_duplicates(
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="resequence",
+                resolved_mutation_scope="resequence",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=True,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["remaining_plan_still_valid"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="resequence_remaining_batches",
-                decision_signals_used=["remaining_plan_still_valid"],
+                finalization_guard_triggered=False,
                 notes="Deferred resequencing after batch 1.",
             )
 
         if batch_id == "batch_2":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="project_stage_closed",
-                continue_execution=False,
+                resolved_intent_type="close",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=True,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["stage_goals_satisfied"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="close_stage",
-                decision_signals_used=["stage_goals_satisfied"],
+                finalization_guard_triggered=False,
                 notes="Stage closed.",
             )
 
@@ -3040,32 +3353,42 @@ def test_workflow_invalidates_active_plan_and_regenerates_when_iteration_require
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="replan",
+                resolved_mutation_scope="replan",
+                remaining_plan_still_valid=False,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=True,
-                requires_resequencing=False,
+                reopened_finalization=True,
                 patched_execution_plan=None,
+                decision_signals=["remaining_plan_invalid"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="replan_remaining_work",
-                decision_signals_used=["remaining_plan_invalid"],
+                finalization_guard_triggered=False,
                 notes="Structural replanning required.",
             )
 
         if batch_id == "batch_replanned":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="project_stage_closed",
-                continue_execution=False,
+                resolved_intent_type="close",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=True,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["stage_goals_satisfied"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="close_stage",
-                decision_signals_used=["stage_goals_satisfied"],
+                finalization_guard_triggered=False,
                 notes="Replanned batch closed the stage.",
             )
 
@@ -3166,32 +3489,42 @@ def test_workflow_blocked_batches_never_includes_completed_batches(
         checkpoint_artifact_window_start_exclusive,
     ):
         if batch_id == "batch_1":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="completed_with_evaluation",
-                continue_execution=True,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
                 requires_manual_review=False,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["remaining_plan_still_valid"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="continue_current_plan",
-                decision_signals_used=["remaining_plan_still_valid"],
+                finalization_guard_triggered=False,
                 notes="Continue.",
             )
 
         if batch_id == "batch_2":
-            return types.SimpleNamespace(
+            return _post_batch_result(
                 status="checkpoint_blocked",
-                continue_execution=False,
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
                 requires_manual_review=True,
-                finalization_guard_triggered=False,
-                requires_replanning=False,
-                requires_resequencing=False,
+                reopened_finalization=False,
                 patched_execution_plan=None,
+                decision_signals=["manual_review_required"],
                 finalization_iteration_count=current_finalization_iteration_count,
-                resolved_action="manual_review",
-                decision_signals_used=["manual_review_required"],
+                finalization_guard_triggered=False,
                 notes="Stop before final batch.",
             )
 

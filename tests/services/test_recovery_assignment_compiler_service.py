@@ -27,8 +27,8 @@ def _build_assignment_input(
     project_id: int,
     new_tasks: list[RecoveryTaskForAssignment],
     live_plan_summary: LivePlanSummaryForAssignment,
-    resolved_action: str = "continue_current_plan",
-    assignment_mode: str = "continue_with_assignment",
+    resolved_intent_type: str = "assign",
+    resolved_mutation_scope: str = "assignment",
     remaining_plan_still_valid: bool = True,
     new_recovery_tasks_blocking: bool | None = None,
     known_relationships: KnownAssignmentRelationships | None = None,
@@ -38,8 +38,8 @@ def _build_assignment_input(
         project_id=project_id,
         project_goal="Ship the current project stage safely.",
         current_stage_summary="The project is in the middle of the current stage.",
-        resolved_action=resolved_action,
-        assignment_mode=assignment_mode,
+        resolved_intent_type=resolved_intent_type,
+        resolved_mutation_scope=resolved_mutation_scope,
         executed_batch_summary=ExecutedBatchAssignmentSummary(
             batch_id=live_plan_summary.current_batch_id,
             batch_name=live_plan_summary.current_batch_name,
@@ -54,10 +54,10 @@ def _build_assignment_input(
         evaluation_signals=AssignmentEvaluationSignals(
             decision="stage_incomplete",
             decision_summary="The project should continue with controlled assignment.",
-            recommended_next_action=resolved_action,
+            recommended_next_action=resolved_intent_type,
             recommended_next_action_reason="The current plan can continue with the new work assigned safely.",
             plan_change_scope="none"
-            if resolved_action == "continue_current_plan"
+            if resolved_intent_type == "assign"
             else "local_resequencing",
             remaining_plan_still_valid=remaining_plan_still_valid,
             new_recovery_tasks_blocking=new_recovery_tasks_blocking,
@@ -159,8 +159,8 @@ def test_compile_recovery_assignment_plan_inserts_immediate_blocking_cluster_as_
             ),
         ],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
-        resolved_action="continue_current_plan",
-        assignment_mode="continue_with_assignment",
+        resolved_intent_type="assign",
+        resolved_mutation_scope="assignment",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=True,
         next_useful_progress=NextUsefulProgressSummary(
@@ -298,8 +298,8 @@ def test_compile_recovery_assignment_plan_attaches_future_blocking_cluster_insid
             ),
         ],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
-        resolved_action="continue_current_plan",
-        assignment_mode="continue_with_assignment",
+        resolved_intent_type="assign",
+        resolved_mutation_scope="assignment",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=False,
         known_relationships=known_relationships,
@@ -417,8 +417,8 @@ def test_compile_recovery_assignment_plan_appends_deferred_cluster_after_current
             )
         ],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
-        resolved_action="continue_current_plan",
-        assignment_mode="continue_with_assignment",
+        resolved_intent_type="assign",
+        resolved_mutation_scope="assignment",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=False,
         next_useful_progress=NextUsefulProgressSummary(
@@ -520,8 +520,8 @@ def test_compile_recovery_assignment_plan_returns_requires_replan_without_patchi
             )
         ],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
-        resolved_action="continue_current_plan",
-        assignment_mode="continue_with_assignment",
+        resolved_intent_type="assign",
+        resolved_mutation_scope="assignment",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=False,
     )
@@ -565,7 +565,7 @@ def test_compile_recovery_assignment_plan_returns_requires_replan_without_patchi
     assert compiled.compiled_cluster_assignments == []
 
 
-def test_compile_recovery_assignment_plan_rejects_strategy_that_conflicts_with_resolved_assignment_mode(
+def test_compile_recovery_assignment_plan_rejects_strategy_that_conflicts_with_resolved_assignment_intent(
     make_project,
     make_task,
     make_execution_plan,
@@ -606,8 +606,8 @@ def test_compile_recovery_assignment_plan_rejects_strategy_that_conflicts_with_r
             )
         ],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
-        resolved_action="continue_current_plan",
-        assignment_mode="continue_with_assignment",
+        resolved_intent_type="assign",
+        resolved_mutation_scope="assignment",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=False,
     )
@@ -635,7 +635,7 @@ def test_compile_recovery_assignment_plan_rejects_strategy_that_conflicts_with_r
                 rationale="The work can be deferred to the tail.",
             )
         ],
-        notes=["This output intentionally conflicts with the resolved assignment mode."],
+        notes=["This output intentionally conflicts with the resolved assignment intent."],
     )
 
     with pytest.raises(RecoveryAssignmentCompilerError) as exc_info:
@@ -645,7 +645,7 @@ def test_compile_recovery_assignment_plan_rejects_strategy_that_conflicts_with_r
             assignment_output=assignment_output,
         )
 
-    assert "does not match the resolved assignment mode" in str(exc_info.value)
+    assert "does not match the resolved assignment intent" in str(exc_info.value)
 
 
 def test_compile_recovery_assignment_plan_rejects_intrabatch_insertion_when_dependency_window_is_impossible(
@@ -708,8 +708,8 @@ def test_compile_recovery_assignment_plan_rejects_intrabatch_insertion_when_depe
             )
         ],
         live_plan_summary=_build_live_plan_summary_from_plan(plan),
-        resolved_action="continue_current_plan",
-        assignment_mode="continue_with_assignment",
+        resolved_intent_type="assign",
+        resolved_mutation_scope="assignment",
         remaining_plan_still_valid=True,
         new_recovery_tasks_blocking=False,
         known_relationships=known_relationships,

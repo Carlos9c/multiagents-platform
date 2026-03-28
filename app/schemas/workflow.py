@@ -1,20 +1,11 @@
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.post_batch_intent import (
     ResolvedPostBatchIntentType,
     ResolvedPostBatchMutationScope,
 )
-
-
-ProjectWorkflowStatus = Literal[
-    "execution_in_progress",
-    "awaiting_manual_review",
-    "stage_closed",
-]
 
 
 class WorkflowIterationSummary(BaseModel):
@@ -86,11 +77,7 @@ class WorkflowIterationSummary(BaseModel):
                 "starting_plan_version cannot be greater than ending_plan_version."
             )
 
-        if not (
-            self.starting_plan_version
-            <= self.plan_version
-            <= self.ending_plan_version
-        ):
+        if not (self.starting_plan_version <= self.plan_version <= self.ending_plan_version):
             raise ValueError(
                 "plan_version must be within [starting_plan_version, ending_plan_version]."
             )
@@ -137,11 +124,6 @@ class WorkflowIterationSummary(BaseModel):
                 "in {'continue', 'manual_review', 'close'}."
             )
 
-        if self.used_patched_plan and not self.requires_plan_mutation:
-            raise ValueError(
-                "used_patched_plan=True requires requires_plan_mutation=True."
-            )
-
         if self.should_close_stage and self.blocked_batch_ids_after_iteration:
             raise ValueError(
                 "should_close_stage=True is incompatible with blocked batches remaining after iteration."
@@ -152,7 +134,7 @@ class WorkflowIterationSummary(BaseModel):
 
 class ProjectWorkflowResult(BaseModel):
     project_id: int = Field(..., gt=0)
-    status: ProjectWorkflowStatus
+    status: str = Field(..., min_length=1)
 
     planning_completed: bool
     refinement_completed: bool
@@ -171,6 +153,10 @@ class ProjectWorkflowResult(BaseModel):
 
     @model_validator(mode="after")
     def validate_result(self) -> "ProjectWorkflowResult":
+        self.status = self.status.strip()
+        if not self.status:
+            raise ValueError("status cannot be empty.")
+
         if self.notes is not None:
             self.notes = self.notes.strip() or None
 
@@ -229,10 +215,7 @@ class ProjectWorkflowResult(BaseModel):
         if self.iterations:
             last_iteration = self.iterations[-1]
 
-            if (
-                self.plan_version is not None
-                and self.plan_version != last_iteration.plan_version
-            ):
+            if self.plan_version is not None and self.plan_version != last_iteration.plan_version:
                 raise ValueError(
                     "plan_version must match the last iteration plan_version."
                 )

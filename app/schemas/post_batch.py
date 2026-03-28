@@ -257,10 +257,6 @@ class PostBatchResult(BaseModel):
                 raise ValueError(
                     "resolved_intent_type='resequence' must not continue before applying the resequenced plan."
                 )
-            if self.patched_execution_plan is None:
-                raise ValueError(
-                    "resolved_intent_type='resequence' requires a patched_execution_plan."
-                )
 
         elif self.resolved_intent_type == "replan":
             if self.resolved_mutation_scope != "replan":
@@ -286,10 +282,6 @@ class PostBatchResult(BaseModel):
             if self.can_continue_after_application:
                 raise ValueError(
                     "resolved_intent_type='replan' must not continue before generating the new plan."
-                )
-            if self.patched_execution_plan is None:
-                raise ValueError(
-                    "resolved_intent_type='replan' requires a patched_execution_plan."
                 )
 
         elif self.resolved_intent_type == "manual_review":
@@ -458,9 +450,9 @@ class PostBatchResult(BaseModel):
                 "should_close_stage=true requires evaluation_decision.project_stage_closed=true."
             )
 
-        if self.requires_plan_mutation and self.patched_execution_plan is None:
+        if self.resolved_intent_type == "assign" and self.patched_execution_plan is None:
             raise ValueError(
-                "requires_plan_mutation=true requires patched_execution_plan to be present."
+                "resolved_intent_type='assign' requires patched_execution_plan to be present."
             )
 
         if not self.requires_plan_mutation and self.patched_execution_plan is not None:

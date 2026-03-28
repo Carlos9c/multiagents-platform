@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Callable, Any
+from typing import Any, Callable
 from collections.abc import Iterator
 
 import pytest
@@ -31,8 +31,8 @@ from app.models.task import (
 )
 from app.schemas.evaluation import (
     EvaluationReplanInstruction,
-    StageEvaluationOutput,
     EvaluatedBatchSummary,
+    StageEvaluationOutput,
 )
 from app.schemas.execution_plan import (
     CheckpointDefinition,
@@ -240,20 +240,12 @@ def make_stage_evaluation_output() -> Callable[..., StageEvaluationOutput]:
         evaluated_batches: list[EvaluatedBatchSummary] | None = None,
         key_risks: list[str] | None = None,
         notes: list[str] | None = None,
-        completed_scope: str | None = None,  # compat: ignored by current schema
-        remaining_scope: str | None = None,  # compat: ignored by current schema
-        overall_progress: str | None = None,  # compat: ignored by current schema
-        newly_verified_deliverables: list[str] | None = None,  # compat: folded into notes
-        missing_or_incomplete_deliverables: list[str] | None = None,  # compat: folded into key_risks
-        blockers_or_risks: list[str] | None = None,  # compat -> key_risks
+        # compatibilidad mínima de transición
         completed_task_ids: list[int] | None = None,
         failed_task_ids: list[int] | None = None,
-        project_stage_status: str | None = None,  # compat: ignored
-        stage_status: str | None = None,  # compat: ignored
-        stage_closure_allowed: bool | None = None,  # compat: inferred from project_stage_closed
-        recommended_next_action_legacy: str | None = None,  # spare compat
-        # absorb any leftover legacy kwargs without breaking collection
-        **_: Any,
+        blockers_or_risks: list[str] | None = None,
+        newly_verified_deliverables: list[str] | None = None,
+        missing_or_incomplete_deliverables: list[str] | None = None,
     ) -> StageEvaluationOutput:
         effective_decision = decision
         effective_stage_goals_satisfied = stage_goals_satisfied
@@ -264,7 +256,7 @@ def make_stage_evaluation_output() -> Callable[..., StageEvaluationOutput]:
         effective_followup_reason = followup_atomic_tasks_reason
         effective_manual_review_required = manual_review_required
         effective_manual_review_reason = manual_review_reason
-        effective_recommended_next_action = recommended_next_action or recommended_next_action_legacy
+        effective_recommended_next_action = recommended_next_action
         effective_recommended_next_action_reason = recommended_next_action_reason
         effective_plan_change_scope = plan_change_scope
         effective_remaining_plan_still_valid = remaining_plan_still_valid
@@ -289,15 +281,6 @@ def make_stage_evaluation_output() -> Callable[..., StageEvaluationOutput]:
                 [f"verified:{item}" for item in newly_verified_deliverables]
             )
 
-        if completed_scope:
-            effective_notes.append(f"completed_scope: {completed_scope}")
-
-        if remaining_scope:
-            effective_notes.append(f"remaining_scope: {remaining_scope}")
-
-        if overall_progress:
-            effective_notes.append(f"overall_progress: {overall_progress}")
-
         if completed_task_ids:
             effective_notes.append(
                 "completed_task_ids: " + ", ".join(str(task_id) for task_id in completed_task_ids)
@@ -311,7 +294,7 @@ def make_stage_evaluation_output() -> Callable[..., StageEvaluationOutput]:
         if effective_recommended_next_action_reason:
             effective_notes.append(effective_recommended_next_action_reason)
 
-        # Map legacy recommendation semantics to current schema
+        # Normalización mínima de semántica usada todavía por la suite
         if effective_recommended_next_action == "continue":
             effective_recommended_next_action = "continue_current_plan"
 
@@ -358,7 +341,6 @@ def make_stage_evaluation_output() -> Callable[..., StageEvaluationOutput]:
             effective_plan_change_scope = "none"
             effective_remaining_plan_still_valid = True
 
-        # Map legacy replan scope to current enum
         if replan_level is not None:
             if replan_level == "high_level":
                 effective_plan_change_scope = "high_level_replan"
@@ -556,7 +538,10 @@ def make_execution_plan() -> Callable[..., ExecutionPlan]:
                     batch_id=batch_id,
                     batch_index=effective_batch_index,
                     plan_version=effective_plan_version,
-                    name=batch_data.get("name", f"Plan {effective_plan_version} · Batch {effective_batch_index}"),
+                    name=batch_data.get(
+                        "name",
+                        f"Plan {effective_plan_version} · Batch {effective_batch_index}",
+                    ),
                     goal=batch_data.get("goal", f"Goal for {batch_id}"),
                     task_ids=batch_data["task_ids"],
                     entry_conditions=batch_data.get(

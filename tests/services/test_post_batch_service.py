@@ -15,15 +15,25 @@ from app.services.post_batch_service import (
     PostBatchServiceError,
     process_batch_after_execution,
 )
-from app.services.post_batch_service import (
-    PostBatchServiceError,
-    process_batch_after_execution,
-)
 from app.schemas.recovery import (
         RecoveryContext,
         RecoveryCreatedTaskRecord,
         RecoveryDecisionSummary,
     )
+
+
+def _assert_intent(result, *, intent_type: str, mutation_scope: str):
+    assert result.resolved_intent_type == intent_type
+    assert result.resolved_mutation_scope == mutation_scope
+
+
+def _assert_trace_payload_uses_canonical_contract(payload: dict):
+    assert "resolved_action" not in payload
+    assert "decision_signals_used" not in payload
+    assert "continue_execution" not in payload
+    assert "requires_replanning" not in payload
+    assert "requires_resequencing" not in payload
+
 
 def test_post_batch_continues_on_successful_intermediate_checkpoint(
     db_session,
@@ -89,9 +99,9 @@ def test_post_batch_continues_on_successful_intermediate_checkpoint(
     )
 
     assert result.status == "completed_with_evaluation"
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.executed_task_ids == [batch_1_task.id]
     assert result.successful_task_ids == [batch_1_task.id]
@@ -183,9 +193,9 @@ def test_post_batch_requests_resequencing_when_evaluator_recommends_resequence_r
     )
 
     assert result.status == "checkpoint_blocked"
-    assert result.continue_execution is False
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is True
+    assert result.can_continue_after_application is False
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type == "resequence"
     assert result.requires_manual_review is False
     assert result.finalization_guard_triggered is False
 
@@ -276,9 +286,9 @@ def test_post_batch_requests_replanning_when_evaluator_recommends_replan_remaini
     )
 
     assert result.status == "checkpoint_blocked"
-    assert result.continue_execution is False
-    assert result.requires_replanning is True
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is False
+    assert result.resolved_intent_type == "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.finalization_guard_triggered is False
 
@@ -633,14 +643,15 @@ def test_post_batch_persists_resolved_action_and_decision_signals(
         persist_result=False,
     )
 
-    assert result.resolved_action == "continue_current_plan"
-    assert result.decision_signals_used == [
+    assert result.resolved_intent_type == "continue"
+    assert result.resolved_mutation_scope == "none"
+    assert result.decision_signals == [
         "remaining_plan_still_valid",
         "non_blocking_followup_work",
     ]
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
 
 def test_post_batch_continues_when_only_new_recovery_tasks_exist_but_they_are_non_blocking(
@@ -708,10 +719,11 @@ def test_post_batch_continues_when_only_new_recovery_tasks_exist_but_they_are_no
         persist_result=False,
     )
 
-    assert result.resolved_action == "continue_current_plan"
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.resolved_intent_type == "continue"
+    assert result.resolved_mutation_scope == "none"
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
 
 def test_post_batch_persists_workflow_iteration_trace_artifact(
@@ -805,6 +817,7 @@ def test_post_batch_persists_workflow_iteration_trace_artifact(
     assert trace_artifact is not None
 
     payload = json.loads(trace_artifact.content)
+    _assert_trace_payload_uses_canonical_contract(payload)
 
     assert payload["project_id"] == project.id
     assert payload["plan_version"] == 2
@@ -816,14 +829,15 @@ def test_post_batch_persists_workflow_iteration_trace_artifact(
     assert payload["successful_task_ids"] == [task.id]
     assert payload["problematic_run_ids"] == []
     assert payload["created_recovery_task_ids"] == []
-    assert payload["resolved_action"] == "continue_current_plan"
-    assert payload["decision_signals_used"] == [
+    assert payload["resolved_intent_type"] == "continue"
+    assert payload["resolved_mutation_scope"] == "none"
+    assert payload["decision_signals"] == [
         "remaining_plan_still_valid",
         "non_blocking_followup_work",
     ]
-    assert payload["continue_execution"] is True
-    assert payload["requires_replanning"] is False
-    assert payload["requires_resequencing"] is False
+    assert payload["can_continue_after_application"] is True
+    assert payload["resolved_intent_type"] != "replan"
+    assert payload["resolved_intent_type"] != "resequence"
     assert payload["requires_manual_review"] is False
     assert payload["is_final_batch"] is False
 
@@ -969,21 +983,24 @@ def test_post_batch_trace_persists_recovery_created_task_ids_and_resequence_acti
     assert trace_artifact is not None
 
     payload = json.loads(trace_artifact.content)
+    _assert_trace_payload_uses_canonical_contract(payload)
 
     assert payload["batch_internal_id"] == "1_1"
     assert payload["batch_id"] == "batch_1"
-    assert payload["resolved_action"] == "resequence_remaining_batches"
-    assert payload["decision_signals_used"] == [
+    assert payload["resolved_intent_type"] == "resequence"
+    assert payload["resolved_mutation_scope"] == "resequence"
+    assert payload["decision_signals"] == [
         "new_work_requires_precedence",
         "remaining_plan_still_valid",
     ]
-    assert payload["requires_resequencing"] is True
-    assert payload["requires_replanning"] is False
-    assert payload["continue_execution"] is False
+    assert payload["resolved_intent_type"] == "resequence"
+    assert payload["resolved_intent_type"] != "replan"
+    assert payload["can_continue_after_application"] is False
     assert payload["problematic_run_ids"] == [run.id]
     assert len(payload["created_recovery_task_ids"]) == 1
     assert payload["created_recovery_task_ids"][0] > 0
-    assert result.resolved_action == "resequence_remaining_batches"
+    assert result.resolved_intent_type == "resequence"
+    assert result.resolved_mutation_scope == "resequence"
 
 def test_post_batch_creates_patch_batch_for_blocking_recovery_work(
     db_session,
@@ -1115,7 +1132,8 @@ def test_post_batch_creates_patch_batch_for_blocking_recovery_work(
     )
 
     assert result.patched_execution_plan is not None
-    assert result.resolved_action == "resequence_remaining_batches"
+    assert result.resolved_intent_type == "resequence"
+    assert result.resolved_mutation_scope == "resequence"
 
     patched_batches = result.patched_execution_plan.execution_batches
     assert len(patched_batches) == 3
@@ -1302,9 +1320,9 @@ def test_post_batch_runs_recovery_assignment_when_new_non_blocking_tasks_must_be
     )
 
     assert result.status == "completed_with_evaluation"
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.patched_execution_plan is not None
     assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
@@ -1486,10 +1504,11 @@ def test_post_batch_final_batch_stays_open_when_recovery_assignment_extends_the_
     )
 
     assert result.is_final_batch is True
-    assert result.status == "completed_with_evaluation"
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.status == "finalization_reopened"
+    assert result.reopened_finalization is True
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.patched_execution_plan is not None
     assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
         "plan_3_batch_1",
@@ -1645,7 +1664,6 @@ def test_post_batch_consumes_assignment_mutation_result_from_live_plan_mutation_
         "app.services.post_batch_service.resolve_post_batch_intent",
         lambda signals: types.SimpleNamespace(
             intent_type="assign",
-            legacy_action="continue_current_plan",
             mutation_scope="assignment",
             remaining_plan_still_valid=True,
             has_new_recovery_tasks=True,
@@ -1681,9 +1699,9 @@ def test_post_batch_consumes_assignment_mutation_result_from_live_plan_mutation_
         persist_result=False,
     )
 
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.patched_execution_plan is not None
     assert f"assigned_task_ids=[{created_recovery_task.id}]" in result.notes
 
@@ -1780,9 +1798,9 @@ def test_post_batch_does_not_materialize_patch_for_deferred_resequence(
         persist_result=False,
     )
 
-    assert result.requires_resequencing is True
-    assert result.requires_replanning is False
-    assert result.continue_execution is False
+    assert result.resolved_intent_type == "resequence"
+    assert result.resolved_intent_type != "replan"
+    assert result.can_continue_after_application is False
     assert result.patched_execution_plan is None
 
 
@@ -2020,9 +2038,9 @@ def test_post_batch_blocking_recovery_forces_stop_or_resequence(
         persist_result=False,
     )
 
-    assert result.continue_execution is False
-    assert result.requires_resequencing is True
-    assert result.requires_replanning is False
+    assert result.can_continue_after_application is False
+    assert result.resolved_intent_type == "resequence"
+    assert result.resolved_intent_type != "replan"
 
 
 def test_post_batch_invalid_plan_without_recovery_forces_replan(
@@ -2102,8 +2120,8 @@ def test_post_batch_invalid_plan_without_recovery_forces_replan(
         persist_result=False,
     )
 
-    assert result.requires_replanning is True
-    assert result.continue_execution is False
+    assert result.resolved_intent_type == "replan"
+    assert result.can_continue_after_application is False
 
 def test_make_stage_evaluation_output_normalizes_high_level_replan_signals(
     make_stage_evaluation_output,
@@ -2336,9 +2354,9 @@ def test_post_batch_assigns_multiple_recovery_clusters_without_replan(
     )
 
     assert result.status == "completed_with_evaluation"
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert sorted(result.problematic_run_ids) == sorted([failed_run.id, partial_run.id])
     assert sorted(record.created_task_id for record in result.recovery_context.recovery_created_tasks) == sorted(
         [created_recovery_task_a.id, created_recovery_task_b.id]
@@ -2517,10 +2535,11 @@ def test_post_batch_final_batch_with_non_blocking_multi_recovery_stays_open_afte
     )
 
     assert result.is_final_batch is True
-    assert result.status == "completed_with_evaluation"
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.status == "finalization_reopened"
+    assert result.reopened_finalization is True
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.patched_execution_plan is not None
     assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
@@ -2674,12 +2693,12 @@ def test_post_batch_escalates_to_replan_when_assignment_is_only_partial(
     )
 
     assert result.status == "checkpoint_blocked"
-    assert result.continue_execution is False
-    assert result.requires_replanning is True
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is False
+    assert result.resolved_intent_type == "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.patched_execution_plan is None
-    assert result.resolved_action == "replan_remaining_work"
+    assert result.resolved_mutation_scope == "replan"
     assert "assignment escalated to replanning" in result.notes
 
 
@@ -2954,12 +2973,12 @@ def test_post_batch_assign_intent_escalates_to_replan_when_mutation_cannot_place
     )
 
     assert result.status == "checkpoint_blocked"
-    assert result.continue_execution is False
-    assert result.requires_replanning is True
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is False
+    assert result.resolved_intent_type == "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.patched_execution_plan is None
-    assert result.resolved_action == "replan_remaining_work"
+    assert result.resolved_mutation_scope == "replan"
 
 
 def test_post_batch_manual_review_intent_overrides_assignment_and_blocks_continuation(
@@ -3110,10 +3129,10 @@ def test_post_batch_manual_review_intent_overrides_assignment_and_blocks_continu
     )
 
     assert result.status == "checkpoint_blocked"
-    assert result.continue_execution is False
+    assert result.can_continue_after_application is False
     assert result.requires_manual_review is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
 
 
 def test_post_batch_uses_live_plan_mutation_service_for_recovery_assignment(
@@ -3264,7 +3283,7 @@ def test_post_batch_uses_live_plan_mutation_service_for_recovery_assignment(
     assert len(mutation_calls) == 1
     assert mutation_calls[0]["plan"].plan_version == 30
     assert mutation_calls[0]["batch"].batch_id == "batch_1"
-    assert result.requires_replanning is False
+    assert result.resolved_intent_type != "replan"
     assert result.patched_execution_plan is not None
 
 
@@ -3424,8 +3443,8 @@ def test_post_batch_trace_includes_mutation_and_recovery_link_fields(
 
     assert trace_artifact is not None
     payload = json.loads(trace_artifact.content)
+    _assert_trace_payload_uses_canonical_contract(payload)
 
-    assert payload["mutation_kind"] == "assignment"
     assert payload["patched_plan_version"] == 40
     assert payload["assigned_task_ids"] == [recovery_task.id]
     assert payload["unassigned_task_ids"] == []
@@ -3504,9 +3523,9 @@ def test_post_batch_completed_with_evaluation_has_no_blocking_flags(
     )
 
     assert result.status == "completed_with_evaluation"
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
 
 def test_post_batch_project_stage_closed_has_no_blocking_flags(
@@ -3579,9 +3598,9 @@ def test_post_batch_project_stage_closed_has_no_blocking_flags(
     )
 
     assert result.status == "project_stage_closed"
-    assert result.continue_execution is False
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is False
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
 
 def test_post_batch_finalization_guard_blocked_requires_only_manual_review(
@@ -3667,10 +3686,10 @@ def test_post_batch_finalization_guard_blocked_requires_only_manual_review(
     )
 
     assert result.status == "finalization_guard_blocked"
-    assert result.continue_execution is False
+    assert result.can_continue_after_application is False
     assert result.requires_manual_review is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
 
 def test_post_batch_finalization_reopened_never_continues_execution(
     db_session,
@@ -3755,7 +3774,7 @@ def test_post_batch_finalization_reopened_never_continues_execution(
     )
 
     assert result.status == "finalization_reopened"
-    assert result.continue_execution is False
+    assert result.can_continue_after_application is False
 
 
 def test_post_batch_finalization_reopened_has_consistent_flags(
@@ -3841,7 +3860,7 @@ def test_post_batch_finalization_reopened_has_consistent_flags(
     )
 
     assert result.status == "finalization_reopened"
-    assert result.continue_execution is False
+    assert result.can_continue_after_application is False
     assert result.requires_manual_review is False
     assert result.finalization_guard_triggered is False
     assert result.finalization_iteration_count == 1
@@ -3917,9 +3936,9 @@ def test_post_batch_project_stage_closed_has_consistent_flags(
     )
 
     assert result.status == "project_stage_closed"
-    assert result.continue_execution is False
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is False
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.finalization_guard_triggered is False
 
@@ -3995,8 +4014,8 @@ def test_post_batch_completed_with_evaluation_has_consistent_flags(
     )
 
     assert result.status == "completed_with_evaluation"
-    assert result.continue_execution is True
-    assert result.requires_replanning is False
-    assert result.requires_resequencing is False
+    assert result.can_continue_after_application is True
+    assert result.resolved_intent_type != "replan"
+    assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.finalization_guard_triggered is False

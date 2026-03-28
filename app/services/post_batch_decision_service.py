@@ -271,12 +271,7 @@ def _should_continue_current_plan(signals: PostBatchDecisionSignals) -> bool:
     if signals.new_recovery_tasks_blocking is True:
         return False
 
-    if signals.recommended_next_action in {
-        "manual_review",
-        "resequence_remaining_batches",
-        "replan_remaining_work",
-        "close_stage",
-    }:
+    if signals.recommended_next_action != "continue_current_plan":
         return False
 
     if signals.plan_change_scope in {

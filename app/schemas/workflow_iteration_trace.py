@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.schemas.post_batch import PostBatchStatus
 from app.schemas.post_batch_intent import (
     ResolvedPostBatchIntentType,
     ResolvedPostBatchMutationScope,
@@ -18,12 +17,9 @@ class WorkflowIterationTrace(BaseModel):
     batch_index: int = Field(..., ge=1)
     checkpoint_id: str = Field(..., min_length=1)
 
-    post_batch_status: PostBatchStatus
-
     executed_task_ids: list[int] = Field(default_factory=list)
     successful_task_ids: list[int] = Field(default_factory=list)
     problematic_run_ids: list[int] = Field(default_factory=list)
-
     created_recovery_task_ids: list[int] = Field(default_factory=list)
     source_run_ids_with_recovery: list[int] = Field(default_factory=list)
 
@@ -42,6 +38,7 @@ class WorkflowIterationTrace(BaseModel):
 
     decision_signals: list[str] = Field(default_factory=list)
 
+    mutation_kind: str | None = None
     patched_plan_version: int | None = Field(default=None, ge=1)
     assigned_task_ids: list[int] = Field(default_factory=list)
     unassigned_task_ids: list[int] = Field(default_factory=list)
@@ -74,8 +71,8 @@ class WorkflowIterationTrace(BaseModel):
 
         normalized_signals: list[str] = []
         seen_signals: set[str] = set()
-        for signal in self.decision_signals:
-            normalized = signal.strip()
+        for item in self.decision_signals:
+            normalized = item.strip()
             if not normalized or normalized in seen_signals:
                 continue
             normalized_signals.append(normalized)
@@ -94,16 +91,8 @@ class WorkflowIterationTrace(BaseModel):
             if any(value <= 0 for value in values):
                 raise ValueError(f"{collection_name} must contain only positive integers.")
 
-        executed_set = set(self.executed_task_ids)
-        successful_set = set(self.successful_task_ids)
-
-        if not successful_set.issubset(executed_set):
+        if set(self.successful_task_ids) - set(self.executed_task_ids):
             raise ValueError("successful_task_ids must be a subset of executed_task_ids.")
-
-        assigned_set = set(self.assigned_task_ids)
-        unassigned_set = set(self.unassigned_task_ids)
-        if assigned_set & unassigned_set:
-            raise ValueError("assigned_task_ids and unassigned_task_ids must be disjoint.")
 
         if (
             self.finalization_iteration_count > self.max_finalization_iterations
@@ -111,7 +100,7 @@ class WorkflowIterationTrace(BaseModel):
         ):
             raise ValueError(
                 "finalization_iteration_count cannot exceed max_finalization_iterations "
-                "unless finalization_guard_triggered=True."
+                "unless finalization_guard_triggered=true."
             )
 
         if self.resolved_mutation_scope == "none" and self.requires_plan_mutation:
@@ -147,16 +136,6 @@ class WorkflowIterationTrace(BaseModel):
             raise ValueError(
                 "reopened_finalization=True is incompatible with resolved_intent_type "
                 "in {'continue', 'manual_review', 'close'}."
-            )
-
-        if self.requires_plan_mutation and self.patched_plan_version is None:
-            raise ValueError(
-                "requires_plan_mutation=True requires patched_plan_version to be present."
-            )
-
-        if not self.requires_plan_mutation and self.patched_plan_version is not None:
-            raise ValueError(
-                "patched_plan_version is only valid when requires_plan_mutation=True."
             )
 
         if self.resolved_intent_type == "continue":
@@ -221,6 +200,10 @@ class WorkflowIterationTrace(BaseModel):
             if not self.can_continue_after_application:
                 raise ValueError(
                     "resolved_intent_type='assign' must allow continuation after application."
+                )
+            if self.patched_plan_version is None:
+                raise ValueError(
+                    "resolved_intent_type='assign' requires patched_plan_version to be present."
                 )
 
         elif self.resolved_intent_type == "resequence":
@@ -300,6 +283,10 @@ class WorkflowIterationTrace(BaseModel):
                 raise ValueError(
                     "resolved_intent_type='manual_review' cannot reopen finalization by itself."
                 )
+            if self.patched_plan_version is not None:
+                raise ValueError(
+                    "resolved_intent_type='manual_review' cannot include patched_plan_version."
+                )
 
         elif self.resolved_intent_type == "close":
             if self.resolved_mutation_scope != "none":
@@ -334,44 +321,19 @@ class WorkflowIterationTrace(BaseModel):
                 raise ValueError(
                     "resolved_intent_type='close' cannot reopen finalization."
                 )
+            if self.patched_plan_version is not None:
+                raise ValueError(
+                    "resolved_intent_type='close' cannot include patched_plan_version."
+                )
 
         else:
             raise ValueError(
                 f"Unsupported resolved_intent_type: {self.resolved_intent_type}"
             )
 
-        if self.post_batch_status == "project_stage_closed":
-            if self.resolved_intent_type != "close":
-                raise ValueError(
-                    "post_batch_status='project_stage_closed' requires resolved_intent_type='close'."
-                )
-            if not self.should_close_stage:
-                raise ValueError(
-                    "post_batch_status='project_stage_closed' requires should_close_stage=True."
-                )
-
-        if self.post_batch_status == "finalization_reopened":
-            if not self.reopened_finalization:
-                raise ValueError(
-                    "post_batch_status='finalization_reopened' requires reopened_finalization=True."
-                )
-            if self.resolved_intent_type not in {"assign", "resequence", "replan"}:
-                raise ValueError(
-                    "post_batch_status='finalization_reopened' requires a mutating intent."
-                )
-
-        if self.post_batch_status == "finalization_guard_blocked":
-            if not self.finalization_guard_triggered:
-                raise ValueError(
-                    "post_batch_status='finalization_guard_blocked' requires finalization_guard_triggered=True."
-                )
-            if self.resolved_intent_type != "manual_review":
-                raise ValueError(
-                    "post_batch_status='finalization_guard_blocked' requires resolved_intent_type='manual_review'."
-                )
-            if not self.requires_manual_review:
-                raise ValueError(
-                    "post_batch_status='finalization_guard_blocked' requires requires_manual_review=True."
-                )
+        if self.resolved_intent_type == "assign" and self.patched_plan_version is None:
+            raise ValueError(
+                "resolved_intent_type='assign' requires patched_plan_version to be present."
+            )
 
         return self
