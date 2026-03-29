@@ -1,431 +1,290 @@
-# 🧠 Agente Desarrollador — Estado actual del proyecto
+# 🧠 Multi-Agent Execution Platform — Estado Actual
 
-## 📍 Estado real tras esta fase
+## 📍 Estado del proyecto
 
-En esta fase se ha consolidado una parte importante del sistema y, sobre todo, se ha hecho una limpieza estructural para alinear código, tests y semántica interna.
+El sistema ha alcanzado un punto de **coherencia estructural** en la ruta principal de ejecución.
+Ya no estamos en fase de refactorización inicial, sino en una fase de **consolidación del comportamiento y mejora de capacidades**.
 
-Los cambios más relevantes han sido:
-
-* unificación progresiva del vocabulario interno
-* limpieza de ayudas y compatibilidades legacy en tests
-* cierre del puente semántico entre ejecución y validación
-* sustitución del flujo viejo de validación por un subsistema nuevo basado en:
-
-  * routing
-  * evidence package
-  * validadores especializados
-* integración del nuevo flujo en `task_execution_service`
-* eliminación de dependencias principales de:
-
-  * `code_executor`
-  * `code_validator`
-  * `task_validation_service`
-  * contratos legacy asociados
-
-La idea central que queda fijada es esta:
-
-> la ejecución produce evidencia real
-> y la validación razona sobre esa evidencia con contratos comunes de entrada y salida
-
----
-
-# ✅ Qué se ha hecho realmente
-
-## 1. Limpieza de semántica en tests y fixtures
-
-Se ha trabajado de forma explícita en que la suite deje de “arreglar” payloads o aceptar vocabulario heredado de forma silenciosa.
-
-Esto ha implicado:
-
-* revisar `conftest.py`
-* corregir factories y ayudas de test
-* reescribir tests para usar payloads canónicos reales
-* eliminar ayudas que seguían pensando en vocabulario viejo
-* adaptar tests de servicios clave a la semántica nueva
-
-Se han tocado y alineado, entre otros:
-
-* `test_evaluation_service.py`
-* `test_post_batch_service.py`
-* `test_project_workflow_service.py`
-* `test_live_plan_mutation_service.py`
-* `test_recovery_assignment_compiler_service.py`
-* `test_execution_plan_patch_service.py`
-* `test_execution_plan_service.py`
-* `test_task_execution_service.py`
-
-Esto era imprescindible para que la suite validara la migración de verdad y no una versión maquillada de la misma.
-
----
-
-## 2. Cierre de la doble semántica del executor
-
-Se ha avanzado en cerrar la transición de `executor_type` y en sacar compatibilidad que ya no debía seguir viva.
-
-La dirección marcada es:
-
-* contratos canónicos reales
-* sin normalizaciones silenciosas
-* sin mantener vocabulario viejo por comodidad
-* sin seguir ampliando semántica duplicada
-
-Esto afecta directamente a:
-
-* modelos
-* schemas
-* servicios
-* fixtures
-* tests
-
----
-
-## 3. Nuevo sistema de validación
-
-Se ha introducido un subsistema nuevo de validación que reemplaza el enfoque anterior acoplado a `CodeExecutor`.
-
-La base del nuevo modelo es:
-
-### Entrada común
-
-* `TaskValidationInput`
-
-### Salida común
-
-* `ValidationResult`
-
-### Comportamiento interno especializado
-
-Cada validador transforma internamente el `TaskValidationInput` al formato que más le conviene para validar.
-
-Eso permite:
-
-* mantener contratos comunes del sistema
-* especializar el consumo por tipo de validador
-* preparar el terreno para validadores futuros de otros formatos
-
----
-
-# ⚙️ Flujo actual ejecución → validación
-
-## 1. Ejecución
+### Flujo canónico actual
 
 ```text
-Task → execution_engine → ExecutionResult
+Task → Execution → Validation → Artifact(validation_result) → Evaluation → Recovery → Post-batch
 ```
 
-El `execution_engine` produce:
+Este flujo está ahora:
 
-* `ExecutionResult`
-* `changed_files`
-* comandos ejecutados
-* `output_snapshot`
-* `validation_notes`
-* `blockers_found`
-* `execution_agent_sequence`
-* references a artifacts si aplica
+* unificado semánticamente
+* desacoplado de legacy
+* respaldado por tests
+* alineado entre servicios
 
 ---
 
-## 2. Construcción del paquete de validación
+## ✅ Avances realizados
 
-```text
-ExecutionResult + task context + execution context
-    ↓
-build_task_validation_input(...)
-    ↓
-TaskValidationInput
-```
+### 1. Eliminación de legacy y unificación semántica
 
-Este `TaskValidationInput` contiene:
+Se ha completado la limpieza de componentes heredados:
 
-* contexto de la tarea
-* contexto de ejecución
-* contexto de request
-* `evidence_package`
-* metadata
+* ❌ Eliminado `app/services/executor.py`
+* ❌ Eliminado `app/schemas/code_execution.py`
+* 🔄 Migración a vocabulario neutro:
+
+  * `WorkspaceChangeSet` → `app/schemas/workspace.py`
+  * `code_validation_result` → `validation_result`
+
+Esto elimina ambigüedad y permite extender el sistema más allá del dominio de código.
 
 ---
 
-## 3. Evidence package
+### 2. Validación como evidencia canónica
 
-La validación ya no se basa en “snapshots legacy” ni en contratos del viejo validador.
+Se ha consolidado la validación como parte central del sistema:
 
-Ahora se trabaja con un paquete de evidencia estructurado.
+* `task_execution_service`:
 
-Ese paquete puede contener items como:
+  * ejecuta
+  * valida
+  * **persiste `validation_result` como artifact canónico**
+* el artifact incluye:
 
-* ficheros producidos/modificados
-* outputs de comandos
-* artifacts persistidos
-* referencias a artifacts
-* metadata asociada
+  * decisión (`completed`, `partial`, `failed`, `manual_review`)
+  * scope validado y faltante
+  * blockers
+  * señales de follow-up
+  * estado final aplicado
 
-La unidad básica es `ValidationEvidenceItem`.
-
-La idea importante es:
-
-> el contrato es común
-> pero cada validador decide cómo consumir internamente esa evidencia
+Esto elimina la brecha previa entre ejecución y evaluación.
 
 ---
 
-## 4. Routing de validación
+### 3. Integración end-to-end de validación
 
-```text
-TaskValidationInput
-    ↓
-resolve_validation_route(...)
-    ↓
-ResolvedValidationIntent
-```
+Todos los servicios relevantes consumen el nuevo contrato:
 
-El router decide:
+* `evaluation_service` → usa validación como evidencia resumida
+* `recovery` → usa validación como señal operativa
+* `post_batch_service` → exige validación como precondición
+* `project_memory_service` → indexa `validation_result`
 
-* `validator_key`
-* disciplina
-* modo de validación
-
-Bajo estas reglas:
-
-* schema estricto
-* catálogo de validadores conocido
-* fallback seguro
-
-El router no valida la tarea.
-Solo decide a qué validador debe ir.
+No existe ya doble contrato ni fallback a legacy.
 
 ---
 
-## 5. Validación especializada
+### 4. Recovery refinado con señales de validación
 
-```text
-TaskValidationInput
-    ↓
-validator-specific consumption
-    ↓
-LLM output especializado
-    ↓
-ValidationResult
-```
+Recovery ha sido ajustado para usar la validación correctamente:
 
-La clave de esta arquitectura es que:
+* solo recibe tareas problemáticas (`partial`, `failed`, `manual_review`)
+* consume señales estructuradas:
 
-* lo que entra al sistema de validación siempre tiene el mismo shape
-* lo que sale del sistema de validación siempre tiene el mismo shape
-* lo que pasa por dentro depende del tipo de validación
+  * `decision`
+  * `validated_scope`
+  * `missing_scope`
+  * `blockers`
+  * `manual_review_required`
+  * `followup_validation_required`
+* evita:
 
-En el caso actual del validador de código:
-
-* se filtra qué evidencia puede consumir
-* se renderiza en un formato textual útil para el LLM
-* se obtiene una salida especializada
-* se transforma a `ValidationResult`
+  * sobre-replanificación
+  * cambios de intención no justificados
+  * automatización agresiva sin evidencia
 
 ---
 
-## 6. Aplicación del resultado en ejecución
+### 5. Post-batch como pasarela limpia
 
-`task_execution_service.py` ya no valida con el flujo viejo.
+`post_batch_service` mantiene su rol correcto:
 
-Ahora:
+* no interpreta validación
+* no contiene lógica de negocio de recovery
+* actúa como:
 
-* si ejecución termina en `completed` o `partial`
+  * orquestador de decisiones
+  * pasarela de contexto hacia recovery
 
-  * pasa por el nuevo sistema de validación
-* si ejecución termina en `failed` o `rejected`
+Se ha mejorado únicamente:
 
-  * no se valida
-  * va directamente a recovery
-
-Eso elimina la necesidad de seguir manteniendo el viejo puente `executor → validator`.
-
----
-
-# 🧩 Estructura real de validación
-
-La estructura a reflejar en README debe ser la real, no una idealizada. A día de hoy, la parte nueva gira alrededor de:
-
-```text
-app/services/validation/
-├── __init__.py
-├── contracts.py
-├── dispatcher.py
-├── service.py
-├── evidence/
-│   ├── __init__.py
-│   └── package_builder.py
-├── router/
-│   ├── __init__.py
-│   ├── prompt.py
-│   ├── registry.py
-│   ├── schemas.py
-│   └── service.py
-└── validators/
-    ├── __init__.py
-    └── code/
-        ├── __init__.py
-        ├── capabilities.py
-        ├── prompt.py
-        ├── renderer.py
-        ├── schemas.py
-        └── service.py
-```
+* la **forma en la que expone la validación**
+* sin introducir lógica adicional
 
 ---
 
-# 🧪 Estado de los tests
+### 6. Endurecimiento mediante tests
 
-La suite ha quedado alineada con la semántica nueva y ya no depende del sistema viejo para pasar.
+Se han añadido tests clave para proteger el nuevo comportamiento:
 
-Además, se han añadido tests de validación y tests verticales del flujo ejecución → validación.
+* validación parcial con gap → señal estructurada correcta
+* manual review → preservación de señal
+* artifact malformado → resiliencia del sistema
 
-Actualmente hay cobertura sobre:
-
-* router de validación
-* registro/catálogo del router
-* builder del `TaskValidationInput`
-* validador de código
-* `validation/service.py`
-* integración de `task_execution_service.py` con el nuevo flujo
-* tests verticales del camino ejecución → validación
-
-Esto deja el sistema en una posición mucho más fiable que antes.
+Todos los tests actuales están en verde.
 
 ---
 
-# 🧠 Principios que quedan fijados
+## 🧱 Arquitectura actual (resumen)
 
-## 1. Contratos comunes
+### Componentes principales
 
-Siempre:
+* `task_execution_service`
 
-* entrada: `TaskValidationInput`
-* salida: `ValidationResult`
+  * orquesta ejecución, validación, persistencia y cierre
 
-## 2. Consumo especializado
+* `validation.service`
 
-Cada validador decide:
+  * enruta y ejecuta validadores
+  * no persiste
 
-* qué evidencia puede consumir
-* cómo la representa para su modelo
-* qué deja fuera y reporta como no consumido
+* `execution_engine`
 
-## 3. Guardrails por validador
-
-Los validadores no deben consumir cualquier formato indiscriminadamente.
-
-Esto es importante porque:
-
-* evita errores de modalidad
-* prepara el futuro encadenamiento entre validadores
-* deja trazabilidad sobre evidencia consumida vs no consumida
-
-## 4. Evidence-first
-
-La validación razona sobre:
-
-* evidencia real producida por ejecución
-* no sobre adaptadores legacy
-* no sobre contratos puente del sistema viejo
-
----
-
-# 🚀 Siguientes pasos propuestos
-
-## 🔴 Prioridad 1 — cerrar limpieza restante del executor y schemas asociados
-
-Queda rematar restos pequeños en:
-
-* `executor.py`
-* `code_execution.py`
-
-El objetivo es cerrar por completo cualquier dependencia semántica sobrante de esta transición.
-
----
-
-## 🔴 Prioridad 2 — endurecer aún más la suite
-
-Aunque la limpieza principal ya se ha hecho, conviene seguir reforzando:
-
-* factories estrictamente canónicas
-* cero auto-normalización silenciosa
-* eliminación total de vocabulario viejo en tests
-* helpers explícitos si alguna compatibilidad temporal sigue existiendo
-
-Esto sigue siendo prioritario, porque una suite permisiva vuelve a esconder deuda.
-
----
-
-## 🔴 Prioridad 3 — mejorar `request_adapter`
-
-Ahora mismo el adapter sigue infraalimentando al engine.
-
-Debería enriquecerse con:
-
-* contexto de runs previos
-* artifacts relevantes recientes
-* señales útiles del proyecto
-* mejor selección de archivos candidatos
-* mejor selección de related tasks
-
-Esto no es un refactor estético. Es una mejora real de capacidad del sistema.
-
----
-
-## 🟡 Prioridad 4 — preparar el camino para validadores adicionales
-
-El sistema ya está diseñado para crecer hacia:
-
-* validadores de imágenes
-* validadores documentales
-* otros dominios futuros
-
-Pero antes de abrir esa fase hay que mantener firme la base actual:
-
-* contratos comunes
-* capabilities por validador
-* consumo especializado de evidencia
-* `ValidationResult` preparado para validación parcial y continuación futura
-
----
-
-## 🟡 Prioridad 5 — evolucionar hacia orquestación multi-validador
-
-Todavía no se ha implementado el orquestador completo, pero el sistema ya apunta en esa dirección.
-
-La idea futura sería:
-
-* un validador consume la parte de evidencia que soporta
-* reporta lo no consumido
-* el orquestador deriva el resto a otro validador
-* compone el resultado final de validación
-
----
-
-## 🔵 Prioridad 6 — partir servicios grandes
-
-Cuando se cierre esta fase de limpieza, sigue siendo recomendable atacar:
+  * ejecuta tareas con contexto
 
 * `post_batch_service`
-* `project_workflow_service`
 
-No por estética, sino por robustez y control.
+  * decide avance del plan tras cada batch
+
+* `recovery_client`
+
+  * decide acciones de recuperación basadas en evidencia
+
+* `evaluation_service`
+
+  * produce visión global del estado del batch
 
 ---
 
-# ✅ Resumen honesto
+## ⚠️ Limitaciones actuales
 
-A estas alturas:
+Aunque el sistema es coherente, aún hay áreas a mejorar:
 
-* la migración semántica va mucho mejor encaminada
-* la suite ya no oculta tanto legacy como antes
-* el sistema nuevo de validación existe de verdad
-* `task_execution_service` ya usa el flujo nuevo en el camino principal
-* las piezas viejas principales de validación se han podido retirar
+### 1. Contexto pobre en ejecución (`request_adapter`)
 
-Lo que queda no es rehacer la base, sino:
+El execution engine recibe:
 
-* cerrar restos
-* endurecer contratos y tests
-* enriquecer contexto de ejecución
-* preparar la siguiente fase con cimientos sólidos
+* poco contexto histórico
+* pocos artifacts relevantes
+* poca memoria operativa
+
+Esto limita la calidad real de ejecución.
+
+---
+
+### 2. Fragmentación transaccional
+
+Existen múltiples commits en:
+
+* execution runs
+* task status
+* artifacts
+
+Esto puede generar estados intermedios inconsistentes.
+
+---
+
+### 3. Validación infrautilizada en evaluación
+
+`evaluation_service` utiliza la validación como:
+
+* extracto textual
+
+pero no como señal estructurada rica.
+
+Esto es intencionado en parte, pero puede refinarse.
+
+---
+
+## 🚀 Siguientes pasos recomendados
+
+### 🔴 Prioridad alta
+
+#### 1. Mejorar `request_adapter`
+
+Objetivo: enriquecer el contexto del execution engine.
+
+Incluir:
+
+* artifacts recientes relevantes
+* runs previos
+* contexto de validaciones anteriores
+* memoria del proyecto
+* estado real del workspace
+
+Esto impacta directamente en la calidad del sistema.
+
+---
+
+### 🟠 Prioridad media
+
+#### 2. Tests de invariantes del sistema
+
+Añadir tests que garanticen:
+
+* siempre existe `validation_result` tras ejecución válida
+* no hay duplicidad de artifacts por run
+* `decision=completed` implica promoción real
+* coherencia entre estado de task y validation
+
+---
+
+#### 3. Revisar consistencia transaccional
+
+Reducir ventanas de inconsistencia entre:
+
+* execution_run
+* task
+* artifacts
+* workspace
+
+---
+
+### 🟡 Prioridad baja
+
+#### 4. Refinar evaluación
+
+Opcional:
+
+* incluir resumen estructurado de validación
+* mejorar señal para el evaluador
+
+Sin convertirlo en un meta-validador.
+
+---
+
+#### 5. Portabilidad de storage/config
+
+Eliminar dependencias de entorno local:
+
+* paths hardcodeados
+* configuración no portable
+
+---
+
+## 🧭 Conclusión
+
+El sistema ha pasado de:
+
+> arquitectura en transición con ambigüedad semántica
+
+a:
+
+> sistema coherente con flujo canónico cerrado y validación como evidencia central
+
+El siguiente reto ya no es limpiar, sino:
+
+👉 **aumentar capacidad operativa real (execution quality) sin romper la coherencia alcanzada**
+
+---
+
+## 🧪 Estado actual
+
+* ✅ Tests en verde
+* ✅ Flujo canónico cerrado
+* ✅ Validación integrada end-to-end
+* ⚠️ Capacidad del execution engine mejorable
+* ⚠️ Transacciones no completamente robustas
+
+---
+
+Si continúas en esta línea, el siguiente salto de calidad no vendrá de refactors internos, sino de:
+
+👉 **mejorar lo que el sistema “sabe” cuando ejecuta**
