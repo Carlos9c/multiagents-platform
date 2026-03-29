@@ -112,6 +112,68 @@ def _build_validator_input(
     )
 
 
+def _assert_validation_result_consistency(
+    *,
+    routing_decision: ResolvedValidationIntent,
+    validation_result: ValidationResult,
+) -> None:
+    if validation_result.validator_key != routing_decision.validator_key:
+        raise ValidationServiceError(
+            "Validation result validator_key does not match the resolved validation route."
+        )
+
+    if validation_result.discipline != routing_decision.discipline:
+        raise ValidationServiceError(
+            "Validation result discipline does not match the resolved validation route."
+        )
+
+    decision = validation_result.decision
+    final_task_status = validation_result.final_task_status
+
+    if decision == "completed":
+        if final_task_status != "completed":
+            raise ValidationServiceError(
+                "Validation result decision='completed' must produce final_task_status='completed'."
+            )
+        if validation_result.manual_review_required:
+            raise ValidationServiceError(
+                "Validation result decision='completed' cannot require manual review."
+            )
+        if validation_result.followup_validation_required:
+            raise ValidationServiceError(
+                "Validation result decision='completed' cannot require follow-up validation."
+            )
+        if validation_result.missing_scope:
+            raise ValidationServiceError(
+                "Validation result decision='completed' cannot report missing_scope."
+            )
+
+    elif decision == "partial":
+        if final_task_status != "partial":
+            raise ValidationServiceError(
+                "Validation result decision='partial' must produce final_task_status='partial'."
+            )
+
+    elif decision == "failed":
+        if final_task_status != "failed":
+            raise ValidationServiceError(
+                "Validation result decision='failed' must produce final_task_status='failed'."
+            )
+
+    elif decision == "manual_review":
+        if final_task_status != "failed":
+            raise ValidationServiceError(
+                "Validation result decision='manual_review' must produce final_task_status='failed'."
+            )
+        if not validation_result.manual_review_required:
+            raise ValidationServiceError(
+                "Validation result decision='manual_review' must set manual_review_required=True."
+            )
+
+    else:
+        raise ValidationServiceError(f"Unsupported validation decision '{decision}'.")
+
+
 def validate_execution_result(
     *,
     task: Task,
@@ -145,6 +207,11 @@ def validate_execution_result(
     validation_result = dispatch_validation(
         intent=routing_decision,
         validation_input=validator_input,
+    )
+
+    _assert_validation_result_consistency(
+        routing_decision=routing_decision,
+        validation_result=validation_result,
     )
 
     return ValidationServiceResult(

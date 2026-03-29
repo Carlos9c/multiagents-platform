@@ -1,3 +1,5 @@
+import pytest
+
 from app.execution_engine.contracts import (
     CHANGE_TYPE_MODIFIED,
     EXECUTION_DECISION_COMPLETED,
@@ -11,6 +13,7 @@ from app.execution_engine.contracts import (
 )
 from app.services.validation.contracts import ValidationResult
 from app.services.validation.service import (
+    ValidationServiceError,
     build_validation_routing_input,
     validate_execution_result,
 )
@@ -278,3 +281,539 @@ def test_validate_execution_result_orchestrates_route_build_and_dispatch(
     assert captured["routing_input"].task.task_id == task.id
     assert captured["validation_input"].task.task_id == task.id
     assert captured["validation_input"].evidence_package.evidence_items
+
+
+def test_validate_execution_result_rejects_completed_with_failed_final_status(
+    tmp_path,
+    monkeypatch,
+    db_session,
+    make_project,
+    make_task,
+    make_execution_run,
+):
+    project = make_project()
+    task = make_task(
+        project_id=project.id,
+        title="Implement service",
+        executor_type="execution_engine",
+        planning_level="atomic",
+    )
+    execution_run = make_execution_run(
+        task_id=task.id,
+        status="succeeded",
+    )
+
+    workspace_dir = tmp_path / "workspace"
+    source_dir = tmp_path / "source"
+    workspace_dir.mkdir()
+    source_dir.mkdir()
+    (workspace_dir / "app_service.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
+
+    execution_request = ExecutionRequest(
+        task_id=task.id,
+        project_id=project.id,
+        execution_run_id=execution_run.id,
+        executor_type="execution_engine",
+        task_title=task.title,
+        task_description=task.description,
+        task_summary=task.summary,
+        objective=task.objective,
+        acceptance_criteria=task.acceptance_criteria,
+        technical_constraints=task.technical_constraints,
+        out_of_scope=task.out_of_scope,
+        allowed_paths=["app_service.py"],
+        context=ProjectExecutionContext(
+            project_id=project.id,
+            workspace_path=str(workspace_dir),
+            source_path=str(source_dir),
+            relevant_files=[],
+            key_decisions=[],
+            related_tasks=[],
+        ),
+    )
+
+    execution_result = ExecutionResult(
+        task_id=task.id,
+        decision=EXECUTION_DECISION_COMPLETED,
+        summary="Execution completed.",
+        details="Service updated.",
+        completed_scope="Updated service behavior.",
+        remaining_scope=None,
+        blockers_found=[],
+        validation_notes=["Execution finished normally."],
+        output_snapshot="done",
+        execution_agent_sequence=["planner", "editor"],
+        evidence=ExecutionEvidence(
+            changed_files=[
+                ChangedFile(
+                    path="app_service.py",
+                    change_type=CHANGE_TYPE_MODIFIED,
+                )
+            ],
+            commands=[
+                CommandExecution(
+                    command="pytest -q",
+                    exit_code=0,
+                    stdout="1 passed",
+                    stderr="",
+                )
+            ],
+            notes=[],
+            artifacts_created=[],
+        ),
+    )
+
+    def fake_resolve_validation_route(*, routing_input):
+        from app.services.validation.contracts import ResolvedValidationIntent
+
+        return ResolvedValidationIntent(
+            validator_key="code_task_validator",
+            discipline="code",
+            validation_mode="post_execution",
+            requires_workspace=True,
+            requires_artifacts=True,
+            requires_changed_files=True,
+            requires_commands=True,
+            requires_execution_context=True,
+            requires_output_snapshot=True,
+            requires_agent_sequence=True,
+            requires_file_reading=True,
+            notes=[],
+        )
+
+    def fake_dispatch_validation(*, intent, validation_input):
+        return ValidationResult(
+            validator_key="code_task_validator",
+            discipline="code",
+            decision="completed",
+            summary="Validation completed successfully.",
+            validated_scope="Updated service behavior.",
+            missing_scope=None,
+            blockers=[],
+            manual_review_required=False,
+            final_task_status="failed",
+            artifacts_created=[],
+            validated_evidence_ids=["produced_file:app_service.py"],
+            unconsumed_evidence_ids=[],
+            followup_validation_required=False,
+            recommended_next_validator_keys=[],
+            partial_validation_summary=None,
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        "app.services.validation.service.resolve_validation_route",
+        fake_resolve_validation_route,
+    )
+    monkeypatch.setattr(
+        "app.services.validation.service.dispatch_validation",
+        fake_dispatch_validation,
+    )
+
+    with pytest.raises(
+        ValidationServiceError,
+        match="decision='completed'.*final_task_status='completed'",
+    ):
+        validate_execution_result(
+            task=task,
+            execution_request=execution_request,
+            execution_result=execution_result,
+            execution_run=execution_run,
+            persisted_artifacts=[],
+        )
+
+
+def test_validate_execution_result_rejects_completed_with_followup_validation_required(
+    tmp_path,
+    monkeypatch,
+    db_session,
+    make_project,
+    make_task,
+    make_execution_run,
+):
+    project = make_project()
+    task = make_task(
+        project_id=project.id,
+        title="Implement service",
+        executor_type="execution_engine",
+        planning_level="atomic",
+    )
+    execution_run = make_execution_run(task_id=task.id, status="succeeded")
+
+    workspace_dir = tmp_path / "workspace"
+    source_dir = tmp_path / "source"
+    workspace_dir.mkdir()
+    source_dir.mkdir()
+    (workspace_dir / "app_service.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
+
+    execution_request = ExecutionRequest(
+        task_id=task.id,
+        project_id=project.id,
+        execution_run_id=execution_run.id,
+        executor_type="execution_engine",
+        task_title=task.title,
+        task_description=task.description,
+        task_summary=task.summary,
+        objective=task.objective,
+        acceptance_criteria=task.acceptance_criteria,
+        technical_constraints=task.technical_constraints,
+        out_of_scope=task.out_of_scope,
+        allowed_paths=["app_service.py"],
+        context=ProjectExecutionContext(
+            project_id=project.id,
+            workspace_path=str(workspace_dir),
+            source_path=str(source_dir),
+            relevant_files=[],
+            key_decisions=[],
+            related_tasks=[],
+        ),
+    )
+
+    execution_result = ExecutionResult(
+        task_id=task.id,
+        decision=EXECUTION_DECISION_COMPLETED,
+        summary="Execution completed.",
+        details="Service updated.",
+        completed_scope="Updated service behavior.",
+        remaining_scope=None,
+        blockers_found=[],
+        validation_notes=[],
+        output_snapshot="done",
+        execution_agent_sequence=["planner", "editor"],
+        evidence=ExecutionEvidence(
+            changed_files=[ChangedFile(path="app_service.py", change_type=CHANGE_TYPE_MODIFIED)],
+            commands=[
+                CommandExecution(
+                    command="pytest -q",
+                    exit_code=0,
+                    stdout="1 passed",
+                    stderr="",
+                )
+            ],
+            notes=[],
+            artifacts_created=[],
+        ),
+    )
+
+    def fake_resolve_validation_route(*, routing_input):
+        from app.services.validation.contracts import ResolvedValidationIntent
+
+        return ResolvedValidationIntent(
+            validator_key="code_task_validator",
+            discipline="code",
+            validation_mode="post_execution",
+            requires_workspace=True,
+            requires_artifacts=True,
+            requires_changed_files=True,
+            requires_commands=True,
+            requires_execution_context=True,
+            requires_output_snapshot=True,
+            requires_agent_sequence=True,
+            requires_file_reading=True,
+            notes=[],
+        )
+
+    def fake_dispatch_validation(*, intent, validation_input):
+        return ValidationResult(
+            validator_key="code_task_validator",
+            discipline="code",
+            decision="completed",
+            summary="Validation completed successfully.",
+            validated_scope="Updated service behavior.",
+            missing_scope=None,
+            blockers=[],
+            manual_review_required=False,
+            final_task_status="completed",
+            artifacts_created=[],
+            validated_evidence_ids=["produced_file:app_service.py"],
+            unconsumed_evidence_ids=[],
+            followup_validation_required=True,
+            recommended_next_validator_keys=[],
+            partial_validation_summary=None,
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        "app.services.validation.service.resolve_validation_route",
+        fake_resolve_validation_route,
+    )
+    monkeypatch.setattr(
+        "app.services.validation.service.dispatch_validation",
+        fake_dispatch_validation,
+    )
+
+    with pytest.raises(
+        ValidationServiceError,
+        match="decision='completed'.*follow-up validation",
+    ):
+        validate_execution_result(
+            task=task,
+            execution_request=execution_request,
+            execution_result=execution_result,
+            execution_run=execution_run,
+            persisted_artifacts=[],
+        )
+
+
+def test_validate_execution_result_rejects_manual_review_without_manual_review_required(
+    tmp_path,
+    monkeypatch,
+    db_session,
+    make_project,
+    make_task,
+    make_execution_run,
+):
+    project = make_project()
+    task = make_task(
+        project_id=project.id,
+        title="Implement service",
+        executor_type="execution_engine",
+        planning_level="atomic",
+    )
+    execution_run = make_execution_run(task_id=task.id, status="succeeded")
+
+    workspace_dir = tmp_path / "workspace"
+    source_dir = tmp_path / "source"
+    workspace_dir.mkdir()
+    source_dir.mkdir()
+    (workspace_dir / "app_service.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
+
+    execution_request = ExecutionRequest(
+        task_id=task.id,
+        project_id=project.id,
+        execution_run_id=execution_run.id,
+        executor_type="execution_engine",
+        task_title=task.title,
+        task_description=task.description,
+        task_summary=task.summary,
+        objective=task.objective,
+        acceptance_criteria=task.acceptance_criteria,
+        technical_constraints=task.technical_constraints,
+        out_of_scope=task.out_of_scope,
+        allowed_paths=["app_service.py"],
+        context=ProjectExecutionContext(
+            project_id=project.id,
+            workspace_path=str(workspace_dir),
+            source_path=str(source_dir),
+            relevant_files=[],
+            key_decisions=[],
+            related_tasks=[],
+        ),
+    )
+
+    execution_result = ExecutionResult(
+        task_id=task.id,
+        decision=EXECUTION_DECISION_COMPLETED,
+        summary="Execution completed.",
+        details="Service updated.",
+        completed_scope="Updated service behavior.",
+        remaining_scope=None,
+        blockers_found=[],
+        validation_notes=[],
+        output_snapshot="done",
+        execution_agent_sequence=["planner", "editor"],
+        evidence=ExecutionEvidence(
+            changed_files=[ChangedFile(path="app_service.py", change_type=CHANGE_TYPE_MODIFIED)],
+            commands=[
+                CommandExecution(
+                    command="pytest -q",
+                    exit_code=0,
+                    stdout="1 passed",
+                    stderr="",
+                )
+            ],
+            notes=[],
+            artifacts_created=[],
+        ),
+    )
+
+    def fake_resolve_validation_route(*, routing_input):
+        from app.services.validation.contracts import ResolvedValidationIntent
+
+        return ResolvedValidationIntent(
+            validator_key="code_task_validator",
+            discipline="code",
+            validation_mode="post_execution",
+            requires_workspace=True,
+            requires_artifacts=True,
+            requires_changed_files=True,
+            requires_commands=True,
+            requires_execution_context=True,
+            requires_output_snapshot=True,
+            requires_agent_sequence=True,
+            requires_file_reading=True,
+            notes=[],
+        )
+
+    def fake_dispatch_validation(*, intent, validation_input):
+        return ValidationResult(
+            validator_key="code_task_validator",
+            discipline="code",
+            decision="manual_review",
+            summary="Need manual review.",
+            validated_scope=None,
+            missing_scope="Validation uncertain.",
+            blockers=[],
+            manual_review_required=False,
+            final_task_status="failed",
+            artifacts_created=[],
+            validated_evidence_ids=[],
+            unconsumed_evidence_ids=[],
+            followup_validation_required=False,
+            recommended_next_validator_keys=[],
+            partial_validation_summary=None,
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        "app.services.validation.service.resolve_validation_route",
+        fake_resolve_validation_route,
+    )
+    monkeypatch.setattr(
+        "app.services.validation.service.dispatch_validation",
+        fake_dispatch_validation,
+    )
+
+    with pytest.raises(
+        ValidationServiceError,
+        match="manual_review.*manual_review_required=True",
+    ):
+        validate_execution_result(
+            task=task,
+            execution_request=execution_request,
+            execution_result=execution_result,
+            execution_run=execution_run,
+            persisted_artifacts=[],
+        )
+
+
+def test_validate_execution_result_rejects_validator_key_mismatch(
+    tmp_path,
+    monkeypatch,
+    db_session,
+    make_project,
+    make_task,
+    make_execution_run,
+):
+    project = make_project()
+    task = make_task(
+        project_id=project.id,
+        title="Implement service",
+        executor_type="execution_engine",
+        planning_level="atomic",
+    )
+    execution_run = make_execution_run(task_id=task.id, status="succeeded")
+
+    workspace_dir = tmp_path / "workspace"
+    source_dir = tmp_path / "source"
+    workspace_dir.mkdir()
+    source_dir.mkdir()
+    (workspace_dir / "app_service.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
+
+    execution_request = ExecutionRequest(
+        task_id=task.id,
+        project_id=project.id,
+        execution_run_id=execution_run.id,
+        executor_type="execution_engine",
+        task_title=task.title,
+        task_description=task.description,
+        task_summary=task.summary,
+        objective=task.objective,
+        acceptance_criteria=task.acceptance_criteria,
+        technical_constraints=task.technical_constraints,
+        out_of_scope=task.out_of_scope,
+        allowed_paths=["app_service.py"],
+        context=ProjectExecutionContext(
+            project_id=project.id,
+            workspace_path=str(workspace_dir),
+            source_path=str(source_dir),
+            relevant_files=[],
+            key_decisions=[],
+            related_tasks=[],
+        ),
+    )
+
+    execution_result = ExecutionResult(
+        task_id=task.id,
+        decision=EXECUTION_DECISION_COMPLETED,
+        summary="Execution completed.",
+        details="Service updated.",
+        completed_scope="Updated service behavior.",
+        remaining_scope=None,
+        blockers_found=[],
+        validation_notes=[],
+        output_snapshot="done",
+        execution_agent_sequence=["planner", "editor"],
+        evidence=ExecutionEvidence(
+            changed_files=[ChangedFile(path="app_service.py", change_type=CHANGE_TYPE_MODIFIED)],
+            commands=[
+                CommandExecution(
+                    command="pytest -q",
+                    exit_code=0,
+                    stdout="1 passed",
+                    stderr="",
+                )
+            ],
+            notes=[],
+            artifacts_created=[],
+        ),
+    )
+
+    def fake_resolve_validation_route(*, routing_input):
+        from app.services.validation.contracts import ResolvedValidationIntent
+
+        return ResolvedValidationIntent(
+            validator_key="code_task_validator",
+            discipline="code",
+            validation_mode="post_execution",
+            requires_workspace=True,
+            requires_artifacts=True,
+            requires_changed_files=True,
+            requires_commands=True,
+            requires_execution_context=True,
+            requires_output_snapshot=True,
+            requires_agent_sequence=True,
+            requires_file_reading=True,
+            notes=[],
+        )
+
+    def fake_dispatch_validation(*, intent, validation_input):
+        return ValidationResult(
+            validator_key="other_validator",
+            discipline="code",
+            decision="completed",
+            summary="Validation completed successfully.",
+            validated_scope="Updated service behavior.",
+            missing_scope=None,
+            blockers=[],
+            manual_review_required=False,
+            final_task_status="completed",
+            artifacts_created=[],
+            validated_evidence_ids=["produced_file:app_service.py"],
+            unconsumed_evidence_ids=[],
+            followup_validation_required=False,
+            recommended_next_validator_keys=[],
+            partial_validation_summary=None,
+            metadata={},
+        )
+
+    monkeypatch.setattr(
+        "app.services.validation.service.resolve_validation_route",
+        fake_resolve_validation_route,
+    )
+    monkeypatch.setattr(
+        "app.services.validation.service.dispatch_validation",
+        fake_dispatch_validation,
+    )
+
+    with pytest.raises(
+        ValidationServiceError,
+        match="validator_key does not match",
+    ):
+        validate_execution_result(
+            task=task,
+            execution_request=execution_request,
+            execution_result=execution_result,
+            execution_run=execution_run,
+            persisted_artifacts=[],
+        )
