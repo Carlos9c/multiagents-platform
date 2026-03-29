@@ -36,10 +36,7 @@ def build_selected_file_context(
             blocks.append("")
             continue
 
-        if (
-            not file_selection.include_full_content
-            and len(content) > max_chars_per_file
-        ):
+        if not file_selection.include_full_content and len(content) > max_chars_per_file:
             content = content[:max_chars_per_file] + "\n...[truncated]"
 
         blocks.append("CONTENT_START")

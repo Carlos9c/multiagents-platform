@@ -212,9 +212,11 @@ def _normalize_decision(
     return NextActionDecision(
         action=fallback_action,
         rationale=rationale_map[fallback_action],
-        target_paths=list(state.pending_operation_paths)
-        if fallback_action == ACTION_APPLY_FILE_OPERATIONS
-        else [],
+        target_paths=(
+            list(state.pending_operation_paths)
+            if fallback_action == ACTION_APPLY_FILE_OPERATIONS
+            else []
+        ),
         command=None,
         expected_outcome=None,
         risk_flags=list(decision.risk_flags) + ["action_overridden_by_phase_policy"],
@@ -272,10 +274,7 @@ class ExecutionOrchestrator:
                 decision=raw_decision,
             )
 
-            if (
-                decision.action != raw_decision.action
-                or decision.command != raw_decision.command
-            ):
+            if decision.action != raw_decision.action or decision.command != raw_decision.command:
                 logger.warning(
                     "execution_orchestrator_action_overridden task_id=%s phase=%s original=%s normalized=%s",
                     request.task_id,
@@ -315,12 +314,8 @@ class ExecutionOrchestrator:
                     payload={
                         "decision": decision.model_dump(),
                         "phase": resolution_state.phase,
-                        "pending_operation_paths": list(
-                            resolution_state.pending_operation_paths
-                        ),
-                        "applied_operation_paths": list(
-                            resolution_state.applied_operation_paths
-                        ),
+                        "pending_operation_paths": list(resolution_state.pending_operation_paths),
+                        "applied_operation_paths": list(resolution_state.applied_operation_paths),
                     },
                 )
                 resolution_state.evidence.notes.extend(
@@ -402,12 +397,8 @@ class ExecutionOrchestrator:
                         "subagent_name": step.subagent_name,
                         "kind": step.kind,
                         "phase": resolution_state.phase,
-                        "pending_operation_paths": list(
-                            resolution_state.pending_operation_paths
-                        ),
-                        "applied_operation_paths": list(
-                            resolution_state.applied_operation_paths
-                        ),
+                        "pending_operation_paths": list(resolution_state.pending_operation_paths),
+                        "applied_operation_paths": list(resolution_state.applied_operation_paths),
                     },
                 )
 
@@ -429,9 +420,7 @@ class ExecutionOrchestrator:
                     details="The orchestrator selected an unregistered subagent.",
                     remaining_scope=request.task_description or request.task_title,
                     blockers_found=[str(exc)],
-                    validation_notes=[
-                        "Registry misconfiguration in orchestrator loop."
-                    ],
+                    validation_notes=["Registry misconfiguration in orchestrator loop."],
                     execution_agent_sequence=list(executed_subagents),
                     evidence=resolution_state.evidence,
                 )
@@ -475,9 +464,7 @@ class ExecutionOrchestrator:
             task_id=request.task_id,
             payload={"max_steps": self.budget.max_steps},
         )
-        resolution_state.evidence.notes.extend(
-            resolution_state.orchestrator_trace.to_notes()
-        )
+        resolution_state.evidence.notes.extend(resolution_state.orchestrator_trace.to_notes())
 
         return ExecutionResult(
             task_id=request.task_id,
@@ -518,9 +505,7 @@ class ExecutionOrchestrator:
                 rejection_reason=str(exc),
                 remaining_scope=request.task_description or request.task_title,
                 blockers_found=["invalid_next_action_output"],
-                validation_notes=[
-                    "The orchestrator returned invalid structured output."
-                ],
+                validation_notes=["The orchestrator returned invalid structured output."],
                 failure_code="invalid_next_action_output",
             ) from exc
 

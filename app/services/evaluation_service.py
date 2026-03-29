@@ -57,9 +57,7 @@ def _batch_to_dict(batch: ExecutionBatch) -> dict[str, Any]:
 
 
 def _get_checkpoint_or_raise(plan: ExecutionPlan, checkpoint_id: str):
-    checkpoint = next(
-        (cp for cp in plan.checkpoints if cp.checkpoint_id == checkpoint_id), None
-    )
+    checkpoint = next((cp for cp in plan.checkpoints if cp.checkpoint_id == checkpoint_id), None)
     if not checkpoint:
         raise EvaluationServiceError(
             f"Checkpoint '{checkpoint_id}' not found in execution plan version {plan.plan_version}"
@@ -67,9 +65,7 @@ def _get_checkpoint_or_raise(plan: ExecutionPlan, checkpoint_id: str):
     return checkpoint
 
 
-def _get_checkpoint_batch_index_or_raise(
-    plan: ExecutionPlan, checkpoint_id: str
-) -> int:
+def _get_checkpoint_batch_index_or_raise(plan: ExecutionPlan, checkpoint_id: str) -> int:
     checkpoint = _get_checkpoint_or_raise(plan, checkpoint_id)
     checkpoint_batch_index = next(
         (
@@ -225,16 +221,12 @@ def _task_to_stage_evidence(
             {
                 "artifact_id": validation_artifact.id,
                 "artifact_type": validation_artifact.artifact_type,
-                "content_excerpt": _safe_excerpt(
-                    validation_artifact.content, limit=1800
-                ),
+                "content_excerpt": _safe_excerpt(validation_artifact.content, limit=1800),
             }
             if validation_artifact
             else None
         ),
-        "artifact_summaries": [
-            _artifact_to_summary_dict(artifact) for artifact in task_artifacts
-        ],
+        "artifact_summaries": [_artifact_to_summary_dict(artifact) for artifact in task_artifacts],
     }
 
 
@@ -273,9 +265,7 @@ def _build_stage_scope_summary(
         "plan_version": plan.plan_version,
         "sequencing_rationale": plan.sequencing_rationale,
         "blocked_task_ids": plan.blocked_task_ids,
-        "batches_completed_or_evaluated_now": [
-            _batch_to_dict(batch) for batch in current_batches
-        ],
+        "batches_completed_or_evaluated_now": [_batch_to_dict(batch) for batch in current_batches],
         "remaining_batches": [_batch_to_dict(batch) for batch in remaining_batches],
         "uncertainties": plan.uncertainties,
     }
@@ -343,8 +333,7 @@ def _build_recovery_context_summary(recovery_context: RecoveryContext | None) ->
             for decision in resolved_recovery_context.recovery_decisions
         ],
         "open_issues": [
-            issue.model_dump(mode="json")
-            for issue in resolved_recovery_context.open_issues
+            issue.model_dump(mode="json") for issue in resolved_recovery_context.open_issues
         ],
         "recovery_created_tasks": [
             created.model_dump(mode="json")
@@ -427,8 +416,7 @@ def _build_checkpoint_artifact_window_summary(
     payload = {
         "artifact_count": len(artifacts_in_checkpoint_window),
         "artifacts": [
-            _artifact_to_summary_dict(artifact)
-            for artifact in artifacts_in_checkpoint_window
+            _artifact_to_summary_dict(artifact) for artifact in artifacts_in_checkpoint_window
         ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -450,26 +438,18 @@ def _build_additional_context(
             "name": project.name,
             "goal_or_description": project.description or project.name,
         },
-        "project_operational_context": project_operational_context.model_dump(
-            mode="json"
-        ),
+        "project_operational_context": project_operational_context.model_dump(mode="json"),
         "checkpoint_window": {
             "executed_task_ids": [task.id for task in executed_tasks],
-            "artifact_ids": [
-                artifact.id for artifact in artifacts_in_checkpoint_window
-            ],
+            "artifact_ids": [artifact.id for artifact in artifacts_in_checkpoint_window],
         },
         "next_batch": _batch_to_dict(next_batch) if next_batch else None,
         "recovery_summary": {
             "created_task_ids": [
                 created.created_task_id
-                for created in (
-                    recovery_context or RecoveryContext()
-                ).recovery_created_tasks
+                for created in (recovery_context or RecoveryContext()).recovery_created_tasks
             ],
-            "open_issue_count": len(
-                (recovery_context or RecoveryContext()).open_issues
-            ),
+            "open_issue_count": len((recovery_context or RecoveryContext()).open_issues),
         },
         "pending_task_ids": [task.id for task in pending_tasks],
     }
@@ -542,9 +522,7 @@ def build_stage_evaluation_request(
             executed_tasks=executed_tasks,
         ),
         "recovery_context_summary": _build_recovery_context_summary(recovery_context),
-        "recovery_tasks_created_summary": _build_recovery_tasks_created_summary(
-            recovery_context
-        ),
+        "recovery_tasks_created_summary": _build_recovery_tasks_created_summary(recovery_context),
         "remaining_batches_summary": _build_remaining_batches_summary(
             plan=plan,
             checkpoint_batch_index=checkpoint_batch_index,

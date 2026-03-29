@@ -35,9 +35,7 @@ def _patch_workspace_runtime(monkeypatch, *, promoted_state: dict | None = None)
                 outputs_dir=".",
             ),
             promote_workspace_to_source=lambda **kwargs: (
-                promoted_state.__setitem__("called", True)
-                if promoted_state is not None
-                else None
+                promoted_state.__setitem__("called", True) if promoted_state is not None else None
             ),
         )
 
@@ -55,9 +53,7 @@ def _patch_execution_request(
     allowed_paths: list[str],
     relevant_files: list[str],
 ):
-    def _fake_build_execution_request(
-        db, task, execution_run_id, resolved_executor_type
-    ):
+    def _fake_build_execution_request(db, task, execution_run_id, resolved_executor_type):
         return ExecutionRequest(
             task_id=task.id,
             project_id=task.project_id,
@@ -133,12 +129,8 @@ def _patch_validation_service_flow(
             decision=validation_decision,
             summary="Validation summary.",
             findings=[],
-            validated_scope="Validated scope."
-            if validation_decision == "completed"
-            else None,
-            missing_scope="Missing scope."
-            if validation_decision != "completed"
-            else None,
+            validated_scope="Validated scope." if validation_decision == "completed" else None,
+            missing_scope="Missing scope." if validation_decision != "completed" else None,
             blockers=[],
             manual_review_required=(validation_decision == "manual_review"),
             final_task_status=final_task_status,
@@ -279,9 +271,7 @@ def test_execute_task_sync_vertical_flow_completed_validation_completes_task(
     assert captured["routing_input"].task.task_id == task.id
     assert captured["validation_input"].task.task_id == task.id
     assert captured["validation_input"].evidence_package.evidence_items
-    assert captured["validation_input"].request_context.allowed_paths == [
-        "app_service.py"
-    ]
+    assert captured["validation_input"].request_context.allowed_paths == ["app_service.py"]
 
 
 def test_execute_task_sync_vertical_flow_partial_validation_marks_task_partial(
@@ -383,6 +373,4 @@ def test_execute_task_sync_vertical_flow_partial_validation_marks_task_partial(
     assert captured["routing_input"].task.task_id == task.id
     assert captured["validation_input"].task.task_id == task.id
     assert captured["validation_input"].evidence_package.evidence_items
-    assert captured["validation_input"].request_context.allowed_paths == [
-        "app_service.py"
-    ]
+    assert captured["validation_input"].request_context.allowed_paths == ["app_service.py"]

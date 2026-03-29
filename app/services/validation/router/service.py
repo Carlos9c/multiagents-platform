@@ -56,9 +56,7 @@ def resolve_validation_route(
     routing_input: ValidationRoutingInput,
 ) -> ValidationRoutingDecision:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        ValidationRoutingDecision.model_json_schema()
-    )
+    strict_schema = to_openai_strict_json_schema(ValidationRoutingDecision.model_json_schema())
     system_prompt = build_validation_router_system_prompt()
     user_prompt = build_validation_router_user_prompt(
         routing_input=routing_input,

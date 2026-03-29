@@ -483,10 +483,7 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
     assert failed_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_PENDING
     assert len(result.recovery_context.recovery_created_tasks) == 1
-    assert (
-        result.recovery_context.recovery_created_tasks[0].source_task_id
-        == failed_task.id
-    )
+    assert result.recovery_context.recovery_created_tasks[0].source_task_id == failed_task.id
     assert result.problematic_run_ids == [run.id]
 
 
@@ -1334,9 +1331,7 @@ def test_post_batch_runs_recovery_assignment_when_new_non_blocking_tasks_must_be
     assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.patched_execution_plan is not None
-    assert [
-        batch.batch_id for batch in result.patched_execution_plan.execution_batches
-    ] == [
+    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
         "plan_2_batch_1",
         "plan_2_batch_1_patch_1",
         "plan_2_batch_2",
@@ -1521,9 +1516,7 @@ def test_post_batch_final_batch_stays_open_when_recovery_assignment_extends_the_
     assert result.resolved_intent_type != "replan"
     assert result.resolved_intent_type != "resequence"
     assert result.patched_execution_plan is not None
-    assert [
-        batch.batch_id for batch in result.patched_execution_plan.execution_batches
-    ] == [
+    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
         "plan_3_batch_1",
         "plan_3_batch_1_patch_1",
     ]
@@ -1658,12 +1651,14 @@ def test_post_batch_consumes_assignment_mutation_result_from_live_plan_mutation_
     )
     monkeypatch.setattr(
         "app.services.post_batch_service.merge_recovery_contexts",
-        lambda contexts: contexts[0]
-        if contexts
-        else RecoveryContext(
-            recovery_decisions=[],
-            open_issues=[],
-            recovery_created_tasks=[],
+        lambda contexts: (
+            contexts[0]
+            if contexts
+            else RecoveryContext(
+                recovery_decisions=[],
+                open_issues=[],
+                recovery_created_tasks=[],
+            )
         ),
     )
 
@@ -2345,9 +2340,7 @@ def test_post_batch_assigns_multiple_recovery_clusters_without_replan(
     )
     monkeypatch.setattr(
         "app.services.post_batch_service.materialize_recovery_decision",
-        lambda **kwargs: materialized_by_source_task_id[
-            kwargs["decision"].source_task_id
-        ],
+        lambda **kwargs: materialized_by_source_task_id[kwargs["decision"].source_task_id],
     )
     monkeypatch.setattr(
         "app.services.post_batch_service.evaluate_checkpoint",
@@ -2398,13 +2391,10 @@ def test_post_batch_assigns_multiple_recovery_clusters_without_replan(
     assert result.resolved_intent_type != "resequence"
     assert sorted(result.problematic_run_ids) == sorted([failed_run.id, partial_run.id])
     assert sorted(
-        record.created_task_id
-        for record in result.recovery_context.recovery_created_tasks
+        record.created_task_id for record in result.recovery_context.recovery_created_tasks
     ) == sorted([created_recovery_task_a.id, created_recovery_task_b.id])
     assert result.patched_execution_plan is not None
-    assert [
-        batch.batch_id for batch in result.patched_execution_plan.execution_batches
-    ] == [
+    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
         "batch_1",
         "batch_1_patch_1",
         "batch_2",
@@ -2589,9 +2579,7 @@ def test_post_batch_final_batch_with_non_blocking_multi_recovery_stays_open_afte
     assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.patched_execution_plan is not None
-    assert [
-        batch.batch_id for batch in result.patched_execution_plan.execution_batches
-    ] == [
+    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
         "batch_final",
         "batch_final_patch_1",
     ]
@@ -3003,9 +2991,7 @@ def test_post_batch_assign_intent_escalates_to_replan_when_mutation_cannot_place
             mutation_kind="escalated_to_replan",
             patched_execution_plan=None,
             requires_replan=True,
-            notes=[
-                "The recovery task could not be placed safely into the remaining plan."
-            ],
+            notes=["The recovery task could not be placed safely into the remaining plan."],
             metadata={
                 "assigned_task_ids": [],
                 "unassigned_task_ids": [recovery_task.id],
@@ -4139,9 +4125,7 @@ def test_build_validation_context_summary_for_recovery_includes_partial_gap_sign
     assert recovery_summary["summary"] == (
         "The task achieved useful progress but still has a remaining gap."
     )
-    assert recovery_summary["validated_scope"] == (
-        "Parser updated and unit tests adjusted."
-    )
+    assert recovery_summary["validated_scope"] == ("Parser updated and unit tests adjusted.")
     assert recovery_summary["missing_scope"] == (
         "Add integration coverage for the new parser branch."
     )
@@ -4245,12 +4229,8 @@ def test_build_validation_context_summary_for_recovery_handles_malformed_validat
     recovery_summary = parsed["validation_summary_for_recovery"]
     assert recovery_summary["artifact_id"] == 503
     assert recovery_summary["artifact_type"] == "validation_result"
-    assert recovery_summary["parse_error"] == (
-        "validation artifact content is not valid JSON"
-    )
-    assert (
-        recovery_summary["raw_validation_artifact_content"] == "{this is not valid json"
-    )
+    assert recovery_summary["parse_error"] == ("validation artifact content is not valid JSON")
+    assert recovery_summary["raw_validation_artifact_content"] == "{this is not valid json"
 
     assert recovery_summary["execution_run_id"] is None
     assert recovery_summary["validator_key"] is None

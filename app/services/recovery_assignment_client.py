@@ -186,9 +186,7 @@ def call_recovery_assignment_model(
     assignment_input: RecoveryAssignmentInput,
 ) -> RecoveryAssignmentLLMOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        RecoveryAssignmentLLMOutput.model_json_schema()
-    )
+    strict_schema = to_openai_strict_json_schema(RecoveryAssignmentLLMOutput.model_json_schema())
 
     first_user_prompt = build_recovery_assignment_user_prompt(
         assignment_input=assignment_input,

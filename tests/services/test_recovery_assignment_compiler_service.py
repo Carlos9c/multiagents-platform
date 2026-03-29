@@ -83,9 +83,7 @@ def _build_assignment_input(
             decision_summary="The project should continue with controlled assignment.",
             recommended_next_action=resolved_intent_type,
             recommended_next_action_reason="The current plan can continue with the new work assigned safely.",
-            plan_change_scope="none"
-            if resolved_intent_type == "assign"
-            else "local_resequencing",
+            plan_change_scope="none" if resolved_intent_type == "assign" else "local_resequencing",
             remaining_plan_still_valid=remaining_plan_still_valid,
             new_recovery_tasks_blocking=new_recovery_tasks_blocking,
             single_task_tail_risk=False,
@@ -454,9 +452,7 @@ def test_compile_recovery_assignment_plan_returns_requires_replan_without_patchi
 
     current_task = make_task(project_id=project.id, title="Current batch task")
     future_task = make_task(project_id=project.id, title="Future batch task")
-    conflicting_new_task = make_task(
-        project_id=project.id, title="Structural conflict task"
-    )
+    conflicting_new_task = make_task(project_id=project.id, title="Structural conflict task")
 
     plan = make_execution_plan(
         plan_version=2,
@@ -567,9 +563,7 @@ def test_compile_recovery_assignment_plan_rejects_strategy_that_conflicts_with_r
                 rationale="The work can be deferred to the tail.",
             )
         ],
-        notes=[
-            "This output intentionally conflicts with the resolved assignment intent."
-        ],
+        notes=["This output intentionally conflicts with the resolved assignment intent."],
     )
 
     with pytest.raises(RecoveryAssignmentCompilerError) as exc_info:

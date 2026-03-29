@@ -170,9 +170,7 @@ def _build_execution_trajectory_summary(
     sequence_steps: list[str] = []
     if canonical_sequence:
         sequence_steps = [
-            step.strip()
-            for step in canonical_sequence.split("->")
-            if step and step.strip()
+            step.strip() for step in canonical_sequence.split("->") if step and step.strip()
         ]
 
     payload = {
@@ -278,9 +276,7 @@ def materialize_recovery_decision(
         raise RecoveryServiceError(f"Unsupported recovery action '{decision.action}'.")
 
     if not decision.created_tasks:
-        raise RecoveryServiceError(
-            f"Recovery action '{decision.action}' requires created tasks."
-        )
+        raise RecoveryServiceError(f"Recovery action '{decision.action}' requires created tasks.")
 
     parent_task_id = _infer_parent_task_id_for_created_tasks(source_task)
 
@@ -339,8 +335,7 @@ def build_recovery_context_entry(
                 source_task_id=decision.source_task_id,
                 issue_type="progress_blocked",
                 summary=decision.covered_gap_summary,
-                recommended_action=decision.evaluation_guidance
-                or decision.execution_guidance,
+                recommended_action=decision.evaluation_guidance or decision.execution_guidance,
             )
         )
 
@@ -353,9 +348,7 @@ def build_recovery_context_entry(
                 confidence=decision.confidence,
                 reason=decision.reason,
                 still_blocks_progress=decision.still_blocks_progress,
-                created_task_ids=[
-                    task.created_task_id for task in created_task_records
-                ],
+                created_task_ids=[task.created_task_id for task in created_task_records],
             )
         ],
         open_issues=open_issues,

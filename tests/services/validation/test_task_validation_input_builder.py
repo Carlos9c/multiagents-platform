@@ -152,8 +152,7 @@ def test_build_task_validation_input_collects_execution_context_and_evidence(
     assert validation_input.request_context.related_task_ids == [999]
 
     evidence_by_id = {
-        item.evidence_id: item
-        for item in validation_input.evidence_package.evidence_items
+        item.evidence_id: item for item in validation_input.evidence_package.evidence_items
     }
 
     assert "produced_file:app_service.py" in evidence_by_id

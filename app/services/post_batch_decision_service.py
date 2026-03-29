@@ -91,9 +91,7 @@ def build_post_batch_decision_signals(
 ) -> PostBatchDecisionSignals:
     replan = _read_attr(evaluation_decision, "replan", None)
 
-    recovery_created_tasks = (
-        _read_attr(recovery_context, "recovery_created_tasks", []) or []
-    )
+    recovery_created_tasks = _read_attr(recovery_context, "recovery_created_tasks", []) or []
     new_recovery_tasks_created = len(recovery_created_tasks) > 0
 
     return PostBatchDecisionSignals(
@@ -149,9 +147,7 @@ def build_post_batch_decision_signals(
         has_pending_valid_tasks=has_pending_valid_tasks,
         remaining_batch_count=remaining_batch_count,
         is_final_batch=is_final_batch,
-        key_risks=_normalize_string_list(
-            _read_attr(evaluation_decision, "key_risks", [])
-        ),
+        key_risks=_normalize_string_list(_read_attr(evaluation_decision, "key_risks", [])),
         notes=_normalize_string_list(_read_attr(evaluation_decision, "notes", [])),
         decision_signals=_normalize_string_list(
             _read_attr(evaluation_decision, "decision_signals", [])
@@ -242,9 +238,7 @@ def _should_assign_new_work(signals: PostBatchDecisionSignals) -> bool:
     if not signals.remaining_plan_still_valid:
         return False
 
-    if not (
-        signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
-    ):
+    if not (signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks):
         return False
 
     if signals.new_recovery_tasks_blocking is True:
@@ -303,8 +297,7 @@ def resolve_post_batch_intent(
             mutation_scope="none",
             remaining_plan_still_valid=signals.remaining_plan_still_valid,
             has_new_recovery_tasks=(
-                signals.new_recovery_tasks_created
-                or signals.has_new_recovery_pending_tasks
+                signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
             ),
             requires_plan_mutation=False,
             requires_all_new_tasks_assigned=False,
@@ -325,8 +318,7 @@ def resolve_post_batch_intent(
             mutation_scope="replan",
             remaining_plan_still_valid=False,
             has_new_recovery_tasks=(
-                signals.new_recovery_tasks_created
-                or signals.has_new_recovery_pending_tasks
+                signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
             ),
             requires_plan_mutation=True,
             requires_all_new_tasks_assigned=False,
@@ -347,13 +339,11 @@ def resolve_post_batch_intent(
             mutation_scope="resequence",
             remaining_plan_still_valid=True,
             has_new_recovery_tasks=(
-                signals.new_recovery_tasks_created
-                or signals.has_new_recovery_pending_tasks
+                signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
             ),
             requires_plan_mutation=True,
             requires_all_new_tasks_assigned=(
-                signals.new_recovery_tasks_created
-                or signals.has_new_recovery_pending_tasks
+                signals.new_recovery_tasks_created or signals.has_new_recovery_pending_tasks
             ),
             can_continue_after_application=False,
             should_close_stage=False,

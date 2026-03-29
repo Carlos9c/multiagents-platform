@@ -112,17 +112,13 @@ class PostBatchResult(BaseModel):
             ("problematic_run_ids", self.problematic_run_ids),
         ):
             if any(value <= 0 for value in values):
-                raise ValueError(
-                    f"{collection_name} must contain only positive integers."
-                )
+                raise ValueError(f"{collection_name} must contain only positive integers.")
 
         executed_set = set(self.executed_task_ids)
         successful_set = set(self.successful_task_ids)
 
         if not successful_set.issubset(executed_set):
-            raise ValueError(
-                "successful_task_ids must be a subset of executed_task_ids."
-            )
+            raise ValueError("successful_task_ids must be a subset of executed_task_ids.")
 
         if (
             self.finalization_iteration_count > self.max_finalization_iterations
@@ -149,9 +145,7 @@ class PostBatchResult(BaseModel):
             )
 
         if self.should_close_stage and self.resolved_intent_type != "close":
-            raise ValueError(
-                "should_close_stage=True requires resolved_intent_type='close'."
-            )
+            raise ValueError("should_close_stage=True requires resolved_intent_type='close'.")
 
         if self.requires_manual_review and self.resolved_intent_type != "manual_review":
             raise ValueError(
@@ -174,33 +168,21 @@ class PostBatchResult(BaseModel):
                     "resolved_intent_type='continue' requires resolved_mutation_scope='none'."
                 )
             if self.requires_plan_mutation:
-                raise ValueError(
-                    "resolved_intent_type='continue' cannot require plan mutation."
-                )
+                raise ValueError("resolved_intent_type='continue' cannot require plan mutation.")
             if self.has_new_recovery_tasks:
-                raise ValueError(
-                    "resolved_intent_type='continue' cannot carry new recovery tasks."
-                )
+                raise ValueError("resolved_intent_type='continue' cannot carry new recovery tasks.")
             if self.requires_all_new_tasks_assigned:
                 raise ValueError(
                     "resolved_intent_type='continue' cannot require new task assignment."
                 )
             if self.requires_manual_review:
-                raise ValueError(
-                    "resolved_intent_type='continue' cannot require manual review."
-                )
+                raise ValueError("resolved_intent_type='continue' cannot require manual review.")
             if self.should_close_stage:
-                raise ValueError(
-                    "resolved_intent_type='continue' cannot close the stage."
-                )
+                raise ValueError("resolved_intent_type='continue' cannot close the stage.")
             if self.reopened_finalization:
-                raise ValueError(
-                    "resolved_intent_type='continue' cannot reopen finalization."
-                )
+                raise ValueError("resolved_intent_type='continue' cannot reopen finalization.")
             if not self.can_continue_after_application:
-                raise ValueError(
-                    "resolved_intent_type='continue' must allow continuation."
-                )
+                raise ValueError("resolved_intent_type='continue' must allow continuation.")
             if self.patched_execution_plan is not None:
                 raise ValueError(
                     "resolved_intent_type='continue' cannot include a patched_execution_plan."
@@ -212,9 +194,7 @@ class PostBatchResult(BaseModel):
                     "resolved_intent_type='assign' requires resolved_mutation_scope='assignment'."
                 )
             if not self.requires_plan_mutation:
-                raise ValueError(
-                    "resolved_intent_type='assign' must require plan mutation."
-                )
+                raise ValueError("resolved_intent_type='assign' must require plan mutation.")
             if not self.has_new_recovery_tasks:
                 raise ValueError(
                     "resolved_intent_type='assign' requires has_new_recovery_tasks=True."
@@ -224,21 +204,15 @@ class PostBatchResult(BaseModel):
                     "resolved_intent_type='assign' must require all new tasks to be assigned."
                 )
             if self.requires_manual_review:
-                raise ValueError(
-                    "resolved_intent_type='assign' cannot require manual review."
-                )
+                raise ValueError("resolved_intent_type='assign' cannot require manual review.")
             if self.should_close_stage:
-                raise ValueError(
-                    "resolved_intent_type='assign' cannot close the stage."
-                )
+                raise ValueError("resolved_intent_type='assign' cannot close the stage.")
             if not self.can_continue_after_application:
                 raise ValueError(
                     "resolved_intent_type='assign' must allow continuation after application."
                 )
             if self.patched_execution_plan is None:
-                raise ValueError(
-                    "resolved_intent_type='assign' requires a patched_execution_plan."
-                )
+                raise ValueError("resolved_intent_type='assign' requires a patched_execution_plan.")
 
         elif self.resolved_intent_type == "resequence":
             if self.resolved_mutation_scope != "resequence":
@@ -246,17 +220,11 @@ class PostBatchResult(BaseModel):
                     "resolved_intent_type='resequence' requires resolved_mutation_scope='resequence'."
                 )
             if not self.requires_plan_mutation:
-                raise ValueError(
-                    "resolved_intent_type='resequence' must require plan mutation."
-                )
+                raise ValueError("resolved_intent_type='resequence' must require plan mutation.")
             if self.requires_manual_review:
-                raise ValueError(
-                    "resolved_intent_type='resequence' cannot require manual review."
-                )
+                raise ValueError("resolved_intent_type='resequence' cannot require manual review.")
             if self.should_close_stage:
-                raise ValueError(
-                    "resolved_intent_type='resequence' cannot close the stage."
-                )
+                raise ValueError("resolved_intent_type='resequence' cannot close the stage.")
             if self.can_continue_after_application:
                 raise ValueError(
                     "resolved_intent_type='resequence' must not continue before applying the resequenced plan."
@@ -268,21 +236,15 @@ class PostBatchResult(BaseModel):
                     "resolved_intent_type='replan' requires resolved_mutation_scope='replan'."
                 )
             if not self.requires_plan_mutation:
-                raise ValueError(
-                    "resolved_intent_type='replan' must require plan mutation."
-                )
+                raise ValueError("resolved_intent_type='replan' must require plan mutation.")
             if self.remaining_plan_still_valid:
                 raise ValueError(
                     "resolved_intent_type='replan' requires remaining_plan_still_valid=False."
                 )
             if self.requires_manual_review:
-                raise ValueError(
-                    "resolved_intent_type='replan' cannot require manual review."
-                )
+                raise ValueError("resolved_intent_type='replan' cannot require manual review.")
             if self.should_close_stage:
-                raise ValueError(
-                    "resolved_intent_type='replan' cannot close the stage."
-                )
+                raise ValueError("resolved_intent_type='replan' cannot close the stage.")
             if self.can_continue_after_application:
                 raise ValueError(
                     "resolved_intent_type='replan' must not continue before generating the new plan."
@@ -310,9 +272,7 @@ class PostBatchResult(BaseModel):
                     "resolved_intent_type='manual_review' cannot continue automatically."
                 )
             if self.should_close_stage:
-                raise ValueError(
-                    "resolved_intent_type='manual_review' cannot close the stage."
-                )
+                raise ValueError("resolved_intent_type='manual_review' cannot close the stage.")
             if self.reopened_finalization:
                 raise ValueError(
                     "resolved_intent_type='manual_review' cannot reopen finalization by itself."
@@ -328,9 +288,7 @@ class PostBatchResult(BaseModel):
                     "resolved_intent_type='close' requires resolved_mutation_scope='none'."
                 )
             if self.requires_plan_mutation:
-                raise ValueError(
-                    "resolved_intent_type='close' cannot require plan mutation."
-                )
+                raise ValueError("resolved_intent_type='close' cannot require plan mutation.")
             if self.requires_all_new_tasks_assigned:
                 raise ValueError(
                     "resolved_intent_type='close' cannot require assignment of new work."
@@ -340,30 +298,20 @@ class PostBatchResult(BaseModel):
                     "resolved_intent_type='close' is invalid while new recovery tasks still exist."
                 )
             if not self.should_close_stage:
-                raise ValueError(
-                    "resolved_intent_type='close' requires should_close_stage=True."
-                )
+                raise ValueError("resolved_intent_type='close' requires should_close_stage=True.")
             if self.requires_manual_review:
-                raise ValueError(
-                    "resolved_intent_type='close' cannot require manual review."
-                )
+                raise ValueError("resolved_intent_type='close' cannot require manual review.")
             if self.can_continue_after_application:
-                raise ValueError(
-                    "resolved_intent_type='close' cannot continue execution."
-                )
+                raise ValueError("resolved_intent_type='close' cannot continue execution.")
             if self.reopened_finalization:
-                raise ValueError(
-                    "resolved_intent_type='close' cannot reopen finalization."
-                )
+                raise ValueError("resolved_intent_type='close' cannot reopen finalization.")
             if self.patched_execution_plan is not None:
                 raise ValueError(
                     "resolved_intent_type='close' cannot include a patched_execution_plan."
                 )
 
         else:
-            raise ValueError(
-                f"Unsupported resolved_intent_type: {self.resolved_intent_type}"
-            )
+            raise ValueError(f"Unsupported resolved_intent_type: {self.resolved_intent_type}")
 
         if self.status == "project_stage_closed":
             if self.resolved_intent_type != "close":
@@ -371,9 +319,7 @@ class PostBatchResult(BaseModel):
                     "status='project_stage_closed' requires resolved_intent_type='close'."
                 )
             if not self.should_close_stage:
-                raise ValueError(
-                    "status='project_stage_closed' requires should_close_stage=True."
-                )
+                raise ValueError("status='project_stage_closed' requires should_close_stage=True.")
             if not self.evaluation_decision.project_stage_closed:
                 raise ValueError(
                     "status='project_stage_closed' requires "
@@ -408,9 +354,7 @@ class PostBatchResult(BaseModel):
                     "status='finalization_guard_blocked' requires requires_manual_review=True."
                 )
             if self.can_continue_after_application:
-                raise ValueError(
-                    "status='finalization_guard_blocked' cannot continue execution."
-                )
+                raise ValueError("status='finalization_guard_blocked' cannot continue execution.")
 
         if self.status == "completed_with_evaluation":
             if self.evaluation_decision.project_stage_closed:
@@ -429,17 +373,12 @@ class PostBatchResult(BaseModel):
                 raise ValueError(
                     "status='checkpoint_blocked' cannot use resolved_intent_type='continue'."
                 )
-            if (
-                self.can_continue_after_application
-                and self.resolved_intent_type != "assign"
-            ):
+            if self.can_continue_after_application and self.resolved_intent_type != "assign":
                 raise ValueError(
                     "status='checkpoint_blocked' only allows can_continue_after_application=True for assign."
                 )
             if self.evaluation_decision.project_stage_closed:
-                raise ValueError(
-                    "status='checkpoint_blocked' is incompatible with a closed stage."
-                )
+                raise ValueError("status='checkpoint_blocked' is incompatible with a closed stage.")
 
         if (
             self.requires_manual_review
@@ -452,18 +391,12 @@ class PostBatchResult(BaseModel):
                 "was triggered by the finalization guard."
             )
 
-        if (
-            self.should_close_stage
-            and not self.evaluation_decision.project_stage_closed
-        ):
+        if self.should_close_stage and not self.evaluation_decision.project_stage_closed:
             raise ValueError(
                 "should_close_stage=true requires evaluation_decision.project_stage_closed=true."
             )
 
-        if (
-            self.resolved_intent_type == "assign"
-            and self.patched_execution_plan is None
-        ):
+        if self.resolved_intent_type == "assign" and self.patched_execution_plan is None:
             raise ValueError(
                 "resolved_intent_type='assign' requires patched_execution_plan to be present."
             )

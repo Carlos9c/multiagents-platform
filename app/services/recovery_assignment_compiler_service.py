@@ -74,9 +74,7 @@ def _dedupe_preserve_order(values: list[int]) -> list[int]:
 
 
 def _get_batch_or_raise(plan: ExecutionPlan, batch_id: str) -> ExecutionBatch:
-    batch = next(
-        (item for item in plan.execution_batches if item.batch_id == batch_id), None
-    )
+    batch = next((item for item in plan.execution_batches if item.batch_id == batch_id), None)
     if batch is None:
         raise RecoveryAssignmentCompilerError(
             f"Batch '{batch_id}' not found in execution plan version {plan.plan_version}."
@@ -126,9 +124,7 @@ def _build_patch_checkpoint_id(
     anchor_batch_index: int,
     patch_index: int,
 ) -> str:
-    return (
-        f"checkpoint_plan_{plan_version}_batch_{anchor_batch_index}_patch_{patch_index}"
-    )
+    return f"checkpoint_plan_{plan_version}_batch_{anchor_batch_index}_patch_{patch_index}"
 
 
 def _build_patch_batch_name(
@@ -203,9 +199,7 @@ def _insert_patch_batch_after_batch(
         ),
         goal=goal,
         task_ids=list(task_ids),
-        entry_conditions=[
-            "Recovery assignment patch batch inserted into the live plan."
-        ],
+        entry_conditions=["Recovery assignment patch batch inserted into the live plan."],
         expected_outputs=["Recovery-assigned cluster executed and validated."],
         risk_level=risk_level,
         checkpoint_after=True,
@@ -236,8 +230,7 @@ def _insert_patch_batch_after_batch(
     while (
         insert_position < len(plan.execution_batches)
         and plan.execution_batches[insert_position].is_patch_batch
-        and plan.execution_batches[insert_position].anchor_batch_index
-        == anchor_batch_index
+        and plan.execution_batches[insert_position].anchor_batch_index == anchor_batch_index
     ):
         insert_position += 1
 
@@ -259,9 +252,7 @@ def _insert_patch_batch_after_batch(
                     after_batch_id=checkpoint.after_batch_id,
                     evaluation_goal=checkpoint.evaluation_goal,
                     evaluation_focus=[
-                        item
-                        for item in checkpoint.evaluation_focus
-                        if item != "stage_closure"
+                        item for item in checkpoint.evaluation_focus if item != "stage_closure"
                     ],
                     can_introduce_new_tasks=checkpoint.can_introduce_new_tasks,
                     can_resequence_remaining_work=checkpoint.can_resequence_remaining_work,
@@ -416,12 +407,9 @@ def _assessment_maps(
     assignment_output: RecoveryAssignmentLLMOutput,
 ) -> tuple[dict[int, AssignmentTaskAssessment], dict[str, AssignmentClusterProposal]]:
     assessment_by_task_id = {
-        assessment.task_id: assessment
-        for assessment in assignment_output.task_assessments
+        assessment.task_id: assessment for assessment in assignment_output.task_assessments
     }
-    cluster_by_id = {
-        cluster.cluster_id: cluster for cluster in assignment_output.clusters
-    }
+    cluster_by_id = {cluster.cluster_id: cluster for cluster in assignment_output.clusters}
     return assessment_by_task_id, cluster_by_id
 
 
@@ -446,9 +434,7 @@ def _existing_dependency_sets_for_cluster(
         assessment = assessment_by_task_id[task_id]
         must_come_after_existing.update(assessment.depends_on_existing_task_ids)
 
-    for (
-        relationship
-    ) in assignment_input.known_relationships.new_task_to_existing_task_dependencies:
+    for relationship in assignment_input.known_relationships.new_task_to_existing_task_dependencies:
         if relationship.new_task_id not in cluster.task_ids_in_execution_order:
             continue
 
@@ -500,12 +486,8 @@ def _find_first_consumer_batch_or_raise(
             candidate_batches.append(batch)
 
     if candidate_batches:
-        remaining_order = {
-            batch.batch_id: index for index, batch in enumerate(remaining_batches)
-        }
-        return sorted(
-            candidate_batches, key=lambda item: remaining_order[item.batch_id]
-        )[0]
+        remaining_order = {batch.batch_id: index for index, batch in enumerate(remaining_batches)}
+        return sorted(candidate_batches, key=lambda item: remaining_order[item.batch_id])[0]
 
     return remaining_batches[0]
 

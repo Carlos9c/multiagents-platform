@@ -73,13 +73,9 @@ class WorkflowIterationSummary(BaseModel):
         self.decision_signals = normalized_signals
 
         if self.starting_plan_version > self.ending_plan_version:
-            raise ValueError(
-                "starting_plan_version cannot be greater than ending_plan_version."
-            )
+            raise ValueError("starting_plan_version cannot be greater than ending_plan_version.")
 
-        if not (
-            self.starting_plan_version <= self.plan_version <= self.ending_plan_version
-        ):
+        if not (self.starting_plan_version <= self.plan_version <= self.ending_plan_version):
             raise ValueError(
                 "plan_version must be within [starting_plan_version, ending_plan_version]."
             )
@@ -107,9 +103,7 @@ class WorkflowIterationSummary(BaseModel):
             )
 
         if self.should_close_stage and self.resolved_intent_type != "close":
-            raise ValueError(
-                "should_close_stage=True requires resolved_intent_type='close'."
-            )
+            raise ValueError("should_close_stage=True requires resolved_intent_type='close'.")
 
         if self.requires_manual_review and self.resolved_intent_type != "manual_review":
             raise ValueError(
@@ -211,23 +205,15 @@ class ProjectWorkflowResult(BaseModel):
         if self.iterations:
             last_iteration = self.iterations[-1]
 
-            if (
-                self.plan_version is not None
-                and self.plan_version != last_iteration.plan_version
-            ):
-                raise ValueError(
-                    "plan_version must match the last iteration plan_version."
-                )
+            if self.plan_version is not None and self.plan_version != last_iteration.plan_version:
+                raise ValueError("plan_version must match the last iteration plan_version.")
 
             if self.final_stage_closed and not last_iteration.should_close_stage:
                 raise ValueError(
                     "final_stage_closed=True requires the last iteration to have should_close_stage=True."
                 )
 
-            if (
-                self.manual_review_required
-                and not last_iteration.requires_manual_review
-            ):
+            if self.manual_review_required and not last_iteration.requires_manual_review:
                 raise ValueError(
                     "manual_review_required=True requires the last iteration to have requires_manual_review=True."
                 )

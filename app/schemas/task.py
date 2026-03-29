@@ -58,8 +58,7 @@ class TaskCreate(BaseModel):
     def validate_status(cls, value: str) -> str:
         if value not in VALID_TASK_STATUSES:
             raise ValueError(
-                f"Invalid status '{value}'. "
-                f"Allowed values: {sorted(VALID_TASK_STATUSES)}"
+                f"Invalid status '{value}'. " f"Allowed values: {sorted(VALID_TASK_STATUSES)}"
             )
         return value
 

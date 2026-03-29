@@ -81,9 +81,7 @@ class ContextSelectionAgent(BaseSubagent):
         step,
         state: ResolutionState,
     ) -> ResolutionState:
-        schema = to_openai_strict_json_schema(
-            ContextSelectionResult.model_json_schema()
-        )
+        schema = to_openai_strict_json_schema(ContextSelectionResult.model_json_schema())
         raw = self.runtime.generate_structured(
             system_prompt=CONTEXT_SELECTION_SYSTEM_PROMPT,
             user_prompt=_build_user_prompt(request, state),

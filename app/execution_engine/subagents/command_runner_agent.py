@@ -21,14 +21,10 @@ class CommandRunnerAgent(BaseSubagent):
         state: ResolutionState,
     ) -> ResolutionState:
         if not self.supports_step_kind(step.kind):
-            raise SubagentRejectedStepError(
-                f"{self.name} does not support step kind '{step.kind}'"
-            )
+            raise SubagentRejectedStepError(f"{self.name} does not support step kind '{step.kind}'")
 
         if not step.command or not step.command.strip():
-            raise SubagentRejectedStepError(
-                "Command step requires a non-empty command."
-            )
+            raise SubagentRejectedStepError("Command step requires a non-empty command.")
 
         try:
             result = run_command(
@@ -41,7 +37,5 @@ class CommandRunnerAgent(BaseSubagent):
             ) from exc
 
         state.evidence.commands.append(result)
-        state.add_note(
-            f"Command executed: {step.command} (exit_code={result.exit_code})"
-        )
+        state.add_note(f"Command executed: {step.command} (exit_code={result.exit_code})")
         return state

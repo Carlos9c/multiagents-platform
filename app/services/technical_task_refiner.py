@@ -32,22 +32,16 @@ def _validate_parent_task(project: Project, task: Task) -> None:
 def _validate_refined_task_quality(tasks: list[Task]) -> None:
     for task in tasks:
         if len((task.proposed_solution or "").strip()) < 40:
-            raise ValueError(
-                f"proposed_solution too short in refined task: {task.title}"
-            )
+            raise ValueError(f"proposed_solution too short in refined task: {task.title}")
 
         if len((task.implementation_steps or "").strip()) < 20:
-            raise ValueError(
-                f"implementation_steps too short in refined task: {task.title}"
-            )
+            raise ValueError(f"implementation_steps too short in refined task: {task.title}")
 
         if len((task.tests_required or "").strip()) < 10:
             raise ValueError(f"tests_required too short in refined task: {task.title}")
 
         if len((task.acceptance_criteria or "").strip()) < 20:
-            raise ValueError(
-                f"acceptance_criteria too short in refined task: {task.title}"
-            )
+            raise ValueError(f"acceptance_criteria too short in refined task: {task.title}")
 
 
 def refine_high_level_task(
@@ -97,20 +91,18 @@ def refine_high_level_task(
             "refined_task_ids": [task.id for task in existing_children],
         }
 
-    refinement_output: TechnicalTaskRefinementOutput = (
-        call_technical_task_refiner_model(
-            project_name=project.name,
-            project_description=project.description or "",
-            parent_task_title=parent_task.title,
-            parent_task_description=parent_task.description or "",
-            parent_task_summary=parent_task.summary or "",
-            parent_task_objective=parent_task.objective or "",
-            parent_task_type=parent_task.task_type,
-            parent_task_implementation_notes=parent_task.implementation_notes or "",
-            parent_task_acceptance_criteria=parent_task.acceptance_criteria or "",
-            parent_task_technical_constraints=parent_task.technical_constraints or "",
-            parent_task_out_of_scope=parent_task.out_of_scope or "",
-        )
+    refinement_output: TechnicalTaskRefinementOutput = call_technical_task_refiner_model(
+        project_name=project.name,
+        project_description=project.description or "",
+        parent_task_title=parent_task.title,
+        parent_task_description=parent_task.description or "",
+        parent_task_summary=parent_task.summary or "",
+        parent_task_objective=parent_task.objective or "",
+        parent_task_type=parent_task.task_type,
+        parent_task_implementation_notes=parent_task.implementation_notes or "",
+        parent_task_acceptance_criteria=parent_task.acceptance_criteria or "",
+        parent_task_technical_constraints=parent_task.technical_constraints or "",
+        parent_task_out_of_scope=parent_task.out_of_scope or "",
     )
 
     created_tasks: list[Task] = []
@@ -149,9 +141,7 @@ def refine_high_level_task(
         project_id=project.id,
         task_id=parent_task.id,
         artifact_type="technical_refinement",
-        content=json.dumps(
-            refinement_output.model_dump(), ensure_ascii=False, indent=2
-        ),
+        content=json.dumps(refinement_output.model_dump(), ensure_ascii=False, indent=2),
         created_by="technical_task_refiner_agent",
     )
     db.add(artifact)

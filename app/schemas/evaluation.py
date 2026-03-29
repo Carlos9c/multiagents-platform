@@ -58,9 +58,7 @@ class EvaluatedBatchSummary(BaseModel):
 
     @model_validator(mode="after")
     def validate_batch_summary(self) -> "EvaluatedBatchSummary":
-        self.key_findings = [
-            item.strip() for item in self.key_findings if item and item.strip()
-        ]
+        self.key_findings = [item.strip() for item in self.key_findings if item and item.strip()]
 
         for collection_name, values in (
             ("failed_task_ids", self.failed_task_ids),
@@ -68,9 +66,7 @@ class EvaluatedBatchSummary(BaseModel):
             ("completed_task_ids", self.completed_task_ids),
         ):
             if any(task_id <= 0 for task_id in values):
-                raise ValueError(
-                    f"{collection_name} must contain only positive integers."
-                )
+                raise ValueError(f"{collection_name} must contain only positive integers.")
 
         return self
 
@@ -147,9 +143,7 @@ class StageEvaluationOutput(BaseModel):
             self.recovery_reason = self.recovery_reason.strip() or None
 
         if self.followup_atomic_tasks_reason is not None:
-            self.followup_atomic_tasks_reason = (
-                self.followup_atomic_tasks_reason.strip() or None
-            )
+            self.followup_atomic_tasks_reason = self.followup_atomic_tasks_reason.strip() or None
 
         if self.manual_review_reason is not None:
             self.manual_review_reason = self.manual_review_reason.strip() or None
@@ -162,15 +156,10 @@ class StageEvaluationOutput(BaseModel):
         self.decision_signals = [
             item.strip() for item in self.decision_signals if item and item.strip()
         ]
-        self.key_risks = [
-            item.strip() for item in self.key_risks if item and item.strip()
-        ]
+        self.key_risks = [item.strip() for item in self.key_risks if item and item.strip()]
         self.notes = [item.strip() for item in self.notes if item and item.strip()]
 
-        if (
-            self.followup_atomic_tasks_required
-            and not self.followup_atomic_tasks_reason
-        ):
+        if self.followup_atomic_tasks_required and not self.followup_atomic_tasks_reason:
             raise ValueError(
                 "followup_atomic_tasks_reason is required when followup_atomic_tasks_required is true."
             )
@@ -181,9 +170,7 @@ class StageEvaluationOutput(BaseModel):
             )
 
         if self.recovery_strategy != "none" and not self.recovery_reason:
-            raise ValueError(
-                "recovery_reason is required when recovery_strategy is not 'none'."
-            )
+            raise ValueError("recovery_reason is required when recovery_strategy is not 'none'.")
 
         if self.recovery_strategy == "insert_followup_atomic_tasks":
             if not self.followup_atomic_tasks_required:
@@ -236,9 +223,7 @@ class StageEvaluationOutput(BaseModel):
             if self.replan.required:
                 raise ValueError("stage_completed must not request replanning.")
             if self.followup_atomic_tasks_required:
-                raise ValueError(
-                    "stage_completed must not request follow-up atomic tasks."
-                )
+                raise ValueError("stage_completed must not request follow-up atomic tasks.")
             if self.recommended_next_action not in {None, "close_stage"}:
                 raise ValueError(
                     "stage_completed only allows recommended_next_action='close_stage'."
@@ -246,9 +231,7 @@ class StageEvaluationOutput(BaseModel):
             if self.plan_change_scope != "none":
                 raise ValueError("stage_completed requires plan_change_scope='none'.")
             if not self.remaining_plan_still_valid:
-                raise ValueError(
-                    "stage_completed requires remaining_plan_still_valid=true."
-                )
+                raise ValueError("stage_completed requires remaining_plan_still_valid=true.")
 
         if self.decision == "manual_review_required":
             if not self.manual_review_required:
@@ -267,19 +250,14 @@ class StageEvaluationOutput(BaseModel):
                     "decision='stage_incomplete' cannot set project_stage_closed=true."
                 )
 
-        if (
-            self.recommended_next_action is not None
-            and not self.recommended_next_action_reason
-        ):
+        if self.recommended_next_action is not None and not self.recommended_next_action_reason:
             raise ValueError(
                 "recommended_next_action_reason is required when recommended_next_action is set."
             )
 
         if self.recommended_next_action == "close_stage":
             if self.decision != "stage_completed" or not self.project_stage_closed:
-                raise ValueError(
-                    "recommended_next_action='close_stage' requires a closed stage."
-                )
+                raise ValueError("recommended_next_action='close_stage' requires a closed stage.")
             if self.plan_change_scope != "none":
                 raise ValueError(
                     "recommended_next_action='close_stage' requires plan_change_scope='none'."

@@ -237,9 +237,7 @@ def test_code_change_agent_applies_pending_operations_and_marks_applied(tmp_path
 
     existing_main = workspace / "app" / "main.py"
     existing_main.parent.mkdir(parents=True, exist_ok=True)
-    existing_main.write_text(
-        "from fastapi import FastAPI\n\napp = FastAPI()\n", encoding="utf-8"
-    )
+    existing_main.write_text("from fastapi import FastAPI\n\napp = FastAPI()\n", encoding="utf-8")
 
     request = _make_request(workspace)
 
@@ -318,12 +316,8 @@ def test_code_change_agent_applies_pending_operations_and_marks_applied(tmp_path
     )
 
     assert (workspace / "app" / "api" / "notes.py").exists()
-    assert "APIRouter" in (workspace / "app" / "api" / "notes.py").read_text(
-        encoding="utf-8"
-    )
-    assert "include_router" in (workspace / "app" / "main.py").read_text(
-        encoding="utf-8"
-    )
+    assert "APIRouter" in (workspace / "app" / "api" / "notes.py").read_text(encoding="utf-8")
+    assert "include_router" in (workspace / "app" / "main.py").read_text(encoding="utf-8")
 
     assert next_state.pending_operation_paths == []
     assert sorted(next_state.applied_operation_paths) == [
@@ -578,10 +572,7 @@ def test_orchestrator_phase_policy_prevents_return_to_context_after_planning(tmp
     result = orchestrator.run(request)
 
     assert result.decision == "partial"
-    assert any(
-        item.path == "docs/notes-api-contract.md"
-        for item in result.evidence.changed_files
-    )
+    assert any(item.path == "docs/notes-api-contract.md" for item in result.evidence.changed_files)
     joined_notes = "\n".join(result.evidence.notes)
     assert "action_overridden_by_phase_policy" in joined_notes
 
@@ -628,9 +619,7 @@ def test_orchestrator_finish_with_pending_operations_reports_blocker(tmp_path):
             )
 
             blockers_found = (
-                [
-                    f"pending_operations={','.join(resolution_state.pending_operation_paths)}"
-                ]
+                [f"pending_operations={','.join(resolution_state.pending_operation_paths)}"]
                 if resolution_state.has_pending_operations()
                 else []
             )
@@ -670,6 +659,4 @@ def test_orchestrator_finish_with_pending_operations_reports_blocker(tmp_path):
 
     assert result.decision == "partial"
     assert result.remaining_scope == "Some planned file operations remain pending."
-    assert result.blockers_found == [
-        "pending_operations=app/main.py,tests/test_notes.py"
-    ]
+    assert result.blockers_found == ["pending_operations=app/main.py,tests/test_notes.py"]

@@ -3,42 +3,43 @@
 # =========================
 __pycache__/
 *.py[cod]
-*.pyo
 *.pyd
 *.so
 
 # Virtualenvs
 .env
-.venv
+.venv/
 venv/
 ENV/
 
-# Poetry
-poetry.lock
-
 # =========================
-# FASTAPI / UVICORN
+# TOOLING CACHE
 # =========================
-*.log
-
-# =========================
-# DATABASE
-# =========================
-*.sqlite3
-*.db
-
-# =========================
-# ALEMBIC
-# =========================
-# (mantenemos migrations versionadas)
-!alembic/versions/*.py
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/
+.pytest_agents_projects/
 
 # =========================
 # TESTS / COVERAGE
 # =========================
 .coverage
 htmlcov/
-.pytest_cache/
+
+# =========================
+# BUILD / PACKAGING
+# =========================
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# =========================
+# DATABASE
+# =========================
+*.sqlite3
+*.db
 
 # =========================
 # IDEs
@@ -68,7 +69,6 @@ docker-compose.override.yml
 # =========================
 # CACHE / TEMP
 # =========================
-.cache/
 tmp/
 temp/
 
@@ -79,17 +79,22 @@ celerybeat-schedule
 celerybeat.pid
 
 # =========================
-# ARTIFACTS GENERADOS (IMPORTANTE)
+# GENERATED ARTIFACTS
 # =========================
 artifacts/
 storage/
 uploads/
+logs/
 
 # =========================
 # LOGS
 # =========================
-logs/
 *.log
+
+# =========================
+# NOTEBOOKS
+# =========================
+.ipynb_checkpoints/
 
 # =========================
 # MISC

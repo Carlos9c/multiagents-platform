@@ -54,8 +54,7 @@ class ExecutionRunBase(BaseModel):
             return value
         if value not in VALID_FAILURE_TYPES:
             raise ValueError(
-                f"Invalid failure_type '{value}'. "
-                f"Allowed values: {sorted(VALID_FAILURE_TYPES)}"
+                f"Invalid failure_type '{value}'. " f"Allowed values: {sorted(VALID_FAILURE_TYPES)}"
             )
         return value
 

@@ -283,9 +283,7 @@ def _get_latest_project_artifact_id(
     project_id: int,
 ) -> int:
     latest_artifact_id = (
-        db.query(func.max(Artifact.id))
-        .filter(Artifact.project_id == project_id)
-        .scalar()
+        db.query(func.max(Artifact.id)).filter(Artifact.project_id == project_id).scalar()
     )
     return int(latest_artifact_id or 0)
 
@@ -345,9 +343,7 @@ def _persist_workflow_batch_trace(
         "task_ids": list(task_ids),
         "task_run_summaries": task_run_summaries,
         "post_batch_status": getattr(post_batch_result, "status", None),
-        "resolved_intent_type": getattr(
-            post_batch_result, "resolved_intent_type", None
-        ),
+        "resolved_intent_type": getattr(post_batch_result, "resolved_intent_type", None),
         "resolved_mutation_scope": getattr(
             post_batch_result,
             "resolved_mutation_scope",
@@ -494,7 +490,9 @@ def _build_iteration_notes(
     if resolved_intent_type == "assign":
         if used_patched_plan:
             return "Iteration continued using a patched execution plan after assigning newly created recovery tasks."
-        return "Iteration ended because newly created recovery tasks require a patched execution plan."
+        return (
+            "Iteration ended because newly created recovery tasks require a patched execution plan."
+        )
 
     if reopened_finalization:
         return "Iteration ended because finalization was reopened."
@@ -560,9 +558,7 @@ def _run_execution_iteration(
         )
         last_post_batch_result = post_batch_result
 
-        batch_patched_execution_plan = getattr(
-            post_batch_result, "patched_execution_plan", None
-        )
+        batch_patched_execution_plan = getattr(post_batch_result, "patched_execution_plan", None)
         batch_patched_plan_version = (
             batch_patched_execution_plan.plan_version
             if batch_patched_execution_plan is not None
@@ -825,9 +821,7 @@ def run_project_workflow(
 
     if execution_plan_generated:
         try:
-            current_plan = active_plan or generate_execution_plan(
-                db=db, project_id=project_id
-            )
+            current_plan = active_plan or generate_execution_plan(db=db, project_id=project_id)
             processed = set(completed_batches)
             blocked_batches = [
                 batch.batch_id
@@ -846,10 +840,8 @@ def run_project_workflow(
             "empty sequencing, unrecoverable blocking states, or workflow iteration limits."
         )
     else:
-        notes = (
-            "Project workflow ended without explicit closure. "
-            "Technical refinement was "
-            + ("enabled." if enable_technical_refinement else "bypassed.")
+        notes = "Project workflow ended without explicit closure. " "Technical refinement was " + (
+            "enabled." if enable_technical_refinement else "bypassed."
         )
 
     return ProjectWorkflowResult(

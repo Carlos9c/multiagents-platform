@@ -110,9 +110,7 @@ def mutate_live_plan(
             )
 
         if not resolved_intent.requires_plan_mutation:
-            raise LivePlanMutationServiceError(
-                "Resolved assign intent must require plan mutation."
-            )
+            raise LivePlanMutationServiceError("Resolved assign intent must require plan mutation.")
 
         if not resolved_intent.requires_all_new_tasks_assigned:
             raise LivePlanMutationServiceError(
@@ -177,9 +175,7 @@ def mutate_live_plan(
                 notes=list(compiled_assignment.notes),
                 metadata={
                     "assigned_task_ids": [],
-                    "unassigned_task_ids": list(
-                        compiled_assignment.unassigned_task_ids
-                    ),
+                    "unassigned_task_ids": list(compiled_assignment.unassigned_task_ids),
                     "compiled_cluster_assignments": [],
                 },
             )

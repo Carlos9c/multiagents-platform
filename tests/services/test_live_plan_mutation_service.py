@@ -163,9 +163,7 @@ def test_mutate_live_plan_builds_assignment_input_with_canonical_intent_fields(
         assert assignment_input is not None
         return DummyAssignmentOutput()
 
-    def fake_compile_recovery_assignment_plan(
-        *, plan, assignment_input, assignment_output
-    ):
+    def fake_compile_recovery_assignment_plan(*, plan, assignment_input, assignment_output):
         assert assignment_input is not None
         assert assignment_output is not None
         return DummyCompiledAssignment()
@@ -210,9 +208,7 @@ def test_mutate_live_plan_builds_assignment_input_with_canonical_intent_fields(
     )
 
     assert captured["assignment_input_kwargs"]["resolved_intent_type"] == "assign"
-    assert (
-        captured["assignment_input_kwargs"]["resolved_mutation_scope"] == "assignment"
-    )
+    assert captured["assignment_input_kwargs"]["resolved_mutation_scope"] == "assignment"
     assert "resolved_action" not in captured["assignment_input_kwargs"]
 
     assert result.mutation_kind == "assignment"
@@ -235,9 +231,7 @@ def test_resolved_post_batch_intent_rejects_assign_with_non_assignment_scope():
             can_continue_after_application=True,
         )
 
-    assert "intent_type='assign' requires mutation_scope='assignment'" in str(
-        exc_info.value
-    )
+    assert "intent_type='assign' requires mutation_scope='assignment'" in str(exc_info.value)
 
 
 def test_resolved_post_batch_intent_rejects_resequence_with_non_resequence_scope():
@@ -253,9 +247,7 @@ def test_resolved_post_batch_intent_rejects_resequence_with_non_resequence_scope
             reopened_finalization=True,
         )
 
-    assert "intent_type='resequence' requires mutation_scope='resequence'" in str(
-        exc_info.value
-    )
+    assert "intent_type='resequence' requires mutation_scope='resequence'" in str(exc_info.value)
 
 
 def test_mutate_live_plan_returns_escalated_to_replan_when_compiler_requires_replan(

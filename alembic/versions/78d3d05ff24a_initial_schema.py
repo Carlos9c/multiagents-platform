@@ -5,6 +5,7 @@ Revises:
 Create Date: 2026-03-21 22:16:08.542604
 
 """
+
 from typing import Sequence, Union
 
 from alembic import op
@@ -64,9 +65,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(op.f("ix_tasks_id"), "tasks", ["id"], unique=False)
-    op.create_index(
-        op.f("ix_tasks_parent_task_id"), "tasks", ["parent_task_id"], unique=False
-    )
+    op.create_index(op.f("ix_tasks_parent_task_id"), "tasks", ["parent_task_id"], unique=False)
     op.create_index(op.f("ix_tasks_project_id"), "tasks", ["project_id"], unique=False)
     op.create_table(
         "artifacts",
@@ -87,12 +86,8 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(op.f("ix_artifacts_id"), "artifacts", ["id"], unique=False)
-    op.create_index(
-        op.f("ix_artifacts_project_id"), "artifacts", ["project_id"], unique=False
-    )
-    op.create_index(
-        op.f("ix_artifacts_task_id"), "artifacts", ["task_id"], unique=False
-    )
+    op.create_index(op.f("ix_artifacts_project_id"), "artifacts", ["project_id"], unique=False)
+    op.create_index(op.f("ix_artifacts_task_id"), "artifacts", ["task_id"], unique=False)
     op.create_table(
         "execution_runs",
         sa.Column("id", sa.Integer(), nullable=False),
@@ -124,18 +119,14 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index(
-        op.f("ix_execution_runs_id"), "execution_runs", ["id"], unique=False
-    )
+    op.create_index(op.f("ix_execution_runs_id"), "execution_runs", ["id"], unique=False)
     op.create_index(
         op.f("ix_execution_runs_parent_run_id"),
         "execution_runs",
         ["parent_run_id"],
         unique=False,
     )
-    op.create_index(
-        op.f("ix_execution_runs_task_id"), "execution_runs", ["task_id"], unique=False
-    )
+    op.create_index(op.f("ix_execution_runs_task_id"), "execution_runs", ["task_id"], unique=False)
     # ### end Alembic commands ###
 
 

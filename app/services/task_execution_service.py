@@ -286,12 +286,7 @@ def _collect_persisted_artifacts_for_task(
     *,
     task_id: int,
 ) -> list[Artifact]:
-    return (
-        db.query(Artifact)
-        .filter(Artifact.task_id == task_id)
-        .order_by(Artifact.id.asc())
-        .all()
-    )
+    return db.query(Artifact).filter(Artifact.task_id == task_id).order_by(Artifact.id.asc()).all()
 
 
 def _persist_task_status(
@@ -340,9 +335,7 @@ def _apply_validation_result_to_task(
         mark_task_failed(db, task_id)
         return _get_task_or_raise(db, task_id).status
 
-    raise TaskExecutionServiceError(
-        f"Unsupported validation decision '{validation_decision}'."
-    )
+    raise TaskExecutionServiceError(f"Unsupported validation decision '{validation_decision}'.")
 
 
 def _serialize_validation_result_artifact(
@@ -378,12 +371,8 @@ def _serialize_validation_result_artifact(
         "final_task_status": final_task_status,
         "workspace_promoted_to_source": workspace_promoted_to_source,
         "validated_evidence_ids": list(validation_result.validated_evidence_ids or []),
-        "unconsumed_evidence_ids": list(
-            validation_result.unconsumed_evidence_ids or []
-        ),
-        "findings": [
-            finding.model_dump(mode="json") for finding in validation_result.findings
-        ],
+        "unconsumed_evidence_ids": list(validation_result.unconsumed_evidence_ids or []),
+        "findings": [finding.model_dump(mode="json") for finding in validation_result.findings],
         "metadata": dict(validation_result.metadata or {}),
     }
 
@@ -512,9 +501,7 @@ def _validate_after_execution(
             "can be considered complete."
         )
     else:
-        raise TaskExecutionServiceError(
-            f"Unsupported validation decision '{decision}'."
-        )
+        raise TaskExecutionServiceError(f"Unsupported validation decision '{decision}'.")
 
     _persist_validation_result_artifact(
         db=db,
@@ -563,26 +550,21 @@ def _handle_terminal_execution_outcome(
     )
 
     blockers_found = (
-        "; ".join(engine_result.blockers_found)
-        if engine_result.blockers_found
-        else None
+        "; ".join(engine_result.blockers_found) if engine_result.blockers_found else None
     )
 
     if engine_result.decision == EXECUTION_DECISION_FAILED:
         mark_execution_run_failed(
             db=db,
             run_id=run_id,
-            error_message=engine_result.summary
-            or "Execution engine reported a failed execution.",
+            error_message=engine_result.summary or "Execution engine reported a failed execution.",
             failure_type=FAILURE_TYPE_INTERNAL,
             failure_code="execution_engine_failed",
             recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
             work_summary=engine_result.summary,
             work_details=engine_result.details,
             execution_agent_sequence=execution_agent_sequence_json,
-            artifacts_created=_extract_artifacts_created_from_engine_result(
-                engine_result
-            ),
+            artifacts_created=_extract_artifacts_created_from_engine_result(engine_result),
             completed_scope=engine_result.completed_scope,
             remaining_scope=engine_result.remaining_scope,
             blockers_found=blockers_found,
@@ -611,8 +593,7 @@ def _handle_terminal_execution_outcome(
         mark_execution_run_rejected(
             db=db,
             run_id=run_id,
-            error_message=engine_result.summary
-            or "Execution engine rejected the task.",
+            error_message=engine_result.summary or "Execution engine rejected the task.",
             failure_code="execution_engine_rejected",
             recovery_action=RECOVERY_ACTION_REATOMIZE,
             work_summary=engine_result.summary,
@@ -694,9 +675,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             "execution_engine_selected task_id=%s run_id=%s backend=%s",
             task.id,
             run_id,
-            getattr(
-                execution_engine, "backend_name", execution_engine.__class__.__name__
-            ),
+            getattr(execution_engine, "backend_name", execution_engine.__class__.__name__),
         )
 
         engine_result = execution_engine.execute(execution_request)
@@ -724,9 +703,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 work_summary=engine_result.summary,
                 work_details=engine_result.details,
                 execution_agent_sequence=execution_agent_sequence_json,
-                artifacts_created=_extract_artifacts_created_from_engine_result(
-                    engine_result
-                ),
+                artifacts_created=_extract_artifacts_created_from_engine_result(engine_result),
                 completed_scope=engine_result.completed_scope,
                 validation_notes="; ".join(engine_result.validation_notes or []),
             )
@@ -776,12 +753,9 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             work_summary=exc.message,
             work_details="The execution engine deliberately rejected the task before execution.",
             execution_agent_sequence=execution_agent_sequence_json,
-            blockers_found="; ".join(exc.blockers_found)
-            if exc.blockers_found
-            else None,
+            blockers_found="; ".join(exc.blockers_found) if exc.blockers_found else None,
             validation_notes="; ".join(
-                exc.validation_notes
-                or ["Execution was rejected at the execution engine boundary."]
+                exc.validation_notes or ["Execution was rejected at the execution engine boundary."]
             ),
         )
         _store_task_execution_agent_sequence(

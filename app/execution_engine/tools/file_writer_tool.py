@@ -20,9 +20,7 @@ def write_text_file(
     destination = (root / relative_path).resolve()
 
     if not str(destination).startswith(str(root)):
-        raise ValueError(
-            f"Refusing to write outside workspace root. path={relative_path}"
-        )
+        raise ValueError(f"Refusing to write outside workspace root. path={relative_path}")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(content, encoding=encoding)

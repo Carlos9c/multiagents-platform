@@ -91,22 +91,16 @@ class RecoveryDecision(BaseModel):
 
         if self.action == "manual_review":
             if not self.requires_manual_review:
-                raise ValueError(
-                    "action='manual_review' requires requires_manual_review=true."
-                )
+                raise ValueError("action='manual_review' requires requires_manual_review=true.")
             if self.created_tasks:
-                raise ValueError(
-                    "action='manual_review' must not include created_tasks."
-                )
+                raise ValueError("action='manual_review' must not include created_tasks.")
         else:
             if self.requires_manual_review:
                 raise ValueError(
                     "requires_manual_review=true is only valid for action='manual_review'."
                 )
             if not self.created_tasks:
-                raise ValueError(
-                    f"action='{self.action}' requires at least one created task."
-                )
+                raise ValueError(f"action='{self.action}' requires at least one created task.")
 
         return self
 
@@ -157,6 +151,4 @@ class RecoveryContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
     recovery_decisions: list[RecoveryDecisionSummary] = Field(default_factory=list)
     open_issues: list[RecoveryOpenIssue] = Field(default_factory=list)
-    recovery_created_tasks: list[RecoveryCreatedTaskRecord] = Field(
-        default_factory=list
-    )
+    recovery_created_tasks: list[RecoveryCreatedTaskRecord] = Field(default_factory=list)

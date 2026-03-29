@@ -39,9 +39,7 @@ def _build_patch_checkpoint_id(
     anchor_batch_index: int,
     patch_index: int,
 ) -> str:
-    return (
-        f"checkpoint_plan_{plan_version}_batch_{anchor_batch_index}_patch_{patch_index}"
-    )
+    return f"checkpoint_plan_{plan_version}_batch_{anchor_batch_index}_patch_{patch_index}"
 
 
 def _build_patch_batch_name(
@@ -54,9 +52,7 @@ def _build_patch_batch_name(
 
 
 def _get_batch_or_raise(plan: ExecutionPlan, batch_id: str) -> ExecutionBatch:
-    batch = next(
-        (batch for batch in plan.execution_batches if batch.batch_id == batch_id), None
-    )
+    batch = next((batch for batch in plan.execution_batches if batch.batch_id == batch_id), None)
     if batch is None:
         raise ExecutionPlanPatchServiceError(
             f"Batch '{batch_id}' not found in execution plan version {plan.plan_version}."
@@ -90,9 +86,7 @@ def insert_patch_batch_after_batch(
     risk_level: str = "medium",
 ) -> ExecutionPlan:
     if not task_ids:
-        raise ExecutionPlanPatchServiceError(
-            "Patch batch insertion requires at least one task_id."
-        )
+        raise ExecutionPlanPatchServiceError("Patch batch insertion requires at least one task_id.")
 
     anchor_batch = _get_batch_or_raise(plan, anchor_batch_id)
     anchor_batch_index = anchor_batch.batch_index
@@ -129,12 +123,8 @@ def insert_patch_batch_after_batch(
         ),
         goal=goal,
         task_ids=list(task_ids),
-        entry_conditions=list(
-            entry_conditions or ["Patch batch inserted after checkpoint."]
-        ),
-        expected_outputs=list(
-            expected_outputs or ["Patch work completed and validated."]
-        ),
+        entry_conditions=list(entry_conditions or ["Patch batch inserted after checkpoint."]),
+        expected_outputs=list(expected_outputs or ["Patch work completed and validated."]),
         risk_level=risk_level,
         checkpoint_after=True,
         checkpoint_id=checkpoint_id,
@@ -168,8 +158,7 @@ def insert_patch_batch_after_batch(
     while (
         insert_position < len(plan.execution_batches)
         and plan.execution_batches[insert_position].is_patch_batch
-        and plan.execution_batches[insert_position].anchor_batch_index
-        == anchor_batch_index
+        and plan.execution_batches[insert_position].anchor_batch_index == anchor_batch_index
     ):
         insert_position += 1
 

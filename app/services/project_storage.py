@@ -99,9 +99,7 @@ class ProjectStorageService:
             promoted_dir=promoted_dir,
         )
 
-    def ensure_domain_storage(
-        self, project_id: int, domain_name: str
-    ) -> DomainStoragePaths:
+    def ensure_domain_storage(self, project_id: int, domain_name: str) -> DomainStoragePaths:
         self.ensure_project_storage(project_id)
         paths = self.get_domain_paths(project_id, domain_name)
 
@@ -134,13 +132,9 @@ class ProjectStorageService:
             domain_paths = self.ensure_domain_storage(project_id, domain_name)
             payload["domains"][domain_name] = {
                 "domain_root": str(domain_paths.domain_root),
-                "source_dir": str(domain_paths.source_dir)
-                if domain_paths.source_dir
-                else None,
+                "source_dir": str(domain_paths.source_dir) if domain_paths.source_dir else None,
                 "promoted_dir": (
-                    str(domain_paths.promoted_dir)
-                    if domain_paths.promoted_dir
-                    else None
+                    str(domain_paths.promoted_dir) if domain_paths.promoted_dir else None
                 ),
             }
 

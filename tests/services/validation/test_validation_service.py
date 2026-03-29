@@ -150,9 +150,7 @@ def test_validate_execution_result_orchestrates_route_build_and_dispatch(
     source_dir = tmp_path / "source"
     workspace_dir.mkdir()
     source_dir.mkdir()
-    (workspace_dir / "app_service.py").write_text(
-        "def run():\n    return 'ok'\n", encoding="utf-8"
-    )
+    (workspace_dir / "app_service.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
 
     persisted_artifact = make_artifact(
         project_id=project.id,

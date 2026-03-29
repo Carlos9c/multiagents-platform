@@ -161,19 +161,13 @@ class OpenAIProvider(LLMProvider):
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
 
             input_tokens = (
-                self._safe_usage_value(response, "input_tokens")
-                if response is not None
-                else None
+                self._safe_usage_value(response, "input_tokens") if response is not None else None
             )
             output_tokens = (
-                self._safe_usage_value(response, "output_tokens")
-                if response is not None
-                else None
+                self._safe_usage_value(response, "output_tokens") if response is not None else None
             )
             total_tokens = (
-                self._safe_usage_value(response, "total_tokens")
-                if response is not None
-                else None
+                self._safe_usage_value(response, "total_tokens") if response is not None else None
             )
 
             logger.exception(

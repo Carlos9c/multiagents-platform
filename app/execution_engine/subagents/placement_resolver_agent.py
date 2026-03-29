@@ -106,9 +106,7 @@ class PlacementResolverAgent(BaseSubagent):
         state: ResolutionState,
     ) -> ResolutionState:
         if not self.supports_step_kind(step.kind):
-            raise SubagentRejectedStepError(
-                f"{self.name} does not support step kind '{step.kind}'"
-            )
+            raise SubagentRejectedStepError(f"{self.name} does not support step kind '{step.kind}'")
 
         state.increment_file_planning_attempts()
 
@@ -133,9 +131,7 @@ class PlacementResolverAgent(BaseSubagent):
             )
 
         if not plan.operations:
-            raise SubagentRejectedStepError(
-                "Placement resolver returned no file operations."
-            )
+            raise SubagentRejectedStepError("Placement resolver returned no file operations.")
 
         state.set_planned_file_operations(plan)
         state.add_note("LLM-based file operation plan resolved.")

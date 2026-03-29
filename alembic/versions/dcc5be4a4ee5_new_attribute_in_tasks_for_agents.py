@@ -5,6 +5,7 @@ Revises: 644e34a21eef
 Create Date: 2026-03-25 23:18:14.170955
 
 """
+
 from typing import Sequence, Union
 
 from alembic import op
@@ -25,9 +26,7 @@ def upgrade() -> None:
         "execution_runs",
         sa.Column("execution_agent_sequence", sa.Text(), nullable=True),
     )
-    op.add_column(
-        "tasks", sa.Column("last_execution_agent_sequence", sa.Text(), nullable=True)
-    )
+    op.add_column("tasks", sa.Column("last_execution_agent_sequence", sa.Text(), nullable=True))
     # ### end Alembic commands ###
 
 

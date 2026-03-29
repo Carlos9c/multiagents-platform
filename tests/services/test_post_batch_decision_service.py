@@ -47,9 +47,7 @@ class DummyEvaluationDecision:
 
 
 class DummyRecoveryTask:
-    def __init__(
-        self, created_task_id: int, source_task_id: int = 1, source_run_id: int = 1
-    ):
+    def __init__(self, created_task_id: int, source_task_id: int = 1, source_run_id: int = 1):
         self.created_task_id = created_task_id
         self.source_task_id = source_task_id
         self.source_run_id = source_run_id
@@ -58,8 +56,7 @@ class DummyRecoveryTask:
 class DummyRecoveryContext:
     def __init__(self, created_task_ids: list[int] | None = None):
         self.recovery_created_tasks = [
-            DummyRecoveryTask(created_task_id=task_id)
-            for task_id in (created_task_ids or [])
+            DummyRecoveryTask(created_task_id=task_id) for task_id in (created_task_ids or [])
         ]
 
 

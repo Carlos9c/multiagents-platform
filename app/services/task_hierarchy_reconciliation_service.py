@@ -25,9 +25,7 @@ def _get_existing_tasks(
 
 
 def _collect_affected_parent_ids(tasks: list[Task]) -> list[int]:
-    parent_ids = {
-        task.parent_task_id for task in tasks if task.parent_task_id is not None
-    }
+    parent_ids = {task.parent_task_id for task in tasks if task.parent_task_id is not None}
     return sorted(parent_ids)
 
 

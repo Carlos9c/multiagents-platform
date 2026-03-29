@@ -77,9 +77,7 @@ class ResolvedPostBatchIntent:
             )
 
         if self.mutation_scope != "none" and not self.requires_plan_mutation:
-            raise ValueError(
-                "mutation_scope!='none' requires requires_plan_mutation=True."
-            )
+            raise ValueError("mutation_scope!='none' requires requires_plan_mutation=True.")
 
         if self.requires_all_new_tasks_assigned and not self.has_new_recovery_tasks:
             raise ValueError(
@@ -90,9 +88,7 @@ class ResolvedPostBatchIntent:
             raise ValueError("should_close_stage=True requires intent_type='close'.")
 
         if self.requires_manual_review and self.intent_type != "manual_review":
-            raise ValueError(
-                "requires_manual_review=True requires intent_type='manual_review'."
-            )
+            raise ValueError("requires_manual_review=True requires intent_type='manual_review'.")
 
         if self.reopened_finalization and self.intent_type in {
             "continue",
@@ -106,19 +102,13 @@ class ResolvedPostBatchIntent:
 
         if self.intent_type == "continue":
             if self.mutation_scope != "none":
-                raise ValueError(
-                    "intent_type='continue' requires mutation_scope='none'."
-                )
+                raise ValueError("intent_type='continue' requires mutation_scope='none'.")
             if self.requires_plan_mutation:
                 raise ValueError("intent_type='continue' cannot require plan mutation.")
             if self.has_new_recovery_tasks:
-                raise ValueError(
-                    "intent_type='continue' cannot carry new recovery tasks."
-                )
+                raise ValueError("intent_type='continue' cannot carry new recovery tasks.")
             if self.requires_all_new_tasks_assigned:
-                raise ValueError(
-                    "intent_type='continue' cannot require new task assignment."
-                )
+                raise ValueError("intent_type='continue' cannot require new task assignment.")
             if self.requires_manual_review:
                 raise ValueError("intent_type='continue' cannot require manual review.")
             if self.should_close_stage:
@@ -130,39 +120,27 @@ class ResolvedPostBatchIntent:
 
         elif self.intent_type == "assign":
             if self.mutation_scope != "assignment":
-                raise ValueError(
-                    "intent_type='assign' requires mutation_scope='assignment'."
-                )
+                raise ValueError("intent_type='assign' requires mutation_scope='assignment'.")
             if not self.requires_plan_mutation:
                 raise ValueError("intent_type='assign' must require plan mutation.")
             if not self.has_new_recovery_tasks:
-                raise ValueError(
-                    "intent_type='assign' requires has_new_recovery_tasks=True."
-                )
+                raise ValueError("intent_type='assign' requires has_new_recovery_tasks=True.")
             if not self.requires_all_new_tasks_assigned:
-                raise ValueError(
-                    "intent_type='assign' must require all new tasks to be assigned."
-                )
+                raise ValueError("intent_type='assign' must require all new tasks to be assigned.")
             if self.requires_manual_review:
                 raise ValueError("intent_type='assign' cannot require manual review.")
             if self.should_close_stage:
                 raise ValueError("intent_type='assign' cannot close the stage.")
             if not self.can_continue_after_application:
-                raise ValueError(
-                    "intent_type='assign' must allow continuation after application."
-                )
+                raise ValueError("intent_type='assign' must allow continuation after application.")
 
         elif self.intent_type == "resequence":
             if self.mutation_scope != "resequence":
-                raise ValueError(
-                    "intent_type='resequence' requires mutation_scope='resequence'."
-                )
+                raise ValueError("intent_type='resequence' requires mutation_scope='resequence'.")
             if not self.requires_plan_mutation:
                 raise ValueError("intent_type='resequence' must require plan mutation.")
             if self.requires_manual_review:
-                raise ValueError(
-                    "intent_type='resequence' cannot require manual review."
-                )
+                raise ValueError("intent_type='resequence' cannot require manual review.")
             if self.should_close_stage:
                 raise ValueError("intent_type='resequence' cannot close the stage.")
             if self.can_continue_after_application:
@@ -172,15 +150,11 @@ class ResolvedPostBatchIntent:
 
         elif self.intent_type == "replan":
             if self.mutation_scope != "replan":
-                raise ValueError(
-                    "intent_type='replan' requires mutation_scope='replan'."
-                )
+                raise ValueError("intent_type='replan' requires mutation_scope='replan'.")
             if not self.requires_plan_mutation:
                 raise ValueError("intent_type='replan' must require plan mutation.")
             if self.remaining_plan_still_valid:
-                raise ValueError(
-                    "intent_type='replan' requires remaining_plan_still_valid=False."
-                )
+                raise ValueError("intent_type='replan' requires remaining_plan_still_valid=False.")
             if self.requires_manual_review:
                 raise ValueError("intent_type='replan' cannot require manual review.")
             if self.should_close_stage:
@@ -192,13 +166,9 @@ class ResolvedPostBatchIntent:
 
         elif self.intent_type == "manual_review":
             if self.mutation_scope != "none":
-                raise ValueError(
-                    "intent_type='manual_review' requires mutation_scope='none'."
-                )
+                raise ValueError("intent_type='manual_review' requires mutation_scope='none'.")
             if self.requires_plan_mutation:
-                raise ValueError(
-                    "intent_type='manual_review' cannot require plan mutation."
-                )
+                raise ValueError("intent_type='manual_review' cannot require plan mutation.")
             if self.requires_all_new_tasks_assigned:
                 raise ValueError(
                     "intent_type='manual_review' cannot require assignment as an automatic action."
@@ -208,9 +178,7 @@ class ResolvedPostBatchIntent:
                     "intent_type='manual_review' requires requires_manual_review=True."
                 )
             if self.can_continue_after_application:
-                raise ValueError(
-                    "intent_type='manual_review' cannot continue automatically."
-                )
+                raise ValueError("intent_type='manual_review' cannot continue automatically.")
             if self.should_close_stage:
                 raise ValueError("intent_type='manual_review' cannot close the stage.")
             if self.reopened_finalization:
@@ -224,17 +192,13 @@ class ResolvedPostBatchIntent:
             if self.requires_plan_mutation:
                 raise ValueError("intent_type='close' cannot require plan mutation.")
             if self.requires_all_new_tasks_assigned:
-                raise ValueError(
-                    "intent_type='close' cannot require assignment of new work."
-                )
+                raise ValueError("intent_type='close' cannot require assignment of new work.")
             if self.has_new_recovery_tasks:
                 raise ValueError(
                     "intent_type='close' is invalid while new recovery tasks still exist."
                 )
             if not self.should_close_stage:
-                raise ValueError(
-                    "intent_type='close' requires should_close_stage=True."
-                )
+                raise ValueError("intent_type='close' requires should_close_stage=True.")
             if self.requires_manual_review:
                 raise ValueError("intent_type='close' cannot require manual review.")
             if self.can_continue_after_application:

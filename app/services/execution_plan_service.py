@@ -53,9 +53,7 @@ def _build_project_context(project: Project) -> ProjectExecutionContext:
     )
 
 
-def _build_candidate_atomic_task(
-    task: Task, parent_task: Task | None
-) -> CandidateAtomicTask:
+def _build_candidate_atomic_task(task: Task, parent_task: Task | None) -> CandidateAtomicTask:
     parent_refined_title = None
     parent_high_level_title = None
 
@@ -218,9 +216,7 @@ def _normalize_execution_plan(
     normalized_checkpoints: list[CheckpointDefinition] = []
 
     if not raw_plan.execution_batches:
-        raise ExecutionPlanServiceError(
-            "Execution plan generation returned no execution batches."
-        )
+        raise ExecutionPlanServiceError("Execution plan generation returned no execution batches.")
 
     source_checkpoints_by_id = {
         checkpoint.checkpoint_id: checkpoint for checkpoint in raw_plan.checkpoints
@@ -286,9 +282,7 @@ def _normalize_execution_plan(
             ),
             evaluation_focus=evaluation_focus,
             can_introduce_new_tasks=(
-                source_checkpoint.can_introduce_new_tasks
-                if source_checkpoint is not None
-                else True
+                source_checkpoint.can_introduce_new_tasks if source_checkpoint is not None else True
             ),
             can_resequence_remaining_work=(
                 source_checkpoint.can_resequence_remaining_work
@@ -395,9 +389,7 @@ def generate_execution_plan(
     sequencing_input = build_execution_plan_input(db=db, project_id=project_id)
     raw_plan = call_execution_sequencer_model(sequencing_input)
 
-    has_persisted_plan = _project_has_persisted_execution_plan(
-        db=db, project_id=project_id
-    )
+    has_persisted_plan = _project_has_persisted_execution_plan(db=db, project_id=project_id)
     plan_version = _resolve_generated_plan_version(
         project=project,
         has_persisted_plan=has_persisted_plan,
@@ -421,9 +413,7 @@ def persist_execution_plan(
     if not project:
         raise ExecutionPlanServiceError(f"Project {project_id} not found")
 
-    has_persisted_plan = _project_has_persisted_execution_plan(
-        db=db, project_id=project_id
-    )
+    has_persisted_plan = _project_has_persisted_execution_plan(db=db, project_id=project_id)
     expected_plan_version = _resolve_generated_plan_version(
         project=project,
         has_persisted_plan=has_persisted_plan,

@@ -74,9 +74,7 @@ def validate_code_task_with_llm(
     )
 
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        CodeValidationLLMOutput.model_json_schema()
-    )
+    strict_schema = to_openai_strict_json_schema(CodeValidationLLMOutput.model_json_schema())
     user_prompt = build_code_task_validator_user_prompt(
         validation_input=validation_input,
         renderable_evidence=renderable_evidence,
@@ -96,12 +94,8 @@ def validate_code_task_with_llm(
             f"Code validator returned structurally invalid output: {str(exc)}"
         ) from exc
 
-    validated_evidence_ids = [
-        item.evidence_id for item in renderable_evidence.supported_items
-    ]
-    unconsumed_evidence_ids = [
-        item.evidence_id for item in renderable_evidence.unsupported_items
-    ]
+    validated_evidence_ids = [item.evidence_id for item in renderable_evidence.supported_items]
+    unconsumed_evidence_ids = [item.evidence_id for item in renderable_evidence.unsupported_items]
 
     followup_validation_required = bool(unconsumed_evidence_ids)
     recommended_next_validator_keys = _recommend_followup_validators(

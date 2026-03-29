@@ -60,30 +60,20 @@ def _validate_atomic_task_quality(tasks: list[Task]) -> None:
     for task in tasks:
         normalized_title = (task.title or "").strip().lower()
         if normalized_title in seen_titles:
-            raise AtomicTaskGenerationError(
-                f"Duplicate atomic task title detected: {task.title}"
-            )
+            raise AtomicTaskGenerationError(f"Duplicate atomic task title detected: {task.title}")
         seen_titles.add(normalized_title)
 
         if len((task.title or "").strip()) < 8:
-            raise AtomicTaskGenerationError(
-                "Atomic task title is too short to be actionable."
-            )
+            raise AtomicTaskGenerationError("Atomic task title is too short to be actionable.")
 
         if len((task.description or "").strip()) < 20:
-            raise AtomicTaskGenerationError(
-                f"description too short in atomic task: {task.title}"
-            )
+            raise AtomicTaskGenerationError(f"description too short in atomic task: {task.title}")
 
         if len((task.summary or "").strip()) < 10:
-            raise AtomicTaskGenerationError(
-                f"summary too short in atomic task: {task.title}"
-            )
+            raise AtomicTaskGenerationError(f"summary too short in atomic task: {task.title}")
 
         if len((task.objective or "").strip()) < 10:
-            raise AtomicTaskGenerationError(
-                f"objective too short in atomic task: {task.title}"
-            )
+            raise AtomicTaskGenerationError(f"objective too short in atomic task: {task.title}")
 
         if len((task.proposed_solution or "").strip()) < 20:
             raise AtomicTaskGenerationError(

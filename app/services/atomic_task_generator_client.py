@@ -85,9 +85,7 @@ Self-check before finalizing each atomic task:
 
 def _validate_available_executors(available_executors: list[str]) -> list[str]:
     invalid_executors = [
-        executor
-        for executor in available_executors
-        if executor not in VALID_EXECUTOR_TYPES
+        executor for executor in available_executors if executor not in VALID_EXECUTOR_TYPES
     ]
     if invalid_executors:
         raise ValueError(
@@ -251,9 +249,7 @@ def call_atomic_task_generator_model(
     available_executors: list[str],
 ) -> AtomicTaskGenerationOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        AtomicTaskGenerationOutput.model_json_schema()
-    )
+    strict_schema = to_openai_strict_json_schema(AtomicTaskGenerationOutput.model_json_schema())
 
     first_user_prompt = build_atomic_user_prompt(
         project_name=project_name,

@@ -39,12 +39,8 @@ def _build_engine_result(
         decision=decision,
         summary=summary,
         details="Execution details.",
-        completed_scope="Completed scope."
-        if decision == EXECUTION_DECISION_PARTIAL
-        else None,
-        remaining_scope="Remaining scope."
-        if decision != EXECUTION_DECISION_PARTIAL
-        else None,
+        completed_scope="Completed scope." if decision == EXECUTION_DECISION_PARTIAL else None,
+        remaining_scope="Remaining scope." if decision != EXECUTION_DECISION_PARTIAL else None,
         blockers_found=[],
         validation_notes=[],
         output_snapshot="executor output",
@@ -70,9 +66,7 @@ def _set_task_status(db, task_id: int, status: str) -> str:
 def _patch_engine(
     monkeypatch, engine_result: ExecutionResult, *, captured_request: dict | None = None
 ):
-    def _fake_build_execution_request(
-        db, task, execution_run_id, resolved_executor_type
-    ):
+    def _fake_build_execution_request(db, task, execution_run_id, resolved_executor_type):
         request = types.SimpleNamespace(
             task_id=task.id,
             project_id=task.project_id,
@@ -122,9 +116,7 @@ def _patch_workspace_runtime(monkeypatch, *, promoted_state: dict | None = None)
                 outputs_dir=".",
             ),
             promote_workspace_to_source=lambda **kwargs: (
-                promoted_state.__setitem__("called", True)
-                if promoted_state is not None
-                else None
+                promoted_state.__setitem__("called", True) if promoted_state is not None else None
             ),
         )
 
@@ -206,9 +198,7 @@ def test_execute_task_sync_rejects_non_atomic_task(
         executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
 
-    with pytest.raises(
-        TaskExecutionServiceError, match="Only atomic tasks can be executed"
-    ):
+    with pytest.raises(TaskExecutionServiceError, match="Only atomic tasks can be executed"):
         execute_task_sync(db_session, non_atomic_task.id)
 
 

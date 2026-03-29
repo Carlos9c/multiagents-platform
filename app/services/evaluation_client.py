@@ -310,9 +310,7 @@ def call_stage_evaluation_model(
     additional_context: str = "",
 ) -> StageEvaluationOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        StageEvaluationOutput.model_json_schema()
-    )
+    strict_schema = to_openai_strict_json_schema(StageEvaluationOutput.model_json_schema())
 
     first_user_prompt = build_stage_evaluation_user_prompt(
         project_name=project_name,

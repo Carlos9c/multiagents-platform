@@ -277,18 +277,14 @@ def test_workflow_rejects_non_atomic_task_inside_execution_batch(
     )
 
     def _should_not_execute(db, task_id):
-        raise AssertionError(
-            "execute_task_sync should never be called for a non-atomic task."
-        )
+        raise AssertionError("execute_task_sync should never be called for a non-atomic task.")
 
     monkeypatch.setattr(
         "app.services.project_workflow_service.execute_task_sync",
         _should_not_execute,
     )
 
-    with pytest.raises(
-        ProjectWorkflowServiceError, match="Only atomic tasks may be executed"
-    ):
+    with pytest.raises(ProjectWorkflowServiceError, match="Only atomic tasks may be executed"):
         run_project_workflow(
             db=db_session,
             project_id=project.id,
@@ -2639,11 +2635,7 @@ def test_workflow_batch_trace_iteration_summary_and_result_blocked_batches_are_c
     assert last_trace_payload["batch_id"] == "batch_2"
     assert last_trace_payload["resolved_intent_type"] == "manual_review"
 
-    assert (
-        iteration.blocked_batch_ids_after_iteration
-        == result.blocked_batches
-        == ["batch_3"]
-    )
+    assert iteration.blocked_batch_ids_after_iteration == result.blocked_batches == ["batch_3"]
 
 
 def test_workflow_result_matches_last_iteration_when_manual_review_stops_execution(
@@ -3069,11 +3061,7 @@ def test_workflow_artifacts_and_results_tell_a_consistent_execution_story(
     assert batch_trace_payloads[2]["patched_plan_version"] is None
     assert batch_trace_payloads[2]["resolved_intent_type"] == "manual_review"
 
-    assert (
-        iteration.blocked_batch_ids_after_iteration
-        == result.blocked_batches
-        == ["batch_3"]
-    )
+    assert iteration.blocked_batch_ids_after_iteration == result.blocked_batches == ["batch_3"]
 
 
 def test_workflow_completed_batches_never_contains_duplicates(
@@ -3403,15 +3391,9 @@ def test_workflow_blocked_batches_never_includes_completed_batches(
     db_session.commit()
     db_session.refresh(project)
 
-    task_1 = make_task(
-        project_id=project.id, title="Atomic task 1", status=TASK_STATUS_PENDING
-    )
-    task_2 = make_task(
-        project_id=project.id, title="Atomic task 2", status=TASK_STATUS_PENDING
-    )
-    task_3 = make_task(
-        project_id=project.id, title="Atomic task 3", status=TASK_STATUS_PENDING
-    )
+    task_1 = make_task(project_id=project.id, title="Atomic task 1", status=TASK_STATUS_PENDING)
+    task_2 = make_task(project_id=project.id, title="Atomic task 2", status=TASK_STATUS_PENDING)
+    task_3 = make_task(project_id=project.id, title="Atomic task 3", status=TASK_STATUS_PENDING)
 
     plan = make_execution_plan(
         plan_version=113,

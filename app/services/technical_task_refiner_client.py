@@ -189,9 +189,7 @@ def call_technical_task_refiner_model(
     parent_task_out_of_scope: str,
 ) -> TechnicalTaskRefinementOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        TechnicalTaskRefinementOutput.model_json_schema()
-    )
+    strict_schema = to_openai_strict_json_schema(TechnicalTaskRefinementOutput.model_json_schema())
 
     first_user_prompt = build_refiner_user_prompt(
         project_name=project_name,

@@ -47,9 +47,7 @@ class CandidateAtomicTask(BaseModel):
     @model_validator(mode="after")
     def validate_atomic_level(self):
         if self.planning_level != "atomic":
-            raise ValueError(
-                "Execution sequencer only accepts atomic tasks as candidates."
-            )
+            raise ValueError("Execution sequencer only accepts atomic tasks as candidates.")
         return self
 
 
@@ -182,9 +180,7 @@ class ExecutionPlan(BaseModel):
 
         if self.plan_version == 1:
             if self.supersedes_plan_version is not None:
-                raise ValueError(
-                    "ExecutionPlan.plan_version=1 cannot supersede a previous plan."
-                )
+                raise ValueError("ExecutionPlan.plan_version=1 cannot supersede a previous plan.")
         else:
             if self.supersedes_plan_version is None:
                 raise ValueError(
@@ -284,9 +280,7 @@ class ExecutionPlan(BaseModel):
         if final_checkpoint is None:
             raise ValueError("The final batch must have a valid final checkpoint.")
         if final_checkpoint.after_batch_id != final_batch.batch_id:
-            raise ValueError(
-                "The final checkpoint must point to the final execution batch."
-            )
+            raise ValueError("The final checkpoint must point to the final execution batch.")
         if "stage_closure" not in final_checkpoint.evaluation_focus:
             raise ValueError(
                 "The final checkpoint must include 'stage_closure' in evaluation_focus."

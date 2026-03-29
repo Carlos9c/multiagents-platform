@@ -17,9 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR))
 
-os.environ.setdefault(
-    "AGENTS_PROJECTS_ROOT", str(Path.cwd() / ".pytest_agents_projects")
-)
+os.environ.setdefault("AGENTS_PROJECTS_ROOT", str(Path.cwd() / ".pytest_agents_projects"))
 
 from app.db.base import Base
 from app.models.artifact import Artifact
@@ -297,9 +295,7 @@ def make_recovery_decision() -> Callable[..., RecoveryDecision]:
         evaluation_guidance: str | None = None,
         decision_origin: str | None = "post_batch_recovery",
     ) -> RecoveryDecision:
-        task_payloads = [
-            RecoveryTaskCreate(**payload) for payload in (created_tasks or [])
-        ]
+        task_payloads = [RecoveryTaskCreate(**payload) for payload in (created_tasks or [])]
         return RecoveryDecision(
             source_task_id=source_task_id,
             source_run_id=source_run_id,

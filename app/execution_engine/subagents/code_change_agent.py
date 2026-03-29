@@ -147,9 +147,7 @@ class CodeChangeAgent(BaseSubagent):
         state: ResolutionState,
     ) -> ResolutionState:
         if not self.supports_step_kind(step.kind):
-            raise SubagentRejectedStepError(
-                f"{self.name} does not support step kind '{step.kind}'"
-            )
+            raise SubagentRejectedStepError(f"{self.name} does not support step kind '{step.kind}'")
 
         if state.planned_file_operations is None:
             raise SubagentRejectedStepError(
@@ -158,15 +156,11 @@ class CodeChangeAgent(BaseSubagent):
 
         pending_plan = state.get_pending_plan_subset()
         if pending_plan is None or not pending_plan.operations:
-            raise SubagentRejectedStepError(
-                "There are no pending file operations to materialize."
-            )
+            raise SubagentRejectedStepError("There are no pending file operations to materialize.")
 
         state.increment_materialization_attempts()
 
-        schema = to_openai_strict_json_schema(
-            FileMaterializationResult.model_json_schema()
-        )
+        schema = to_openai_strict_json_schema(FileMaterializationResult.model_json_schema())
         raw = self.runtime.generate_structured(
             system_prompt=CODE_CHANGE_AGENT_SYSTEM_PROMPT,
             user_prompt=_build_user_prompt(request, state, pending_plan),
@@ -177,9 +171,7 @@ class CodeChangeAgent(BaseSubagent):
         try:
             materialization = FileMaterializationResult.model_validate(raw)
         except ValidationError as exc:
-            raise SubagentRejectedStepError(
-                f"Invalid code change output: {str(exc)}"
-            ) from exc
+            raise SubagentRejectedStepError(f"Invalid code change output: {str(exc)}") from exc
 
         expected_paths = {item.path for item in pending_plan.sorted_operations()}
         returned_paths = {item.path for item in materialization.files}
@@ -225,17 +217,13 @@ class CodeChangeAgent(BaseSubagent):
                 state.mark_operation_applied(generated.path)
 
                 change_type = (
-                    CHANGE_TYPE_CREATED
-                    if generated.operation == "create"
-                    else CHANGE_TYPE_MODIFIED
+                    CHANGE_TYPE_CREATED if generated.operation == "create" else CHANGE_TYPE_MODIFIED
                 )
 
                 state.evidence.changed_files.append(
                     ChangedFile(path=generated.path, change_type=change_type)
                 )
-                state.evidence.notes.append(
-                    f"Wrote file {generated.path} at {absolute_path}"
-                )
+                state.evidence.notes.append(f"Wrote file {generated.path} at {absolute_path}")
 
         except Exception:
             restore_file_snapshot(

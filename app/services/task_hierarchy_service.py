@@ -42,10 +42,7 @@ def _get_task_or_raise(db: Session, task_id: int) -> Task:
 
 def _get_children(db: Session, parent_task_id: int) -> list[Task]:
     return (
-        db.query(Task)
-        .filter(Task.parent_task_id == parent_task_id)
-        .order_by(Task.id.asc())
-        .all()
+        db.query(Task).filter(Task.parent_task_id == parent_task_id).order_by(Task.id.asc()).all()
     )
 
 

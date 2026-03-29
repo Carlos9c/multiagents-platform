@@ -31,16 +31,12 @@ def _validate_and_parse_command(command: str) -> list[str]:
 
     for token in FORBIDDEN_SHELL_TOKENS:
         if token in normalized:
-            raise CommandToolError(
-                f"Command contains forbidden shell operator '{token}'."
-            )
+            raise CommandToolError(f"Command contains forbidden shell operator '{token}'.")
 
     try:
         argv = shlex.split(normalized, posix=False)
     except ValueError as exc:
-        raise CommandToolError(
-            f"Command could not be parsed safely: {str(exc)}"
-        ) from exc
+        raise CommandToolError(f"Command could not be parsed safely: {str(exc)}") from exc
 
     if not argv:
         raise CommandToolError("Command cannot be empty after parsing.")
