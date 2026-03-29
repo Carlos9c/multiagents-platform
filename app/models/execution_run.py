@@ -3,7 +3,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-
 EXECUTION_RUN_STATUS_PENDING = "pending"
 EXECUTION_RUN_STATUS_RUNNING = "running"
 EXECUTION_RUN_STATUS_SUCCEEDED = "succeeded"

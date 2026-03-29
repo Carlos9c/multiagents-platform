@@ -6,7 +6,6 @@ from app.schemas.recovery import RecoveryDecision
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
-
 RECOVERY_SYSTEM_PROMPT = """
 You are a senior recovery decision agent.
 

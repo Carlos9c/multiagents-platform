@@ -1,9 +1,9 @@
-import types
 import json
+import types
 
-from app.models.artifact import Artifact
 import pytest
 
+from app.models.artifact import Artifact
 from app.models.task import (
     EXECUTION_ENGINE,
     PENDING_ENGINE_ROUTING_EXECUTOR,

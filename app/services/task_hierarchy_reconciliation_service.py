@@ -55,7 +55,9 @@ def reconcile_task_hierarchy_after_changes(
             consolidate_parent_task_statuses(
                 db=db,
                 parent_task_id=parent_task_id,
+                auto_commit=False,
             )
+        db.commit()
     except TaskHierarchyServiceError as exc:
         raise TaskHierarchyReconciliationServiceError(
             f"Failed to reconcile affected parent hierarchies: {str(exc)}"

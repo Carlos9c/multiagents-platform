@@ -27,16 +27,16 @@ def generate_atomic(
         raise HTTPException(
             status_code=500,
             detail=f"Atomic task generator output validation failed: {str(exc)}",
-        )
+        ) from exc
     except ValueError as exc:
         message = str(exc)
         if message.startswith("Project ") and message.endswith(" not found"):
-            raise HTTPException(status_code=404, detail=message)
+            raise HTTPException(status_code=404, detail=message) from exc
         if message.startswith("Task ") and message.endswith(" not found"):
-            raise HTTPException(status_code=404, detail=message)
-        raise HTTPException(status_code=400, detail=message)
+            raise HTTPException(status_code=404, detail=message) from exc
+        raise HTTPException(status_code=400, detail=message) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail=f"Atomic task generation failed: {str(exc)}",
-        )
+        ) from exc

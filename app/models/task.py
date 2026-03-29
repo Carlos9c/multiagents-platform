@@ -3,7 +3,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
-
 PLANNING_LEVEL_HIGH_LEVEL = "high_level"
 PLANNING_LEVEL_REFINED = "refined"
 PLANNING_LEVEL_ATOMIC = "atomic"

@@ -1,6 +1,6 @@
-from dataclasses import dataclass
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -25,10 +25,10 @@ from app.models.execution_run import (
     ExecutionRun,
 )
 from app.models.task import (
-    EXECUTION_ENGINE,
     EXECUTABLE_TASK_STATUSES,
-    PLANNING_LEVEL_ATOMIC,
+    EXECUTION_ENGINE,
     PENDING_ENGINE_ROUTING_EXECUTOR,
+    PLANNING_LEVEL_ATOMIC,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
@@ -186,8 +186,7 @@ def _store_task_execution_agent_sequence(
 ) -> None:
     task.last_execution_agent_sequence = execution_agent_sequence_json
     db.add(task)
-    db.commit()
-    db.refresh(task)
+    db.flush()
 
 
 def _extract_artifacts_created_from_engine_result(result) -> str | None:
@@ -288,12 +287,7 @@ def _collect_persisted_artifacts_for_task(
     *,
     task_id: int,
 ) -> list[Artifact]:
-    return (
-        db.query(Artifact)
-        .filter(Artifact.task_id == task_id)
-        .order_by(Artifact.id.asc())
-        .all()
-    )
+    return db.query(Artifact).filter(Artifact.task_id == task_id).order_by(Artifact.id.asc()).all()
 
 
 def _persist_task_status(
@@ -305,46 +299,8 @@ def _persist_task_status(
     task = _get_task_or_raise(db, task_id)
     task.status = status
     db.add(task)
-    db.commit()
-    db.refresh(task)
+    db.flush()
     return task.status
-
-
-def _apply_validation_result_to_task(
-    db: Session,
-    *,
-    task_id: int,
-    validation_decision: str,
-    final_task_status: str | None,
-) -> str:
-    if final_task_status:
-        return _persist_task_status(
-            db,
-            task_id=task_id,
-            status=final_task_status,
-        )
-
-    if validation_decision == "completed":
-        return _persist_task_status(
-            db,
-            task_id=task_id,
-            status=TASK_STATUS_COMPLETED,
-        )
-
-    if validation_decision == "partial":
-        return _persist_task_status(
-            db,
-            task_id=task_id,
-            status=TASK_STATUS_PARTIAL,
-        )
-
-    if validation_decision in {"failed", "manual_review"}:
-        mark_task_failed(db, task_id)
-        return _get_task_or_raise(db, task_id).status
-
-    raise TaskExecutionServiceError(
-        f"Unsupported validation decision '{validation_decision}'."
-    )
 
 
 def _serialize_validation_result_artifact(
@@ -381,9 +337,7 @@ def _serialize_validation_result_artifact(
         "workspace_promoted_to_source": workspace_promoted_to_source,
         "validated_evidence_ids": list(validation_result.validated_evidence_ids or []),
         "unconsumed_evidence_ids": list(validation_result.unconsumed_evidence_ids or []),
-        "findings": [
-            finding.model_dump(mode="json") for finding in validation_result.findings
-        ],
+        "findings": [finding.model_dump(mode="json") for finding in validation_result.findings],
         "metadata": dict(validation_result.metadata or {}),
     }
 
@@ -412,7 +366,7 @@ def _persist_validation_result_artifact(
         artifact_type=VALIDATION_RESULT_ARTIFACT_TYPE,
         content=json.dumps(artifact_payload, ensure_ascii=False),
         created_by=VALIDATION_RESULT_ARTIFACT_CREATED_BY,
-        auto_commit=True,
+        auto_commit=False,
     )
 
 
@@ -426,6 +380,8 @@ def _mark_task_and_run_failed_after_post_execution_error(
     error_message: str,
     validation_notes: list[str] | None = None,
 ) -> None:
+    db.rollback()
+
     execution_agent_sequence_json = _serialize_execution_agent_sequence(
         execution_result.execution_agent_sequence
     )
@@ -444,21 +400,21 @@ def _mark_task_and_run_failed_after_post_execution_error(
         completed_scope=execution_result.completed_scope,
         remaining_scope=execution_result.remaining_scope,
         blockers_found=(
-            "; ".join(execution_result.blockers_found)
-            if execution_result.blockers_found
-            else None
+            "; ".join(execution_result.blockers_found) if execution_result.blockers_found else None
         ),
         validation_notes="; ".join(
             (execution_result.validation_notes or []) + (validation_notes or [])
         )
         or None,
+        auto_commit=False,
     )
     _store_task_execution_agent_sequence(
         db=db,
         task=task,
         execution_agent_sequence_json=execution_agent_sequence_json,
     )
-    mark_task_failed(db, task.id)
+    mark_task_failed(db, task.id, auto_commit=False)
+    db.commit()
 
 
 def _attempt_reconcile_after_failure(
@@ -495,9 +451,7 @@ def _resolve_final_task_status(
     if validation_decision in {"failed", "manual_review"}:
         return TASK_STATUS_FAILED
 
-    raise TaskExecutionServiceError(
-        f"Unsupported validation decision '{validation_decision}'."
-    )
+    raise TaskExecutionServiceError(f"Unsupported validation decision '{validation_decision}'.")
 
 
 def _assert_validation_post_conditions(
@@ -565,7 +519,7 @@ def _assert_validation_post_conditions(
         raise TaskExecutionServiceError(
             "Invariant violation: validation_result artifact final_task_status does not match the persisted task status."
         )
-    
+
 
 def _validate_after_execution(
     db: Session,
@@ -591,9 +545,7 @@ def _validate_after_execution(
             persisted_artifacts=persisted_artifacts,
         )
     except ValidationServiceError as exc:
-        error_message = (
-            f"Execution finished but validation could not be completed for task {task.id}: {str(exc)}"
-        )
+        error_message = f"Execution finished but validation could not be completed for task {task.id}: {str(exc)}"
         _mark_task_and_run_failed_after_post_execution_error(
             db=db,
             task=task,
@@ -639,9 +591,7 @@ def _validate_after_execution(
             "can be considered complete."
         )
     else:
-        raise TaskExecutionServiceError(
-            f"Unsupported validation decision '{decision}'."
-        )
+        raise TaskExecutionServiceError(f"Unsupported validation decision '{decision}'.")
 
     workspace_promoted_to_source = False
 
@@ -674,7 +624,10 @@ def _validate_after_execution(
             status=final_task_status,
         )
 
+        db.commit()
+
     except TaskExecutionServiceError as exc:
+        db.rollback()
         _mark_task_and_run_failed_after_post_execution_error(
             db=db,
             task=task,
@@ -686,9 +639,8 @@ def _validate_after_execution(
         )
         raise
     except Exception as exc:
-        error_message = (
-            f"Execution finished but post-validation processing failed for task {task.id}: {str(exc)}"
-        )
+        db.rollback()
+        error_message = f"Execution finished but post-validation processing failed for task {task.id}: {str(exc)}"
         _mark_task_and_run_failed_after_post_execution_error(
             db=db,
             task=task,
@@ -706,13 +658,10 @@ def _validate_after_execution(
         run_id=run_id,
     )
 
-    try:
-        _reconcile_hierarchy_or_raise(
-            db=db,
-            affected_task_ids=[task.id],
-        )
-    except TaskExecutionServiceError:
-        raise
+    _reconcile_hierarchy_or_raise(
+        db=db,
+        affected_task_ids=[task.id],
+    )
 
     refreshed_task = _get_task_or_raise(db, task.id)
     refreshed_run = _get_execution_run_or_raise(db, run_id)
@@ -747,9 +696,7 @@ def _handle_terminal_execution_outcome(
     )
 
     blockers_found = (
-        "; ".join(engine_result.blockers_found)
-        if engine_result.blockers_found
-        else None
+        "; ".join(engine_result.blockers_found) if engine_result.blockers_found else None
     )
 
     if engine_result.decision == EXECUTION_DECISION_FAILED:
@@ -768,12 +715,16 @@ def _handle_terminal_execution_outcome(
             remaining_scope=engine_result.remaining_scope,
             blockers_found=blockers_found,
             validation_notes="; ".join(engine_result.validation_notes or []),
+            auto_commit=False,
         )
-        mark_task_failed(db, task.id)
-        _reconcile_hierarchy_or_raise(
+        mark_task_failed(db, task.id, auto_commit=False)
+        db.commit()
+
+        _attempt_reconcile_after_failure(
             db=db,
             affected_task_ids=[task.id],
         )
+
         refreshed_task = _get_task_or_raise(db, task.id)
         refreshed_run = _get_execution_run_or_raise(db, run_id)
 
@@ -800,12 +751,16 @@ def _handle_terminal_execution_outcome(
             execution_agent_sequence=execution_agent_sequence_json,
             blockers_found=blockers_found,
             validation_notes="; ".join(engine_result.validation_notes or []),
+            auto_commit=False,
         )
-        mark_task_failed(db, task.id)
-        _reconcile_hierarchy_or_raise(
+        mark_task_failed(db, task.id, auto_commit=False)
+        db.commit()
+
+        _attempt_reconcile_after_failure(
             db=db,
             affected_task_ids=[task.id],
         )
+
         refreshed_task = _get_task_or_raise(db, task.id)
         refreshed_run = _get_execution_run_or_raise(db, run_id)
 
@@ -838,8 +793,9 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         _validate_task_is_executable(task)
         resolved_executor_type = _resolve_executor_type_for_task(task)
 
-        mark_execution_run_started(db, run_id)
-        mark_task_running(db, task.id)
+        mark_execution_run_started(db, run_id, auto_commit=False)
+        mark_task_running(db, task.id, auto_commit=False)
+        db.commit()
 
         logger.info(
             "execution_engine_starting task_id=%s run_id=%s project_id=%s executor_type=%s",
@@ -902,17 +858,17 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 work_summary=engine_result.summary,
                 work_details=engine_result.details,
                 execution_agent_sequence=execution_agent_sequence_json,
-                artifacts_created=_extract_artifacts_created_from_engine_result(
-                    engine_result
-                ),
+                artifacts_created=_extract_artifacts_created_from_engine_result(engine_result),
                 completed_scope=engine_result.completed_scope,
                 validation_notes="; ".join(engine_result.validation_notes or []),
+                auto_commit=False,
             )
             _store_task_execution_agent_sequence(
                 db=db,
                 task=task,
                 execution_agent_sequence_json=execution_agent_sequence_json,
             )
+            db.commit()
 
             return _validate_after_execution(
                 db=db,
@@ -958,14 +914,17 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             validation_notes="; ".join(
                 exc.validation_notes or ["Execution was rejected at the execution engine boundary."]
             ),
+            auto_commit=False,
         )
         _store_task_execution_agent_sequence(
             db=db,
             task=task,
             execution_agent_sequence_json=execution_agent_sequence_json,
         )
-        mark_task_failed(db, task.id)
-        _reconcile_hierarchy_or_raise(
+        mark_task_failed(db, task.id, auto_commit=False)
+        db.commit()
+
+        _attempt_reconcile_after_failure(
             db=db,
             affected_task_ids=[task.id],
         )
@@ -996,14 +955,17 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
             execution_agent_sequence=execution_agent_sequence_json,
             validation_notes="Execution engine internal failure.",
+            auto_commit=False,
         )
         _store_task_execution_agent_sequence(
             db=db,
             task=task,
             execution_agent_sequence_json=execution_agent_sequence_json,
         )
-        mark_task_failed(db, task.id)
-        _reconcile_hierarchy_or_raise(
+        mark_task_failed(db, task.id, auto_commit=False)
+        db.commit()
+
+        _attempt_reconcile_after_failure(
             db=db,
             affected_task_ids=[task.id],
         )
@@ -1033,14 +995,17 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             failure_code="task_execution_service_error",
             recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
             execution_agent_sequence=execution_agent_sequence_json,
+            auto_commit=False,
         )
         _store_task_execution_agent_sequence(
             db=db,
             task=task,
             execution_agent_sequence_json=execution_agent_sequence_json,
         )
-        mark_task_failed(db, task.id)
-        _reconcile_hierarchy_or_raise(
+        mark_task_failed(db, task.id, auto_commit=False)
+        db.commit()
+
+        _attempt_reconcile_after_failure(
             db=db,
             affected_task_ids=[task.id],
         )

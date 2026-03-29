@@ -9,7 +9,6 @@ from app.execution_engine.contracts import ExecutionEvidence
 from app.execution_engine.file_operations import FileOperationPlan
 from app.execution_engine.monitoring import OrchestratorTrace
 
-
 ExecutionPhase = Literal[
     "discovery",
     "planning",

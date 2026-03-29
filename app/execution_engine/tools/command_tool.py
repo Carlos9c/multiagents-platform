@@ -6,7 +6,6 @@ from pathlib import Path
 
 from app.execution_engine.contracts import CommandExecution
 
-
 FORBIDDEN_SHELL_TOKENS = [
     "&&",
     "||",

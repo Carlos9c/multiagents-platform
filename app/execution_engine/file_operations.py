@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
 FILE_OPERATION_CREATE = "create"
 FILE_OPERATION_MODIFY = "modify"
 

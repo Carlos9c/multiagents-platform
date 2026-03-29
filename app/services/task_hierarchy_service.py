@@ -120,6 +120,7 @@ def consolidate_parent_task_statuses(
     *,
     task_id: int | None = None,
     parent_task_id: int | None = None,
+    auto_commit: bool = True,
 ) -> ParentConsolidationResult:
     """
     Recompute and propagate deterministic status consolidation up the hierarchy.
@@ -153,7 +154,10 @@ def consolidate_parent_task_statuses(
 
         current_parent_id = parent_task.parent_task_id
 
-    db.commit()
+    if auto_commit:
+        db.commit()
+    else:
+        db.flush()
 
     return ParentConsolidationResult(
         starting_parent_task_id=starting_parent_task_id,

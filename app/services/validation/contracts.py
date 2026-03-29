@@ -4,7 +4,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 VALIDATION_DISCIPLINE_CODE = "code"
 
 VALIDATION_MODE_POST_EXECUTION = "post_execution"

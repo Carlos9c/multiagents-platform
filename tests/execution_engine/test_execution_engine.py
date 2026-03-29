@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from app.models.task import EXECUTION_ENGINE
+
 from app.execution_engine.agent_runtime.base import BaseAgentRuntime
 from app.execution_engine.budget import LoopBudget
 from app.execution_engine.contracts import (
@@ -28,6 +28,7 @@ from app.execution_engine.resolution_state import ResolutionState
 from app.execution_engine.subagent_registry import SubagentRegistry
 from app.execution_engine.subagents.base import BaseSubagent
 from app.execution_engine.subagents.code_change_agent import CodeChangeAgent
+from app.models.task import EXECUTION_ENGINE
 
 
 class FakeRuntime(BaseAgentRuntime):

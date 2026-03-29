@@ -34,7 +34,6 @@ from app.execution_engine.subagent_registry import (
 from app.execution_engine.subagents.base import SubagentRejectedStepError
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
-
 logger = logging.getLogger(__name__)
 
 

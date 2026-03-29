@@ -42,8 +42,7 @@ class ExecutionRunBase(BaseModel):
     def validate_status(cls, value: str) -> str:
         if value not in VALID_EXECUTION_RUN_STATUSES:
             raise ValueError(
-                f"Invalid status '{value}'. "
-                f"Allowed values: {sorted(VALID_EXECUTION_RUN_STATUSES)}"
+                f"Invalid status '{value}'. Allowed values: {sorted(VALID_EXECUTION_RUN_STATUSES)}"
             )
         return value
 
@@ -54,7 +53,7 @@ class ExecutionRunBase(BaseModel):
             return value
         if value not in VALID_FAILURE_TYPES:
             raise ValueError(
-                f"Invalid failure_type '{value}'. " f"Allowed values: {sorted(VALID_FAILURE_TYPES)}"
+                f"Invalid failure_type '{value}'. Allowed values: {sorted(VALID_FAILURE_TYPES)}"
             )
         return value
 

@@ -2,13 +2,12 @@
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.recovery import RecoveryDecision
-
 from app.models.task import (
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
 )
+from app.schemas.recovery import RecoveryDecision
 from app.services.recovery_service import (
     materialize_recovery_decision,
 )

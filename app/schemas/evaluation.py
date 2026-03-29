@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-
 StageEvaluationDecision = Literal[
     "stage_completed",
     "stage_incomplete",
@@ -266,8 +265,7 @@ class StageEvaluationOutput(BaseModel):
         if self.recommended_next_action == "manual_review":
             if not self.manual_review_required:
                 raise ValueError(
-                    "recommended_next_action='manual_review' requires "
-                    "manual_review_required=true."
+                    "recommended_next_action='manual_review' requires manual_review_required=true."
                 )
 
         if self.recommended_next_action == "continue_current_plan":

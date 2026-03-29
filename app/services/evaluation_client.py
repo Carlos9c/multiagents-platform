@@ -4,7 +4,6 @@ from app.schemas.evaluation import StageEvaluationOutput
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
-
 STAGE_EVALUATION_SYSTEM_PROMPT = """
 You evaluate whether the CURRENT PROJECT STAGE should be closed, continue as planned, be resequenced, be replanned, or require manual review.
 

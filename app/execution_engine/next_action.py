@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
 ACTION_INSPECT_CONTEXT = "inspect_context"
 ACTION_RESOLVE_FILE_OPERATIONS = "resolve_file_operations"
 ACTION_APPLY_FILE_OPERATIONS = "apply_file_operations"

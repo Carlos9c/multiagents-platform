@@ -16,13 +16,13 @@ def plan_project(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=500,
             detail=f"Planner output validation failed: {str(exc)}",
-        )
+        ) from exc
     except ValueError as exc:
         message = str(exc)
 
         if message.startswith("Project ") and message.endswith(" not found"):
-            raise HTTPException(status_code=404, detail=message)
+            raise HTTPException(status_code=404, detail=message) from exc
 
-        raise HTTPException(status_code=500, detail=message)
+        raise HTTPException(status_code=500, detail=message) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Planner failed: {str(exc)}")
+        raise HTTPException(status_code=500, detail=f"Planner failed: {str(exc)}") from exc

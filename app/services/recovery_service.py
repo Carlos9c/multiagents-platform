@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 from app.models.artifact import Artifact
 from app.models.execution_run import ExecutionRun
 from app.models.task import (
-    PLANNING_LEVEL_ATOMIC,
     PENDING_ENGINE_ROUTING_EXECUTOR,
+    PLANNING_LEVEL_ATOMIC,
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
@@ -22,7 +22,6 @@ from app.schemas.recovery import (
     RecoveryOpenIssue,
 )
 from app.services.artifacts import create_artifact
-
 
 RECOVERY_DECISION_ARTIFACT_TYPE = "recovery_decision"
 

@@ -840,7 +840,7 @@ def run_project_workflow(
             "empty sequencing, unrecoverable blocking states, or workflow iteration limits."
         )
     else:
-        notes = "Project workflow ended without explicit closure. " "Technical refinement was " + (
+        notes = "Project workflow ended without explicit closure. Technical refinement was " + (
             "enabled." if enable_technical_refinement else "bypassed."
         )
 

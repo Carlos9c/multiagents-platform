@@ -29,7 +29,6 @@ from app.execution_engine.tools.file_snapshot_tool import (
 from app.execution_engine.tools.file_writer_tool import write_text_file
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
-
 CODE_CHANGE_AGENT_SYSTEM_PROMPT = """
 You are a senior artifact implementation agent.
 

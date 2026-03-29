@@ -16,7 +16,6 @@ from app.schemas.recovery_assignment import (
     RecoveryAssignmentLLMOutput,
 )
 
-
 CompiledBatchAssignmentMode = Literal[
     "new_patch_batch",
     "attach_to_existing_batch",

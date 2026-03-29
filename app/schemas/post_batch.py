@@ -12,7 +12,6 @@ from app.schemas.post_batch_intent import (
 )
 from app.schemas.recovery import RecoveryContext
 
-
 PostBatchStatus = Literal[
     "completed_with_evaluation",
     "checkpoint_blocked",

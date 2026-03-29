@@ -37,8 +37,7 @@ class TaskCreate(BaseModel):
     def validate_planning_level(cls, value: str) -> str:
         if value not in VALID_PLANNING_LEVELS:
             raise ValueError(
-                f"Invalid planning_level '{value}'. "
-                f"Allowed values: {sorted(VALID_PLANNING_LEVELS)}"
+                f"Invalid planning_level '{value}'. Allowed values: {sorted(VALID_PLANNING_LEVELS)}"
             )
         return value
 
@@ -47,9 +46,7 @@ class TaskCreate(BaseModel):
     def validate_executor_type(cls, value: str) -> str:
         if not is_valid_executor_type(value):
             raise ValueError(
-                "Invalid executor_type "
-                f"'{value}'. Allowed values: "
-                f"{sorted(VALID_EXECUTOR_TYPES)}"
+                f"Invalid executor_type '{value}'. Allowed values: {sorted(VALID_EXECUTOR_TYPES)}"
             )
         return value
 
@@ -58,7 +55,7 @@ class TaskCreate(BaseModel):
     def validate_status(cls, value: str) -> str:
         if value not in VALID_TASK_STATUSES:
             raise ValueError(
-                f"Invalid status '{value}'. " f"Allowed values: {sorted(VALID_TASK_STATUSES)}"
+                f"Invalid status '{value}'. Allowed values: {sorted(VALID_TASK_STATUSES)}"
             )
         return value
 

@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
 EXECUTION_DECISION_COMPLETED = "completed"
 EXECUTION_DECISION_PARTIAL = "partial"
 EXECUTION_DECISION_FAILED = "failed"

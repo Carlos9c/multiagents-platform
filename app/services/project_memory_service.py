@@ -25,7 +25,6 @@ from app.schemas.project_memory import (
 )
 from app.services.artifacts import create_artifact
 
-
 PROJECT_OPERATIONAL_CONTEXT_ARTIFACT_TYPE = "project_operational_context"
 
 _PATH_PATTERN = re.compile(r"[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+")

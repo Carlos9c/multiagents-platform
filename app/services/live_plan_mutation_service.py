@@ -20,7 +20,6 @@ from app.services.recovery_assignment_compiler_service import (
     compile_recovery_assignment_plan,
 )
 
-
 LivePlanMutationKind = Literal[
     "none",
     "assignment",

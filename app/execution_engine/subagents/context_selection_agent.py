@@ -11,7 +11,6 @@ from app.execution_engine.tools.context_builder_tool import build_selected_file_
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
-
 CONTEXT_SELECTION_SYSTEM_PROMPT = """
 You are a senior code context selection agent.
 

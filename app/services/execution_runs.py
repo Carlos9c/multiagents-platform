@@ -1,3 +1,5 @@
+# app/services/execution_runs.py
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -19,6 +21,19 @@ from app.models.execution_run import (
 )
 
 
+def _finalize_persistence(
+    db: Session,
+    *,
+    entity,
+    auto_commit: bool,
+) -> None:
+    if auto_commit:
+        db.commit()
+        db.refresh(entity)
+    else:
+        db.flush()
+
+
 def _get_next_attempt_number(db: Session, task_id: int) -> int:
     current_max_attempt = db.scalar(
         select(func.max(ExecutionRun.attempt_number)).where(ExecutionRun.task_id == task_id)
@@ -34,6 +49,7 @@ def create_execution_run(
     agent_name: str,
     input_snapshot: str | None = None,
     parent_run_id: int | None = None,
+    auto_commit: bool = True,
 ) -> ExecutionRun:
     run = ExecutionRun(
         task_id=task_id,
@@ -45,12 +61,15 @@ def create_execution_run(
         recovery_action=RECOVERY_ACTION_NONE,
     )
     db.add(run)
-    db.commit()
-    db.refresh(run)
+    _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
 
 
-def mark_execution_run_started(db: Session, run_id: int) -> ExecutionRun | None:
+def mark_execution_run_started(
+    db: Session,
+    run_id: int,
+    auto_commit: bool = True,
+) -> ExecutionRun | None:
     run = db.get(ExecutionRun, run_id)
     if not run:
         return None
@@ -70,8 +89,7 @@ def mark_execution_run_started(db: Session, run_id: int) -> ExecutionRun | None:
     run.blockers_found = None
     run.validation_notes = None
 
-    db.commit()
-    db.refresh(run)
+    _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
 
 
@@ -85,6 +103,7 @@ def mark_execution_run_succeeded(
     artifacts_created: str | None = None,
     completed_scope: str | None = None,
     validation_notes: str | None = None,
+    auto_commit: bool = True,
 ) -> ExecutionRun | None:
     run = db.get(ExecutionRun, run_id)
     if not run:
@@ -105,8 +124,7 @@ def mark_execution_run_succeeded(
     run.blockers_found = None
     run.validation_notes = validation_notes
 
-    db.commit()
-    db.refresh(run)
+    _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
 
 
@@ -123,6 +141,7 @@ def mark_execution_run_partial(
     blockers_found: str | None = None,
     validation_notes: str | None = None,
     recovery_action: str = RECOVERY_ACTION_MANUAL_REVIEW,
+    auto_commit: bool = True,
 ) -> ExecutionRun | None:
     if recovery_action not in VALID_RECOVERY_ACTIONS:
         raise ValueError(
@@ -149,8 +168,7 @@ def mark_execution_run_partial(
     run.blockers_found = blockers_found
     run.validation_notes = validation_notes
 
-    db.commit()
-    db.refresh(run)
+    _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
 
 
@@ -169,11 +187,11 @@ def mark_execution_run_failed(
     remaining_scope: str | None = None,
     blockers_found: str | None = None,
     validation_notes: str | None = None,
+    auto_commit: bool = True,
 ) -> ExecutionRun | None:
     if failure_type not in VALID_FAILURE_TYPES:
         raise ValueError(
-            f"Invalid failure_type '{failure_type}'. "
-            f"Allowed values: {sorted(VALID_FAILURE_TYPES)}"
+            f"Invalid failure_type '{failure_type}'. Allowed values: {sorted(VALID_FAILURE_TYPES)}"
         )
 
     if recovery_action not in VALID_RECOVERY_ACTIONS:
@@ -200,8 +218,7 @@ def mark_execution_run_failed(
     run.blockers_found = blockers_found
     run.validation_notes = validation_notes
 
-    db.commit()
-    db.refresh(run)
+    _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
 
 
@@ -216,6 +233,7 @@ def mark_execution_run_rejected(
     execution_agent_sequence: str | None = None,
     blockers_found: str | None = None,
     validation_notes: str | None = None,
+    auto_commit: bool = True,
 ) -> ExecutionRun | None:
     if recovery_action not in VALID_RECOVERY_ACTIONS:
         raise ValueError(
@@ -241,8 +259,7 @@ def mark_execution_run_rejected(
     run.blockers_found = blockers_found
     run.validation_notes = validation_notes
 
-    db.commit()
-    db.refresh(run)
+    _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
 
 
@@ -251,6 +268,7 @@ def set_execution_run_internal_error(
     run_id: int,
     error_message: str,
     failure_code: str = "internal_executor_error",
+    auto_commit: bool = True,
 ) -> ExecutionRun | None:
     return mark_execution_run_failed(
         db=db,
@@ -260,6 +278,7 @@ def set_execution_run_internal_error(
         failure_code=failure_code,
         recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
         validation_notes="The executor failed due to an internal unexpected error.",
+        auto_commit=auto_commit,
     )
 
 

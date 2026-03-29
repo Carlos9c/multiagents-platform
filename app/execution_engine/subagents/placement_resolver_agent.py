@@ -14,7 +14,6 @@ from app.execution_engine.resolution_state import ResolutionState
 from app.execution_engine.subagents.base import BaseSubagent, SubagentRejectedStepError
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
-
 PLACEMENT_RESOLVER_SYSTEM_PROMPT = """
 You are a senior artifact placement and integration agent.
 

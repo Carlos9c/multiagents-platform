@@ -45,7 +45,7 @@ exclude = ["alembic"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
-ignore = []
+ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
@@ -54,3 +54,6 @@ known-first-party = ["app"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra -q"
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]

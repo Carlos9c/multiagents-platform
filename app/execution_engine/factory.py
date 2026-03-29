@@ -26,5 +26,5 @@ def get_execution_engine(db: Session) -> BaseExecutionEngine:
         return OrchestratedExecutionEngine(budget=budget)
 
     raise ValueError(
-        f"Unsupported execution_engine_backend '{backend}'. " "Supported backends: ['orchestrated']"
+        f"Unsupported execution_engine_backend '{backend}'. Supported backends: ['orchestrated']"
     )

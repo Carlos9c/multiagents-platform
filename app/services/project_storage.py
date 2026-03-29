@@ -6,7 +6,6 @@ from pathlib import Path
 
 from app.core.config import settings
 
-
 PROJECT_META_DIRNAME = "project_meta"
 ARTIFACTS_DIRNAME = "artifacts"
 EXECUTIONS_DIRNAME = "executions"

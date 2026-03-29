@@ -1,28 +1,25 @@
-import types
-import pytest
-
 import json
+import types
+
+import pytest
 
 from app.models.artifact import Artifact
 from app.models.task import (
     PENDING_ENGINE_ROUTING_EXECUTOR,
     TASK_STATUS_COMPLETED,
-    TASK_STATUS_PARTIAL,
     TASK_STATUS_FAILED,
+    TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
-)
-from app.services.post_batch_service import (
-    PostBatchServiceError,
-    process_batch_after_execution,
 )
 from app.schemas.recovery import (
     RecoveryContext,
     RecoveryCreatedTaskRecord,
     RecoveryDecisionSummary,
 )
-
 from app.services.post_batch_service import (
+    PostBatchServiceError,
     _build_validation_context_summary,
+    process_batch_after_execution,
 )
 
 

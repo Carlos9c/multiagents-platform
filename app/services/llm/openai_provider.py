@@ -7,7 +7,6 @@ from openai import OpenAI
 
 from app.services.llm.base import LLMProvider
 
-
 logger = logging.getLogger("app.services.llm")
 
 

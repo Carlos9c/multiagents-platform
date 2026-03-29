@@ -6,15 +6,14 @@ from app.models.artifact import Artifact
 from app.models.project import Project
 from app.models.task import (
     EXECUTION_ENGINE,
+    PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
     PLANNING_LEVEL_REFINED,
-    PENDING_ENGINE_ROUTING_EXECUTOR,
     Task,
 )
 from app.schemas.atomic_task_generator import AtomicTaskGenerationOutput
 from app.services.atomic_task_generator_client import call_atomic_task_generator_model
-
 
 AVAILABLE_EXECUTORS = [EXECUTION_ENGINE]
 

@@ -197,12 +197,16 @@ def _build_engine_result(
         decision=decision,
         summary="Execution summary.",
         details="Execution details.",
-        completed_scope="Completed scope."
-        if decision in {EXECUTION_DECISION_COMPLETED, EXECUTION_DECISION_PARTIAL}
-        else None,
-        remaining_scope="Remaining scope."
-        if decision in {EXECUTION_DECISION_PARTIAL, EXECUTION_DECISION_FAILED}
-        else None,
+        completed_scope=(
+            "Completed scope."
+            if decision in {EXECUTION_DECISION_COMPLETED, EXECUTION_DECISION_PARTIAL}
+            else None
+        ),
+        remaining_scope=(
+            "Remaining scope."
+            if decision in {EXECUTION_DECISION_PARTIAL, EXECUTION_DECISION_FAILED}
+            else None
+        ),
         blockers_found=[],
         validation_notes=["Execution notes."],
         output_snapshot="executor output",
@@ -727,6 +731,7 @@ def test_completed_execution_persists_exactly_one_validation_result_artifact(
     assert payload["task_id"] == task.id
     assert payload["decision"] == "completed"
 
+
 @pytest.mark.parametrize(
     "engine_decision",
     [
@@ -782,6 +787,7 @@ def test_non_validable_terminal_outcomes_do_not_invoke_validation(
 
     assert json.loads(task.last_execution_agent_sequence) == expected_sequence
     assert json.loads(run.execution_agent_sequence) == expected_sequence
+
 
 def test_artifact_persistence_failure_preserves_execution_agent_sequence_on_task_and_run(
     db_session,

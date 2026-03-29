@@ -11,7 +11,6 @@ from app.schemas.recovery_assignment import (
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
-
 RECOVERY_ASSIGNMENT_SYSTEM_PROMPT = """
 You are the recovery assignment planner for a live multi-batch execution plan.
 

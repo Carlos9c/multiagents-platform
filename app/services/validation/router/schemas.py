@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
 VALIDATOR_KEY_CODE_TASK = "code_task_validator"
 
 VALIDATION_DISCIPLINE_CODE = "code"

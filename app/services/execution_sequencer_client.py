@@ -4,7 +4,6 @@ from app.schemas.execution_plan import ExecutionPlan, ExecutionPlanGenerationInp
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
-
 EXECUTION_SEQUENCER_SYSTEM_PROMPT = """
 You are a senior execution sequencing agent.
 

@@ -2,7 +2,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-
 RiskLevel = Literal["low", "medium", "high"]
 PlanningScope = Literal["project_atomic_tasks", "refined_task_atomic_tasks"]
 CheckpointEvaluationFocus = Literal[

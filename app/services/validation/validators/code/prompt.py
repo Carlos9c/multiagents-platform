@@ -5,7 +5,6 @@ from app.services.validation.validators.code.renderer import (
     CodeValidationRenderableEvidence,
 )
 
-
 CODE_TASK_VALIDATOR_SYSTEM_PROMPT = """
 You are a senior code-task validation agent.
 

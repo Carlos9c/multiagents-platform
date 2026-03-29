@@ -2,9 +2,9 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.evaluation import (
+    EvaluatedBatchSummary,
     EvaluationReplanInstruction,
     StageEvaluationOutput,
-    EvaluatedBatchSummary,
 )
 
 

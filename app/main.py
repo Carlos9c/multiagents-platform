@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 
 from app.api.artifacts import router as artifacts_router
@@ -8,7 +10,6 @@ from app.api.projects import router as projects_router
 from app.api.tasks import router as tasks_router
 from app.api.technical_task_refiner import router as technical_task_refiner_router
 from app.api.workflow import router as workflow_router
-import logging
 
 logging.basicConfig(
     level=logging.INFO,
