@@ -36,11 +36,11 @@ dev = [
 
 [tool.black]
 line-length = 100
-target-version = ["py311"]
+target-version = ["py312"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 exclude = ["alembic"]
 
 [tool.ruff.lint]

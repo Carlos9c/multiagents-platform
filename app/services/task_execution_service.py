@@ -30,6 +30,7 @@ from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
     PENDING_ENGINE_ROUTING_EXECUTOR,
     TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     Task,
 )
@@ -235,7 +236,6 @@ def _prepare_execution_workspace(
 
 
 def _promote_validated_workspace_to_source(
-    db: Session,
     *,
     task: Task,
     run_id: int,
@@ -249,6 +249,9 @@ def _promote_validated_workspace_to_source(
 
     And before:
     - the final task status is persisted as completed
+
+    This helper must not persist task or run state. Callers are responsible
+    for degrading the orchestration state coherently if promotion fails.
     """
     try:
         storage_service = ProjectStorageService()
@@ -259,7 +262,6 @@ def _promote_validated_workspace_to_source(
             domain_name=CODE_DOMAIN,
         )
     except Exception as exc:
-        mark_task_failed(db, task.id)
         raise TaskExecutionServiceError(
             f"Task {task.id} passed validation but its workspace could not be promoted to source: {str(exc)}"
         ) from exc
@@ -286,7 +288,12 @@ def _collect_persisted_artifacts_for_task(
     *,
     task_id: int,
 ) -> list[Artifact]:
-    return db.query(Artifact).filter(Artifact.task_id == task_id).order_by(Artifact.id.asc()).all()
+    return (
+        db.query(Artifact)
+        .filter(Artifact.task_id == task_id)
+        .order_by(Artifact.id.asc())
+        .all()
+    )
 
 
 def _persist_task_status(
@@ -335,7 +342,9 @@ def _apply_validation_result_to_task(
         mark_task_failed(db, task_id)
         return _get_task_or_raise(db, task_id).status
 
-    raise TaskExecutionServiceError(f"Unsupported validation decision '{validation_decision}'.")
+    raise TaskExecutionServiceError(
+        f"Unsupported validation decision '{validation_decision}'."
+    )
 
 
 def _serialize_validation_result_artifact(
@@ -372,7 +381,9 @@ def _serialize_validation_result_artifact(
         "workspace_promoted_to_source": workspace_promoted_to_source,
         "validated_evidence_ids": list(validation_result.validated_evidence_ids or []),
         "unconsumed_evidence_ids": list(validation_result.unconsumed_evidence_ids or []),
-        "findings": [finding.model_dump(mode="json") for finding in validation_result.findings],
+        "findings": [
+            finding.model_dump(mode="json") for finding in validation_result.findings
+        ],
         "metadata": dict(validation_result.metadata or {}),
     }
 
@@ -405,6 +416,157 @@ def _persist_validation_result_artifact(
     )
 
 
+def _mark_task_and_run_failed_after_post_execution_error(
+    db: Session,
+    *,
+    task: Task,
+    run_id: int,
+    execution_result,
+    failure_code: str,
+    error_message: str,
+    validation_notes: list[str] | None = None,
+) -> None:
+    execution_agent_sequence_json = _serialize_execution_agent_sequence(
+        execution_result.execution_agent_sequence
+    )
+
+    mark_execution_run_failed(
+        db=db,
+        run_id=run_id,
+        error_message=error_message,
+        failure_type=FAILURE_TYPE_INTERNAL,
+        failure_code=failure_code,
+        recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
+        work_summary=execution_result.summary,
+        work_details=execution_result.details,
+        execution_agent_sequence=execution_agent_sequence_json,
+        artifacts_created=_extract_artifacts_created_from_engine_result(execution_result),
+        completed_scope=execution_result.completed_scope,
+        remaining_scope=execution_result.remaining_scope,
+        blockers_found=(
+            "; ".join(execution_result.blockers_found)
+            if execution_result.blockers_found
+            else None
+        ),
+        validation_notes="; ".join(
+            (execution_result.validation_notes or []) + (validation_notes or [])
+        )
+        or None,
+    )
+    _store_task_execution_agent_sequence(
+        db=db,
+        task=task,
+        execution_agent_sequence_json=execution_agent_sequence_json,
+    )
+    mark_task_failed(db, task.id)
+
+
+def _attempt_reconcile_after_failure(
+    db: Session,
+    *,
+    affected_task_ids: list[int],
+) -> None:
+    try:
+        _reconcile_hierarchy_or_raise(
+            db=db,
+            affected_task_ids=affected_task_ids,
+        )
+    except TaskExecutionServiceError:
+        logger.exception(
+            "task_hierarchy_reconciliation_failed_during_failure_handling affected_task_ids=%s",
+            affected_task_ids,
+        )
+
+
+def _resolve_final_task_status(
+    *,
+    validation_decision: str,
+    validation_result_final_task_status: str | None,
+) -> str:
+    if validation_result_final_task_status:
+        return validation_result_final_task_status
+
+    if validation_decision == "completed":
+        return TASK_STATUS_COMPLETED
+
+    if validation_decision == "partial":
+        return TASK_STATUS_PARTIAL
+
+    if validation_decision in {"failed", "manual_review"}:
+        return TASK_STATUS_FAILED
+
+    raise TaskExecutionServiceError(
+        f"Unsupported validation decision '{validation_decision}'."
+    )
+
+
+def _assert_validation_post_conditions(
+    db: Session,
+    *,
+    task_id: int,
+    run_id: int,
+) -> None:
+    task = _get_task_or_raise(db, task_id)
+
+    artifacts = (
+        db.query(Artifact)
+        .filter(
+            Artifact.task_id == task_id,
+            Artifact.artifact_type == VALIDATION_RESULT_ARTIFACT_TYPE,
+        )
+        .order_by(Artifact.id.asc())
+        .all()
+    )
+
+    if not artifacts:
+        raise TaskExecutionServiceError(
+            "Invariant violation: validation flow completed without validation_result artifact."
+        )
+
+    matching_artifacts = []
+    for artifact in artifacts:
+        try:
+            payload = json.loads(artifact.content or "{}")
+        except Exception as exc:
+            raise TaskExecutionServiceError(
+                "Invariant violation: validation_result artifact content is not valid JSON."
+            ) from exc
+
+        if payload.get("execution_run_id") == run_id:
+            matching_artifacts.append((artifact, payload))
+
+    if not matching_artifacts:
+        raise TaskExecutionServiceError(
+            "Invariant violation: no validation_result artifact is linked to the current execution run."
+        )
+
+    if task.status not in {
+        TASK_STATUS_COMPLETED,
+        TASK_STATUS_PARTIAL,
+        TASK_STATUS_FAILED,
+    }:
+        raise TaskExecutionServiceError(
+            "Invariant violation: validation_result artifact exists but task is not in a terminal state."
+        )
+
+    if len(matching_artifacts) > 1:
+        raise TaskExecutionServiceError(
+            "Invariant violation: multiple validation_result artifacts are linked to the same execution run."
+        )
+
+    _, payload = matching_artifacts[0]
+
+    if payload.get("task_id") != task_id:
+        raise TaskExecutionServiceError(
+            "Invariant violation: validation_result artifact task_id does not match the current task."
+        )
+
+    if payload.get("final_task_status") != task.status:
+        raise TaskExecutionServiceError(
+            "Invariant violation: validation_result artifact final_task_status does not match the persisted task status."
+        )
+    
+
 def _validate_after_execution(
     db: Session,
     *,
@@ -429,10 +591,19 @@ def _validate_after_execution(
             persisted_artifacts=persisted_artifacts,
         )
     except ValidationServiceError as exc:
-        mark_task_failed(db, task.id)
-        raise TaskExecutionServiceError(
+        error_message = (
             f"Execution finished but validation could not be completed for task {task.id}: {str(exc)}"
-        ) from exc
+        )
+        _mark_task_and_run_failed_after_post_execution_error(
+            db=db,
+            task=task,
+            run_id=run_id,
+            execution_result=execution_result,
+            failure_code="validation_service_error",
+            error_message=error_message,
+            validation_notes=["Validation service failure after execution."],
+        )
+        raise TaskExecutionServiceError(error_message) from exc
 
     validation_result = validation_service_result.validation_result
     decision = validation_result.decision
@@ -447,33 +618,12 @@ def _validate_after_execution(
         validation_result.followup_validation_required,
     )
 
-    workspace_promoted_to_source = False
-
     if decision == "completed":
-        refreshed_task_for_promotion = _get_task_or_raise(db, task.id)
-        _promote_validated_workspace_to_source(
-            db=db,
-            task=refreshed_task_for_promotion,
-            run_id=run_id,
-        )
-        workspace_promoted_to_source = True
-        final_task_status = _apply_validation_result_to_task(
-            db=db,
-            task_id=task.id,
-            validation_decision=decision,
-            final_task_status=validation_result.final_task_status,
-        )
         message = (
             "Execution and validation completed successfully, and the validated workspace "
             "was promoted to source before closing the task."
         )
     elif decision == "partial":
-        final_task_status = _apply_validation_result_to_task(
-            db=db,
-            task_id=task.id,
-            validation_decision=decision,
-            final_task_status=validation_result.final_task_status,
-        )
         if validation_result.followup_validation_required:
             message = (
                 "Execution finished and validation is partial. Additional validation "
@@ -482,40 +632,87 @@ def _validate_after_execution(
         else:
             message = "Execution finished and validation concluded the task is partial."
     elif decision == "failed":
-        final_task_status = _apply_validation_result_to_task(
-            db=db,
-            task_id=task.id,
-            validation_decision=decision,
-            final_task_status=validation_result.final_task_status,
-        )
         message = "Execution finished but validation concluded the task failed."
     elif decision == "manual_review":
-        final_task_status = _apply_validation_result_to_task(
-            db=db,
-            task_id=task.id,
-            validation_decision=decision,
-            final_task_status=validation_result.final_task_status,
-        )
         message = (
             "Execution finished but validation requires manual review before the task "
             "can be considered complete."
         )
     else:
-        raise TaskExecutionServiceError(f"Unsupported validation decision '{decision}'.")
+        raise TaskExecutionServiceError(
+            f"Unsupported validation decision '{decision}'."
+        )
 
-    _persist_validation_result_artifact(
+    workspace_promoted_to_source = False
+
+    try:
+        if decision == "completed":
+            refreshed_task_for_promotion = _get_task_or_raise(db, task.id)
+            _promote_validated_workspace_to_source(
+                task=refreshed_task_for_promotion,
+                run_id=run_id,
+            )
+            workspace_promoted_to_source = True
+
+        final_task_status = _resolve_final_task_status(
+            validation_decision=decision,
+            validation_result_final_task_status=validation_result.final_task_status,
+        )
+
+        _persist_validation_result_artifact(
+            db=db,
+            task=task,
+            run_id=run_id,
+            validation_service_result=validation_service_result,
+            final_task_status=final_task_status,
+            workspace_promoted_to_source=workspace_promoted_to_source,
+        )
+
+        _persist_task_status(
+            db=db,
+            task_id=task.id,
+            status=final_task_status,
+        )
+
+    except TaskExecutionServiceError as exc:
+        _mark_task_and_run_failed_after_post_execution_error(
+            db=db,
+            task=task,
+            run_id=run_id,
+            execution_result=execution_result,
+            failure_code="post_validation_processing_failed",
+            error_message=str(exc),
+            validation_notes=["Post-validation processing failed before task closure."],
+        )
+        raise
+    except Exception as exc:
+        error_message = (
+            f"Execution finished but post-validation processing failed for task {task.id}: {str(exc)}"
+        )
+        _mark_task_and_run_failed_after_post_execution_error(
+            db=db,
+            task=task,
+            run_id=run_id,
+            execution_result=execution_result,
+            failure_code="post_validation_processing_failed",
+            error_message=error_message,
+            validation_notes=["Post-validation processing failed before task closure."],
+        )
+        raise TaskExecutionServiceError(error_message) from exc
+
+    _assert_validation_post_conditions(
         db=db,
-        task=task,
+        task_id=task.id,
         run_id=run_id,
-        validation_service_result=validation_service_result,
-        final_task_status=final_task_status,
-        workspace_promoted_to_source=workspace_promoted_to_source,
     )
 
-    _reconcile_hierarchy_or_raise(
-        db=db,
-        affected_task_ids=[task.id],
-    )
+    try:
+        _reconcile_hierarchy_or_raise(
+            db=db,
+            affected_task_ids=[task.id],
+        )
+    except TaskExecutionServiceError:
+        raise
 
     refreshed_task = _get_task_or_raise(db, task.id)
     refreshed_run = _get_execution_run_or_raise(db, run_id)
@@ -527,7 +724,7 @@ def _validate_after_execution(
         run_status=refreshed_run.status,
         output_snapshot=execution_result.output_snapshot,
         message=message,
-        final_task_status=final_task_status,
+        final_task_status=refreshed_task.status,
         validation_decision=decision,
     )
 
@@ -550,7 +747,9 @@ def _handle_terminal_execution_outcome(
     )
 
     blockers_found = (
-        "; ".join(engine_result.blockers_found) if engine_result.blockers_found else None
+        "; ".join(engine_result.blockers_found)
+        if engine_result.blockers_found
+        else None
     )
 
     if engine_result.decision == EXECUTION_DECISION_FAILED:
@@ -703,7 +902,9 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 work_summary=engine_result.summary,
                 work_details=engine_result.details,
                 execution_agent_sequence=execution_agent_sequence_json,
-                artifacts_created=_extract_artifacts_created_from_engine_result(engine_result),
+                artifacts_created=_extract_artifacts_created_from_engine_result(
+                    engine_result
+                ),
                 completed_scope=engine_result.completed_scope,
                 validation_notes="; ".join(engine_result.validation_notes or []),
             )
