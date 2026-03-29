@@ -145,24 +145,20 @@ def _patch_new_validation_service(
     followup_validation_required: bool = False,
 ):
     def _fake_validate_execution_result(**kwargs):
-        task = kwargs["task"]
-        db = kwargs["task"]._sa_instance_state.session
-
-        _set_task_status(db, task.id, final_task_status)
-
         return types.SimpleNamespace(
             routing_input=types.SimpleNamespace(),
             routing_decision=types.SimpleNamespace(
-                validator_key="code_task_validator",
-                discipline="code",
+                validator_key="standard_task_validator",
+                discipline="standard",
                 validation_mode="post_execution",
             ),
             validator_input=types.SimpleNamespace(),
             validation_result=types.SimpleNamespace(
-                validator_key="code_task_validator",
-                discipline="code",
+                validator_key="standard_task_validator",
+                discipline="standard",
                 decision=decision,
                 summary="Validation summary.",
+                findings=[],
                 validated_scope="Validated scope." if decision == "completed" else None,
                 missing_scope="Missing scope." if decision != "completed" else None,
                 blockers=[],

@@ -21,6 +21,11 @@ from app.schemas.recovery import (
         RecoveryDecisionSummary,
     )
 
+from app.services.post_batch_service import (
+    _build_validation_context_summary,
+)
+
+
 
 def _assert_intent(result, *, intent_type: str, mutation_scope: str):
     assert result.resolved_intent_type == intent_type
@@ -315,7 +320,7 @@ def test_post_batch_raises_if_recovery_reopens_source_task_to_pending(
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -361,7 +366,7 @@ def test_post_batch_raises_if_recovery_reopens_source_task_to_pending(
         _bad_materialize,
     )
 
-    with pytest.raises(PostBatchServiceError, match="Recovery integrity error"):
+    with pytest.raises(PostBatchServiceError, match=r"Recovery integrity error.*|Recovery integrity error"):
         process_batch_after_execution(
             db_session,
             project_id=project.id,
@@ -406,7 +411,7 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -521,7 +526,7 @@ def test_post_batch_uses_real_checkpoint_artifact_window_and_ignores_older_task_
     new_artifact = make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -868,7 +873,7 @@ def test_post_batch_trace_persists_recovery_created_task_ids_and_resequence_acti
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -1029,7 +1034,7 @@ def test_post_batch_creates_patch_batch_for_blocking_recovery_work(
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -1172,7 +1177,7 @@ def test_post_batch_runs_recovery_assignment_when_new_non_blocking_tasks_must_be
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -1364,7 +1369,7 @@ def test_post_batch_final_batch_stays_open_when_recovery_assignment_extends_the_
     make_artifact(
         project_id=project.id,
         task_id=failed_final_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -1549,7 +1554,7 @@ def test_post_batch_consumes_assignment_mutation_result_from_live_plan_mutation_
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -1827,7 +1832,7 @@ def test_post_batch_raises_on_contradictory_signals_from_untrusted_evaluator_pay
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -1920,7 +1925,7 @@ def test_post_batch_blocking_recovery_forces_stop_or_resequence(
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -2070,7 +2075,7 @@ def test_post_batch_invalid_plan_without_recovery_forces_replan(
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -2189,13 +2194,13 @@ def test_post_batch_assigns_multiple_recovery_clusters_without_replan(
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
     make_artifact(
         project_id=project.id,
         task_id=partial_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"partial"}',
     )
 
@@ -2400,7 +2405,7 @@ def test_post_batch_final_batch_with_non_blocking_multi_recovery_stays_open_afte
     make_artifact(
         project_id=project.id,
         task_id=failed_final_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -2584,7 +2589,7 @@ def test_post_batch_escalates_to_replan_when_assignment_is_only_partial(
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -2737,7 +2742,7 @@ def test_post_batch_raises_when_assignment_intent_does_not_produce_a_patch_plan(
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -2874,7 +2879,7 @@ def test_post_batch_assign_intent_escalates_to_replan_when_mutation_cannot_place
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -3017,7 +3022,7 @@ def test_post_batch_manual_review_intent_overrides_assignment_and_blocks_continu
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -3171,7 +3176,7 @@ def test_post_batch_uses_live_plan_mutation_service_for_recovery_assignment(
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -3323,7 +3328,7 @@ def test_post_batch_trace_includes_mutation_and_recovery_link_fields(
     make_artifact(
         project_id=project.id,
         task_id=failed_task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"failed"}',
     )
 
@@ -3480,7 +3485,7 @@ def test_post_batch_completed_with_evaluation_has_no_blocking_flags(
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -3556,7 +3561,7 @@ def test_post_batch_project_stage_closed_has_no_blocking_flags(
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -3631,7 +3636,7 @@ def test_post_batch_finalization_guard_blocked_requires_only_manual_review(
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -3722,7 +3727,7 @@ def test_post_batch_finalization_reopened_never_continues_execution(
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -3811,7 +3816,7 @@ def test_post_batch_finalization_reopened_has_consistent_flags(
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -3903,7 +3908,7 @@ def test_post_batch_project_stage_closed_has_consistent_flags(
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -3980,7 +3985,7 @@ def test_post_batch_completed_with_evaluation_has_consistent_flags(
     make_artifact(
         project_id=project.id,
         task_id=task.id,
-        artifact_type="code_validation_result",
+        artifact_type="validation_result",
         content='{"decision":"completed"}',
     )
 
@@ -4029,3 +4034,182 @@ def test_post_batch_completed_with_evaluation_has_consistent_flags(
     assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.finalization_guard_triggered is False
+
+
+def test_build_validation_context_summary_for_recovery_includes_partial_gap_signals():
+    task = type(
+        "TaskStub",
+        (),
+        {
+            "id": 101,
+            "status": TASK_STATUS_PARTIAL,
+        },
+    )()
+
+    validation_artifact = Artifact(
+        id=501,
+        task_id=101,
+        artifact_type="validation_result",
+        content=json.dumps(
+            {
+                "execution_run_id": 9001,
+                "validator_key": "standard_task_validator",
+                "discipline": "standard",
+                "validation_mode": "post_execution",
+                "decision": "partial",
+                "summary": "The task achieved useful progress but still has a remaining gap.",
+                "validated_scope": "Parser updated and unit tests adjusted.",
+                "missing_scope": "Add integration coverage for the new parser branch.",
+                "blockers": [],
+                "manual_review_required": False,
+                "followup_validation_required": True,
+                "final_task_status": "partial",
+            },
+            ensure_ascii=False,
+        ),
+        created_by="test",
+    )
+
+    summary = _build_validation_context_summary(
+        task=task,
+        validation_artifact=validation_artifact,
+    )
+    parsed = json.loads(summary)
+
+    assert parsed["task_id"] == 101
+    assert parsed["task_status"] == TASK_STATUS_PARTIAL
+
+    recovery_summary = parsed["validation_summary_for_recovery"]
+    assert recovery_summary["artifact_id"] == 501
+    assert recovery_summary["artifact_type"] == "validation_result"
+    assert recovery_summary["execution_run_id"] == 9001
+    assert recovery_summary["validator_key"] == "standard_task_validator"
+    assert recovery_summary["discipline"] == "standard"
+    assert recovery_summary["validation_mode"] == "post_execution"
+    assert recovery_summary["decision"] == "partial"
+    assert recovery_summary["summary"] == (
+        "The task achieved useful progress but still has a remaining gap."
+    )
+    assert recovery_summary["validated_scope"] == (
+        "Parser updated and unit tests adjusted."
+    )
+    assert recovery_summary["missing_scope"] == (
+        "Add integration coverage for the new parser branch."
+    )
+    assert recovery_summary["blockers"] == []
+    assert recovery_summary["manual_review_required"] is False
+    assert recovery_summary["followup_validation_required"] is True
+    assert recovery_summary["final_task_status"] == "partial"
+
+
+def test_build_validation_context_summary_for_recovery_preserves_manual_review_signal():
+    task = type(
+        "TaskStub",
+        (),
+        {
+            "id": 202,
+            "status": TASK_STATUS_FAILED,
+        },
+    )()
+
+    validation_artifact = Artifact(
+        id=502,
+        task_id=202,
+        artifact_type="validation_result",
+        content=json.dumps(
+            {
+                "execution_run_id": 9002,
+                "validator_key": "standard_task_validator",
+                "discipline": "standard",
+                "validation_mode": "post_execution",
+                "decision": "manual_review",
+                "summary": "Automation could not safely determine whether the remaining ambiguity is acceptable.",
+                "validated_scope": None,
+                "missing_scope": "Clarify whether the generated migration matches the expected production schema.",
+                "blockers": [
+                    "Schema expectations are ambiguous.",
+                    "Automated evidence is insufficient for safe completion.",
+                ],
+                "manual_review_required": True,
+                "followup_validation_required": False,
+                "final_task_status": "failed",
+            },
+            ensure_ascii=False,
+        ),
+        created_by="test",
+    )
+
+    summary = _build_validation_context_summary(
+        task=task,
+        validation_artifact=validation_artifact,
+    )
+    parsed = json.loads(summary)
+
+    assert parsed["task_id"] == 202
+    assert parsed["task_status"] == TASK_STATUS_FAILED
+
+    recovery_summary = parsed["validation_summary_for_recovery"]
+    assert recovery_summary["decision"] == "manual_review"
+    assert recovery_summary["summary"] == (
+        "Automation could not safely determine whether the remaining ambiguity is acceptable."
+    )
+    assert recovery_summary["validated_scope"] is None
+    assert recovery_summary["missing_scope"] == (
+        "Clarify whether the generated migration matches the expected production schema."
+    )
+    assert recovery_summary["blockers"] == [
+        "Schema expectations are ambiguous.",
+        "Automated evidence is insufficient for safe completion.",
+    ]
+    assert recovery_summary["manual_review_required"] is True
+    assert recovery_summary["followup_validation_required"] is False
+    assert recovery_summary["final_task_status"] == "failed"
+
+
+def test_build_validation_context_summary_for_recovery_handles_malformed_validation_artifact():
+    task = type(
+        "TaskStub",
+        (),
+        {
+            "id": 303,
+            "status": TASK_STATUS_FAILED,
+        },
+    )()
+
+    validation_artifact = Artifact(
+        id=503,
+        task_id=303,
+        artifact_type="validation_result",
+        content="{this is not valid json",
+        created_by="test",
+    )
+
+    summary = _build_validation_context_summary(
+        task=task,
+        validation_artifact=validation_artifact,
+    )
+    parsed = json.loads(summary)
+
+    assert parsed["task_id"] == 303
+    assert parsed["task_status"] == TASK_STATUS_FAILED
+
+    recovery_summary = parsed["validation_summary_for_recovery"]
+    assert recovery_summary["artifact_id"] == 503
+    assert recovery_summary["artifact_type"] == "validation_result"
+    assert recovery_summary["parse_error"] == (
+        "validation artifact content is not valid JSON"
+    )
+    assert recovery_summary["raw_validation_artifact_content"] == "{this is not valid json"
+
+    assert recovery_summary["execution_run_id"] is None
+    assert recovery_summary["validator_key"] is None
+    assert recovery_summary["discipline"] is None
+    assert recovery_summary["validation_mode"] is None
+    assert recovery_summary["decision"] is None
+    assert recovery_summary["summary"] is None
+    assert recovery_summary["validated_scope"] is None
+    assert recovery_summary["missing_scope"] is None
+    assert recovery_summary["blockers"] == []
+    assert recovery_summary["manual_review_required"] is False
+    assert recovery_summary["followup_validation_required"] is False
+    assert recovery_summary["final_task_status"] is None

@@ -35,6 +35,14 @@ Critical recovery principle:
 - A documentation task must not become an implementation/bootstrap task unless the evidence clearly proves the original task was mis-scoped.
 - A context-selection failure does NOT automatically mean the task was wrong.
 
+Recovery scope rule:
+- Recovery only applies to problematic execution outcomes.
+- Assume validation in recovery scenarios will normally indicate:
+  - partial
+  - failed
+  - manual_review
+- Do not reason as if fully completed tasks were entering recovery.
+
 Execution-route rule:
 - Treat last_execution_agent_sequence as the primary signal of what actually happened during execution.
 - Use that route to distinguish:
@@ -44,6 +52,20 @@ Execution-route rule:
 - A multi-agent route or an unusual final route does NOT by itself prove the task intent was wrong.
 - Do not reatomize purely because multiple agents were involved.
 - Use the route as evidence, not as an automatic trigger.
+
+Validation-use rule:
+- Validation is not the thing being re-evaluated; it is operational evidence for recovery.
+- Use validation.decision, validation.summary, validation.validated_scope, validation.missing_scope,
+  validation.blockers, validation.manual_review_required, validation.followup_validation_required,
+  and validation.final_task_status as structured signals.
+- If validation.decision=partial, prefer insert_followup over reatomize unless there is strong evidence
+  that the original task itself was structurally wrong.
+- If validation.validated_scope shows meaningful partial progress, preserve that progress.
+- If validation.missing_scope identifies a concrete remaining gap, prefer narrow follow-up work that closes
+  that gap while preserving the original task intent.
+- If validation.blockers describe ambiguity, unsafe state, or unreliable automation, consider manual_review.
+- If validation.manual_review_required=true, do not force aggressive automated recovery without strong contrary evidence.
+- If validation.followup_validation_required=true, do not assume the task should be reatomized by default.
 
 Action semantics:
 - reatomize
@@ -113,7 +135,9 @@ Self-check before finalizing:
 - Is it the narrowest reliable action?
 - Am I preserving the original task intent?
 - Did I use last_execution_agent_sequence as contextual evidence without overreacting to it?
-- If action=reatomize or insert_followup, are created_tasks present and still faithful to the original task objective?
+- Did I use validation as operational evidence rather than re-litigating the validation?
+- If validation.decision=partial, am I preserving useful partial progress unless there is strong evidence not to?
+- If action=reatomize or action=insert_followup, are created_tasks present and still faithful to the original task objective?
 - If action=manual_review, are created_tasks empty and requires_manual_review=true?
 - Are all created tasks compatible with the execution engine and repository-based validation?
 - retry is not supported in this workflow and must never be returned.
@@ -156,7 +180,16 @@ Execution engine capability catalog:
 Instructions:
 - Choose the narrowest reliable recovery action.
 - Preserve the original task intent unless there is strong evidence that the task itself is structurally wrong.
+- Recovery only applies to problematic outcomes, not fully completed tasks.
 - Use last_execution_agent_sequence as a primary clue for what actually happened during execution.
+- Treat validation as structured operational evidence, not as something to re-evaluate from scratch.
+- In recovery, assume validation will normally indicate partial, failed, or manual_review states.
+- Use validation.decision and validation.summary to understand the recovery posture quickly.
+- Use validation.validated_scope to preserve useful partial progress already achieved.
+- Use validation.missing_scope as the primary signal for narrow follow-up work when the original task remains valid.
+- Use validation.blockers to distinguish operational impediments from structural task-definition problems.
+- If validation.manual_review_required is true, be conservative and prefer manual_review unless there is strong evidence for a safe automated action.
+- If validation.followup_validation_required is true, do not assume the task should be reatomized by default.
 - Use reatomize if the task itself is structurally wrong as one atomic unit, but keep the same workstream intent.
 - Use insert_followup only if the original task was still valid but additional atomic work is needed.
 - Use manual_review if automated recovery is not trustworthy enough.
@@ -182,6 +215,7 @@ def build_recovery_retry_prompt(
     source_task_summary: str,
     execution_trajectory_summary: str,
     execution_context_summary: str,
+    validation_context_summary: str,
 ) -> str:
     capability_text = render_executor_capabilities_for_prompt(EXECUTION_ENGINE)
 
@@ -200,6 +234,9 @@ Execution trajectory summary:
 Execution context summary:
 {execution_context_summary}
 
+Validation context summary:
+{validation_context_summary}
+
 Execution engine capability catalog:
 {capability_text}
 
@@ -210,7 +247,13 @@ Critical corrections:
 - retry is not allowed in the current workflow
 - do not use refined-level or legacy recovery actions
 - preserve the original task intent and workstream
+- recovery applies only to problematic outcomes, not fully completed tasks
 - use last_execution_agent_sequence as contextual evidence, not as an automatic trigger
+- use validation as structured operational evidence, not as a prompt to re-validate the task
+- if validation.validated_scope shows useful partial progress, preserve it
+- if validation.missing_scope describes a narrow remaining gap, prefer insert_followup over reatomize unless the source task is structurally wrong
+- if validation.manual_review_required is true, prefer manual_review unless there is strong evidence for safe automated recovery
+- if validation.followup_validation_required is true, do not escalate to reatomize by default
 - do not silently change documentation/scope work into implementation/bootstrap work
 - if the failure is mainly about context selection, prefer conservative reatomize or manual_review over domain-changing recovery
 - if action=reatomize or action=insert_followup:
@@ -263,6 +306,7 @@ def call_recovery_model(
             source_task_summary=source_task_summary,
             execution_trajectory_summary=execution_trajectory_summary,
             execution_context_summary=execution_context_summary,
+            validation_context_summary=validation_context_summary,
         )
 
         raw_retry = provider.generate_structured(

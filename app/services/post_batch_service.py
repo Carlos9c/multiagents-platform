@@ -210,6 +210,57 @@ def _get_latest_run_for_task(db: Session, task_id: int) -> ExecutionRun | None:
         .first()
     )
 
+def _parse_validation_artifact_payload(
+    validation_artifact: Artifact,
+) -> dict[str, Any]:
+    try:
+        parsed = json.loads(validation_artifact.content)
+    except json.JSONDecodeError:
+        return {
+            "artifact_id": validation_artifact.id,
+            "artifact_type": validation_artifact.artifact_type,
+            "raw_content": validation_artifact.content,
+            "parse_error": "validation artifact content is not valid JSON",
+        }
+
+    if not isinstance(parsed, dict):
+        return {
+            "artifact_id": validation_artifact.id,
+            "artifact_type": validation_artifact.artifact_type,
+            "raw_content": validation_artifact.content,
+            "parse_error": "validation artifact content is not a JSON object",
+        }
+
+    return parsed
+
+
+def _build_recovery_oriented_validation_summary(
+    *,
+    validation_artifact: Artifact,
+) -> dict[str, Any]:
+    payload = _parse_validation_artifact_payload(validation_artifact)
+
+    return {
+        "artifact_id": validation_artifact.id,
+        "artifact_type": validation_artifact.artifact_type,
+        "execution_run_id": payload.get("execution_run_id"),
+        "validator_key": payload.get("validator_key"),
+        "discipline": payload.get("discipline"),
+        "validation_mode": payload.get("validation_mode"),
+        "decision": payload.get("decision"),
+        "summary": payload.get("summary"),
+        "validated_scope": payload.get("validated_scope"),
+        "missing_scope": payload.get("missing_scope"),
+        "blockers": payload.get("blockers") or [],
+        "manual_review_required": bool(payload.get("manual_review_required", False)),
+        "followup_validation_required": bool(
+            payload.get("followup_validation_required", False)
+        ),
+        "final_task_status": payload.get("final_task_status"),
+        "raw_validation_artifact_content": validation_artifact.content,
+        "parse_error": payload.get("parse_error"),
+    }
+
 
 def _get_latest_validation_artifact_for_task(
     db: Session,
@@ -420,11 +471,9 @@ def _build_validation_context_summary(
     payload = {
         "task_id": task.id,
         "task_status": task.status,
-        "validation_artifact": {
-            "artifact_id": validation_artifact.id,
-            "artifact_type": validation_artifact.artifact_type,
-            "content": validation_artifact.content,
-        },
+        "validation_summary_for_recovery": _build_recovery_oriented_validation_summary(
+            validation_artifact=validation_artifact,
+        ),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
