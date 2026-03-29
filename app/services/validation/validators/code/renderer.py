@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.services.validation.contracts import TaskValidationInput, ValidationEvidenceItem
+from app.services.validation.contracts import (
+    TaskValidationInput,
+    ValidationEvidenceItem,
+)
 from app.services.validation.validators.code.capabilities import (
     supports_code_validation_evidence,
 )

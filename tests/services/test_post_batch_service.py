@@ -16,15 +16,14 @@ from app.services.post_batch_service import (
     process_batch_after_execution,
 )
 from app.schemas.recovery import (
-        RecoveryContext,
-        RecoveryCreatedTaskRecord,
-        RecoveryDecisionSummary,
-    )
+    RecoveryContext,
+    RecoveryCreatedTaskRecord,
+    RecoveryDecisionSummary,
+)
 
 from app.services.post_batch_service import (
     _build_validation_context_summary,
 )
-
 
 
 def _assert_intent(result, *, intent_type: str, mutation_scope: str):
@@ -110,6 +109,7 @@ def test_post_batch_continues_on_successful_intermediate_checkpoint(
     assert result.executed_task_ids == [batch_1_task.id]
     assert result.successful_task_ids == [batch_1_task.id]
     assert result.problematic_run_ids == []
+
 
 def test_post_batch_requests_resequencing_when_evaluator_recommends_resequence_remaining_batches(
     db_session,
@@ -366,7 +366,10 @@ def test_post_batch_raises_if_recovery_reopens_source_task_to_pending(
         _bad_materialize,
     )
 
-    with pytest.raises(PostBatchServiceError, match=r"Recovery integrity error.*|Recovery integrity error"):
+    with pytest.raises(
+        PostBatchServiceError,
+        match=r"Recovery integrity error.*|Recovery integrity error",
+    ):
         process_batch_after_execution(
             db_session,
             project_id=project.id,
@@ -458,7 +461,7 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
             recovery_reason="Recovered work still blocks progress.",
             recommended_next_action="manual_review",
             recommended_next_action_reason="Automatic progression is not trustworthy enough after this recovery step.",
-                    notes=["Recovery created follow-up tasks."],
+            notes=["Recovery created follow-up tasks."],
         ),
     )
     monkeypatch.setattr(
@@ -480,8 +483,12 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
     assert failed_task.status == TASK_STATUS_FAILED
     assert parent.status == TASK_STATUS_PENDING
     assert len(result.recovery_context.recovery_created_tasks) == 1
-    assert result.recovery_context.recovery_created_tasks[0].source_task_id == failed_task.id
+    assert (
+        result.recovery_context.recovery_created_tasks[0].source_task_id
+        == failed_task.id
+    )
     assert result.problematic_run_ids == [run.id]
+
 
 def test_post_batch_uses_real_checkpoint_artifact_window_and_ignores_older_task_artifacts(
     db_session,
@@ -572,6 +579,7 @@ def test_post_batch_uses_real_checkpoint_artifact_window_and_ignores_older_task_
     assert captured_kwargs["checkpoint_artifact_window_ids"] == [new_artifact.id]
     assert old_artifact.id not in captured_kwargs["checkpoint_artifact_window_ids"]
 
+
 def test_post_batch_persists_resolved_action_and_decision_signals(
     db_session,
     monkeypatch,
@@ -652,6 +660,7 @@ def test_post_batch_persists_resolved_action_and_decision_signals(
     assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
 
+
 def test_post_batch_continues_when_only_new_recovery_tasks_exist_but_they_are_non_blocking(
     db_session,
     monkeypatch,
@@ -723,6 +732,7 @@ def test_post_batch_continues_when_only_new_recovery_tasks_exist_but_they_are_no
     assert result.resolved_intent_type != "replan"
     assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
+
 
 def test_post_batch_persists_workflow_iteration_trace_artifact(
     db_session,
@@ -837,6 +847,7 @@ def test_post_batch_persists_workflow_iteration_trace_artifact(
     assert payload["resolved_intent_type"] != "resequence"
     assert payload["requires_manual_review"] is False
     assert payload["is_final_batch"] is False
+
 
 def test_post_batch_trace_persists_recovery_created_task_ids_and_resequence_action(
     db_session,
@@ -998,6 +1009,7 @@ def test_post_batch_trace_persists_recovery_created_task_ids_and_resequence_acti
     assert payload["created_recovery_task_ids"][0] > 0
     assert result.resolved_intent_type == "resequence"
     assert result.resolved_mutation_scope == "resequence"
+
 
 def test_post_batch_creates_patch_batch_for_blocking_recovery_work(
     db_session,
@@ -1322,7 +1334,9 @@ def test_post_batch_runs_recovery_assignment_when_new_non_blocking_tasks_must_be
     assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.patched_execution_plan is not None
-    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
+    assert [
+        batch.batch_id for batch in result.patched_execution_plan.execution_batches
+    ] == [
         "plan_2_batch_1",
         "plan_2_batch_1_patch_1",
         "plan_2_batch_2",
@@ -1507,7 +1521,9 @@ def test_post_batch_final_batch_stays_open_when_recovery_assignment_extends_the_
     assert result.resolved_intent_type != "replan"
     assert result.resolved_intent_type != "resequence"
     assert result.patched_execution_plan is not None
-    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
+    assert [
+        batch.batch_id for batch in result.patched_execution_plan.execution_batches
+    ] == [
         "plan_3_batch_1",
         "plan_3_batch_1_patch_1",
     ]
@@ -1642,7 +1658,9 @@ def test_post_batch_consumes_assignment_mutation_result_from_live_plan_mutation_
     )
     monkeypatch.setattr(
         "app.services.post_batch_service.merge_recovery_contexts",
-        lambda contexts: contexts[0] if contexts else RecoveryContext(
+        lambda contexts: contexts[0]
+        if contexts
+        else RecoveryContext(
             recovery_decisions=[],
             open_issues=[],
             recovery_created_tasks=[],
@@ -2021,7 +2039,9 @@ def test_post_batch_blocking_recovery_forces_stop_or_resequence(
             mutation_kind="assignment",
             patched_execution_plan=plan,
             requires_replan=False,
-            notes=["Blocking recovery was assigned, but normal continuation must stop for resequencing."],
+            notes=[
+                "Blocking recovery was assigned, but normal continuation must stop for resequencing."
+            ],
             metadata={
                 "assigned_task_ids": [blocking_task.id],
                 "unassigned_task_ids": [],
@@ -2128,6 +2148,7 @@ def test_post_batch_invalid_plan_without_recovery_forces_replan(
     assert result.resolved_intent_type == "replan"
     assert result.can_continue_after_application is False
 
+
 def test_make_stage_evaluation_output_requires_canonical_high_level_replan_signals(
     make_stage_evaluation_output,
 ):
@@ -2146,6 +2167,7 @@ def test_make_stage_evaluation_output_requires_canonical_high_level_replan_signa
     assert output.replan.level == "high_level"
     assert output.plan_change_scope == "high_level_replan"
     assert output.remaining_plan_still_valid is False
+
 
 def test_post_batch_assigns_multiple_recovery_clusters_without_replan(
     db_session,
@@ -2323,7 +2345,9 @@ def test_post_batch_assigns_multiple_recovery_clusters_without_replan(
     )
     monkeypatch.setattr(
         "app.services.post_batch_service.materialize_recovery_decision",
-        lambda **kwargs: materialized_by_source_task_id[kwargs["decision"].source_task_id],
+        lambda **kwargs: materialized_by_source_task_id[
+            kwargs["decision"].source_task_id
+        ],
     )
     monkeypatch.setattr(
         "app.services.post_batch_service.evaluate_checkpoint",
@@ -2341,11 +2365,20 @@ def test_post_batch_assigns_multiple_recovery_clusters_without_replan(
             requires_replan=False,
             notes=["All recovery clusters were assigned without structural changes."],
             metadata={
-                "assigned_task_ids": [created_recovery_task_a.id, created_recovery_task_b.id],
+                "assigned_task_ids": [
+                    created_recovery_task_a.id,
+                    created_recovery_task_b.id,
+                ],
                 "unassigned_task_ids": [],
                 "compiled_cluster_assignments": [
-                    {"cluster_id": "cluster_a", "task_ids_in_execution_order": [created_recovery_task_a.id]},
-                    {"cluster_id": "cluster_b", "task_ids_in_execution_order": [created_recovery_task_b.id]},
+                    {
+                        "cluster_id": "cluster_a",
+                        "task_ids_in_execution_order": [created_recovery_task_a.id],
+                    },
+                    {
+                        "cluster_id": "cluster_b",
+                        "task_ids_in_execution_order": [created_recovery_task_b.id],
+                    },
                 ],
             },
         ),
@@ -2364,17 +2397,22 @@ def test_post_batch_assigns_multiple_recovery_clusters_without_replan(
     assert result.resolved_intent_type != "replan"
     assert result.resolved_intent_type != "resequence"
     assert sorted(result.problematic_run_ids) == sorted([failed_run.id, partial_run.id])
-    assert sorted(record.created_task_id for record in result.recovery_context.recovery_created_tasks) == sorted(
-        [created_recovery_task_a.id, created_recovery_task_b.id]
-    )
+    assert sorted(
+        record.created_task_id
+        for record in result.recovery_context.recovery_created_tasks
+    ) == sorted([created_recovery_task_a.id, created_recovery_task_b.id])
     assert result.patched_execution_plan is not None
-    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
+    assert [
+        batch.batch_id for batch in result.patched_execution_plan.execution_batches
+    ] == [
         "batch_1",
         "batch_1_patch_1",
         "batch_2",
     ]
-    assert f"assigned_task_ids=[{created_recovery_task_a.id}, {created_recovery_task_b.id}]" in result.notes
-
+    assert (
+        f"assigned_task_ids=[{created_recovery_task_a.id}, {created_recovery_task_b.id}]"
+        in result.notes
+    )
 
 
 def test_post_batch_final_batch_with_non_blocking_multi_recovery_stays_open_after_assignment(
@@ -2525,7 +2563,10 @@ def test_post_batch_final_batch_with_non_blocking_multi_recovery_stays_open_afte
                 "compiled_cluster_assignments": [
                     {
                         "cluster_id": "tail_cluster",
-                        "task_ids_in_execution_order": [recovery_tail_a.id, recovery_tail_b.id],
+                        "task_ids_in_execution_order": [
+                            recovery_tail_a.id,
+                            recovery_tail_b.id,
+                        ],
                     }
                 ],
             },
@@ -2548,12 +2589,13 @@ def test_post_batch_final_batch_with_non_blocking_multi_recovery_stays_open_afte
     assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
     assert result.patched_execution_plan is not None
-    assert [batch.batch_id for batch in result.patched_execution_plan.execution_batches] == [
+    assert [
+        batch.batch_id for batch in result.patched_execution_plan.execution_batches
+    ] == [
         "batch_final",
         "batch_final_patch_1",
     ]
     assert "The original final batch no longer closes the stage" in result.notes
-
 
 
 def test_post_batch_escalates_to_replan_when_assignment_is_only_partial(
@@ -2706,7 +2748,6 @@ def test_post_batch_escalates_to_replan_when_assignment_is_only_partial(
     assert result.patched_execution_plan is None
     assert result.resolved_mutation_scope == "replan"
     assert "assignment escalated to replanning" in result.notes
-
 
 
 def test_post_batch_raises_when_assignment_intent_does_not_produce_a_patch_plan(
@@ -2962,7 +3003,9 @@ def test_post_batch_assign_intent_escalates_to_replan_when_mutation_cannot_place
             mutation_kind="escalated_to_replan",
             patched_execution_plan=None,
             requires_replan=True,
-            notes=["The recovery task could not be placed safely into the remaining plan."],
+            notes=[
+                "The recovery task could not be placed safely into the remaining plan."
+            ],
             metadata={
                 "assigned_task_ids": [],
                 "unassigned_task_ids": [recovery_task.id],
@@ -3112,7 +3155,9 @@ def test_post_batch_manual_review_intent_overrides_assignment_and_blocks_continu
             mutation_kind="assignment",
             patched_execution_plan=plan,
             requires_replan=False,
-            notes=["The recovery task could be assigned, but assignment must not override manual review."],
+            notes=[
+                "The recovery task could be assigned, but assignment must not override manual review."
+            ],
             metadata={
                 "assigned_task_ids": [recovery_task.id],
                 "unassigned_task_ids": [],
@@ -3458,6 +3503,7 @@ def test_post_batch_trace_includes_mutation_and_recovery_link_fields(
     assert payload["preexisting_pending_valid_task_count"] == 1
     assert payload["new_recovery_pending_task_count"] == 1
 
+
 def test_post_batch_completed_with_evaluation_has_no_blocking_flags(
     db_session,
     monkeypatch,
@@ -3534,6 +3580,7 @@ def test_post_batch_completed_with_evaluation_has_no_blocking_flags(
     assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
 
+
 def test_post_batch_project_stage_closed_has_no_blocking_flags(
     db_session,
     monkeypatch,
@@ -3608,6 +3655,7 @@ def test_post_batch_project_stage_closed_has_no_blocking_flags(
     assert result.resolved_intent_type != "replan"
     assert result.resolved_intent_type != "resequence"
     assert result.requires_manual_review is False
+
 
 def test_post_batch_finalization_guard_blocked_requires_only_manual_review(
     db_session,
@@ -3699,6 +3747,7 @@ def test_post_batch_finalization_guard_blocked_requires_only_manual_review(
     assert result.requires_manual_review is True
     assert result.resolved_intent_type != "replan"
     assert result.resolved_intent_type != "resequence"
+
 
 def test_post_batch_finalization_reopened_never_continues_execution(
     db_session,
@@ -4199,7 +4248,9 @@ def test_build_validation_context_summary_for_recovery_handles_malformed_validat
     assert recovery_summary["parse_error"] == (
         "validation artifact content is not valid JSON"
     )
-    assert recovery_summary["raw_validation_artifact_content"] == "{this is not valid json"
+    assert (
+        recovery_summary["raw_validation_artifact_content"] == "{this is not valid json"
+    )
 
     assert recovery_summary["execution_run_id"] is None
     assert recovery_summary["validator_key"] is None

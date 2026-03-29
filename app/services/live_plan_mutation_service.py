@@ -177,7 +177,9 @@ def mutate_live_plan(
                 notes=list(compiled_assignment.notes),
                 metadata={
                     "assigned_task_ids": [],
-                    "unassigned_task_ids": list(compiled_assignment.unassigned_task_ids),
+                    "unassigned_task_ids": list(
+                        compiled_assignment.unassigned_task_ids
+                    ),
                     "compiled_cluster_assignments": [],
                 },
             )

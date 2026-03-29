@@ -18,7 +18,9 @@ from app.services.validation.validators.code.prompt import (
     CODE_TASK_VALIDATOR_SYSTEM_PROMPT,
     build_code_task_validator_user_prompt,
 )
-from app.services.validation.validators.code.renderer import render_code_validation_evidence
+from app.services.validation.validators.code.renderer import (
+    render_code_validation_evidence,
+)
 from app.services.validation.validators.code.schemas import CodeValidationLLMOutput
 
 
@@ -36,7 +38,9 @@ def _map_decision_to_final_task_status(decision: str) -> str | None:
     return None
 
 
-def _recommend_followup_validators(validation_input: TaskValidationInput, unconsumed_ids: list[str]) -> list[str]:
+def _recommend_followup_validators(
+    validation_input: TaskValidationInput, unconsumed_ids: list[str]
+) -> list[str]:
     if not unconsumed_ids:
         return []
 
@@ -92,8 +96,12 @@ def validate_code_task_with_llm(
             f"Code validator returned structurally invalid output: {str(exc)}"
         ) from exc
 
-    validated_evidence_ids = [item.evidence_id for item in renderable_evidence.supported_items]
-    unconsumed_evidence_ids = [item.evidence_id for item in renderable_evidence.unsupported_items]
+    validated_evidence_ids = [
+        item.evidence_id for item in renderable_evidence.supported_items
+    ]
+    unconsumed_evidence_ids = [
+        item.evidence_id for item in renderable_evidence.unsupported_items
+    ]
 
     followup_validation_required = bool(unconsumed_evidence_ids)
     recommended_next_validator_keys = _recommend_followup_validators(

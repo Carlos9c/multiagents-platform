@@ -204,7 +204,11 @@ def _extract_recovery_learnings_from_artifact(artifact: Artifact) -> list[str]:
         if isinstance(action, str) and action.strip():
             learnings.append(f"Recovery action used: {action.strip()}")
 
-        for key in ("covered_gap_summary", "validation_context_summary", "execution_context_summary"):
+        for key in (
+            "covered_gap_summary",
+            "validation_context_summary",
+            "execution_context_summary",
+        ):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
                 learnings.append(_truncate(value, limit=250))
@@ -424,7 +428,9 @@ def _build_recent_failure_learnings(
         if run.failure_code:
             parts.append(f"failure_code={run.failure_code}")
 
-        blocker = _first_non_empty(run.blockers_found, run.remaining_scope, run.error_message)
+        blocker = _first_non_empty(
+            run.blockers_found, run.remaining_scope, run.error_message
+        )
         if blocker:
             parts.append(_truncate(blocker, limit=180))
 
@@ -648,9 +654,12 @@ def build_project_operational_context(
     active_task_ids = [
         task.id
         for task in tasks
-        if task.status in {TASK_STATUS_RUNNING, TASK_STATUS_AWAITING_VALIDATION, TASK_STATUS_PARTIAL}
+        if task.status
+        in {TASK_STATUS_RUNNING, TASK_STATUS_AWAITING_VALIDATION, TASK_STATUS_PARTIAL}
     ]
-    completed_task_ids = [task.id for task in tasks if task.status == TASK_STATUS_COMPLETED]
+    completed_task_ids = [
+        task.id for task in tasks if task.status == TASK_STATUS_COMPLETED
+    ]
     failed_task_ids = [task.id for task in tasks if task.status == TASK_STATUS_FAILED]
     blocked_task_ids = [task.id for task in tasks if task.is_blocked]
 

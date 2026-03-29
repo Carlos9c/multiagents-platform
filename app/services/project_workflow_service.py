@@ -345,7 +345,9 @@ def _persist_workflow_batch_trace(
         "task_ids": list(task_ids),
         "task_run_summaries": task_run_summaries,
         "post_batch_status": getattr(post_batch_result, "status", None),
-        "resolved_intent_type": getattr(post_batch_result, "resolved_intent_type", None),
+        "resolved_intent_type": getattr(
+            post_batch_result, "resolved_intent_type", None
+        ),
         "resolved_mutation_scope": getattr(
             post_batch_result,
             "resolved_mutation_scope",
@@ -511,7 +513,6 @@ def _run_execution_iteration(
 ) -> tuple[WorkflowIterationSummary, str, int, ExecutionPlan, bool]:
     starting_plan_version = plan.plan_version
     processed_batch_ids: list[str] = []
-    reopened_finalization = False
     resulting_status = "execution_in_progress"
     current_finalization_iteration_count = finalization_iteration_count
     iteration_requires_replan = False
@@ -559,7 +560,9 @@ def _run_execution_iteration(
         )
         last_post_batch_result = post_batch_result
 
-        batch_patched_execution_plan = getattr(post_batch_result, "patched_execution_plan", None)
+        batch_patched_execution_plan = getattr(
+            post_batch_result, "patched_execution_plan", None
+        )
         batch_patched_plan_version = (
             batch_patched_execution_plan.plan_version
             if batch_patched_execution_plan is not None
@@ -588,7 +591,6 @@ def _run_execution_iteration(
         resolved_intent_type = post_batch_result.resolved_intent_type
         requires_manual_review = post_batch_result.requires_manual_review
         should_close_stage = post_batch_result.should_close_stage
-        reopened_finalization = post_batch_result.reopened_finalization
         patched_execution_plan = post_batch_result.patched_execution_plan
 
         if requires_manual_review or getattr(
@@ -599,7 +601,10 @@ def _run_execution_iteration(
             resulting_status = "awaiting_manual_review"
             break
 
-        if getattr(post_batch_result, "status", None) == "project_stage_closed" or should_close_stage:
+        if (
+            getattr(post_batch_result, "status", None) == "project_stage_closed"
+            or should_close_stage
+        ):
             resulting_status = "stage_closed"
             break
 
@@ -820,7 +825,9 @@ def run_project_workflow(
 
     if execution_plan_generated:
         try:
-            current_plan = active_plan or generate_execution_plan(db=db, project_id=project_id)
+            current_plan = active_plan or generate_execution_plan(
+                db=db, project_id=project_id
+            )
             processed = set(completed_batches)
             blocked_batches = [
                 batch.batch_id

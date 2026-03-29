@@ -68,13 +68,11 @@ def list_project_tasks(
     if status:
         query = query.filter(Task.status == status)
 
-    return (
-        query.order_by(
-            Task.parent_task_id.asc().nullsfirst(),
-            Task.sequence_order.asc().nullslast(),
-            Task.id.asc(),
-        ).all()
-    )
+    return query.order_by(
+        Task.parent_task_id.asc().nullsfirst(),
+        Task.sequence_order.asc().nullslast(),
+        Task.id.asc(),
+    ).all()
 
 
 @router.get("/{project_id}/artifacts", response_model=list[ArtifactRead])

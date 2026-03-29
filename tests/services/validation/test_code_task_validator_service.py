@@ -160,8 +160,13 @@ def test_validate_code_task_with_llm_returns_canonical_validation_result(monkeyp
     assert result.validator_key == "code_task_validator"
     assert result.discipline == "code"
     assert result.decision == "completed"
-    assert result.summary == "The task appears complete and the evidence supports closure."
-    assert result.validated_scope == "The endpoint implementation and related tests were updated."
+    assert (
+        result.summary == "The task appears complete and the evidence supports closure."
+    )
+    assert (
+        result.validated_scope
+        == "The endpoint implementation and related tests were updated."
+    )
     assert result.missing_scope is None
     assert result.blockers == []
     assert result.manual_review_required is False
@@ -180,6 +185,7 @@ def test_validate_code_task_with_llm_returns_canonical_validation_result(monkeyp
     assert result.followup_validation_required is False
     assert result.recommended_next_validator_keys == []
     assert result.partial_validation_summary is None
+
 
 def test_validate_code_task_with_llm_reports_unconsumed_evidence_for_future_orchestration(
     monkeypatch,
@@ -245,7 +251,9 @@ def test_validate_code_task_with_llm_reports_unconsumed_evidence_for_future_orch
         "findings": [],
         "manual_review_required": False,
         "confidence": "medium",
-        "reasoning_notes": ["Text evidence was validated, but image evidence was not consumed."],
+        "reasoning_notes": [
+            "Text evidence was validated, but image evidence was not consumed."
+        ],
     }
 
     monkeypatch.setattr(

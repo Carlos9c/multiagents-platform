@@ -106,7 +106,8 @@ class ValidationRoutingDecision(BaseModel):
             requires_output_snapshot=True,
             requires_execution_agent_sequence=True,
             require_manual_review_if_evidence_missing=True,
-            validation_focus=validation_focus or [
+            validation_focus=validation_focus
+            or [
                 "acceptance_criteria_alignment",
                 "scope_completion",
                 "repository_changes",

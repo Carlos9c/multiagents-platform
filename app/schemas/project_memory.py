@@ -63,7 +63,9 @@ class ProjectOperationalContext(BaseModel):
 
     key_decisions: list[ProjectMemoryDecisionSignal] = Field(default_factory=list)
     referenced_paths: list[ProjectMemoryPathSignal] = Field(default_factory=list)
-    recent_artifact_summaries: list[ProjectMemoryArtifactSummary] = Field(default_factory=list)
+    recent_artifact_summaries: list[ProjectMemoryArtifactSummary] = Field(
+        default_factory=list
+    )
     task_memory: list[ProjectMemoryTaskSummary] = Field(default_factory=list)
 
     summary: str

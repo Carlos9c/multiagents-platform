@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import filecmp
 import shutil
@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 from app.schemas.workspace import WorkspaceChangeSet
-from app.services.project_storage import CODE_DOMAIN, ProjectStorageService
+from app.services.project_storage import ProjectStorageService
 from app.services.workspace_runtime import (
     BaseWorkspaceRuntime,
     CommandResult,
@@ -36,7 +36,9 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         return self.storage_service.ensure_project_storage(project_id).project_root
 
     def ensure_domain_storage(self, project_id: int, domain_name: str) -> Path:
-        return self.storage_service.ensure_domain_storage(project_id, domain_name).domain_root
+        return self.storage_service.ensure_domain_storage(
+            project_id, domain_name
+        ).domain_root
 
     def get_execution_workspace_paths(
         self,
@@ -62,7 +64,9 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         domain_name: str,
     ) -> PreparedWorkspace:
         self.storage_service.ensure_project_storage(project_id)
-        domain_paths = self.storage_service.ensure_domain_storage(project_id, domain_name)
+        domain_paths = self.storage_service.ensure_domain_storage(
+            project_id, domain_name
+        )
         run_paths = self.get_execution_workspace_paths(project_id, execution_run_id)
 
         run_paths.execution_root.mkdir(parents=True, exist_ok=True)
@@ -88,7 +92,9 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
     def read_file(self, workspace_dir: str | Path, relative_path: str) -> str:
         resolved_path = self._resolve_workspace_path(workspace_dir, relative_path)
         if not resolved_path.exists():
-            raise WorkspaceRuntimeError(f"File '{relative_path}' does not exist in workspace.")
+            raise WorkspaceRuntimeError(
+                f"File '{relative_path}' does not exist in workspace."
+            )
         return resolved_path.read_text(encoding="utf-8")
 
     def write_file(
@@ -138,7 +144,9 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         execution_run_id: int,
         domain_name: str,
     ) -> WorkspaceChangeSet:
-        prepared = self._get_prepared_workspace(project_id, execution_run_id, domain_name)
+        prepared = self._get_prepared_workspace(
+            project_id, execution_run_id, domain_name
+        )
 
         workspace_files = set(self.list_files(prepared.workspace_dir))
         source_files = (
@@ -183,7 +191,9 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         execution_run_id: int,
         domain_name: str,
     ) -> str:
-        prepared = self._get_prepared_workspace(project_id, execution_run_id, domain_name)
+        prepared = self._get_prepared_workspace(
+            project_id, execution_run_id, domain_name
+        )
 
         if prepared.source_dir is None or not prepared.source_dir.exists():
             return "No source baseline exists yet for this domain."
@@ -232,8 +242,12 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         execution_run_id: int,
         domain_name: str,
     ) -> Path:
-        prepared = self._get_prepared_workspace(project_id, execution_run_id, domain_name)
-        domain_paths = self.storage_service.ensure_domain_storage(project_id, domain_name)
+        prepared = self._get_prepared_workspace(
+            project_id, execution_run_id, domain_name
+        )
+        domain_paths = self.storage_service.ensure_domain_storage(
+            project_id, domain_name
+        )
 
         if domain_paths.source_dir.exists():
             shutil.rmtree(domain_paths.source_dir)
@@ -273,7 +287,9 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
                 check=False,
             )
         except FileNotFoundError as exc:
-            raise WorkspaceRuntimeError(f"Command executable not found: {command[0]}") from exc
+            raise WorkspaceRuntimeError(
+                f"Command executable not found: {command[0]}"
+            ) from exc
         except subprocess.TimeoutExpired as exc:
             raise WorkspaceRuntimeError(
                 f"Command timed out after {timeout_seconds} seconds: {' '.join(command)}"
@@ -302,7 +318,9 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         domain_name: str,
     ) -> PreparedWorkspace:
         run_paths = self.get_execution_workspace_paths(project_id, execution_run_id)
-        domain_paths = self.storage_service.ensure_domain_storage(project_id, domain_name)
+        domain_paths = self.storage_service.ensure_domain_storage(
+            project_id, domain_name
+        )
 
         if not run_paths.workspace_dir.exists():
             raise WorkspaceRuntimeError(
@@ -317,7 +335,9 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
             source_dir=domain_paths.source_dir,
         )
 
-    def _resolve_workspace_path(self, workspace_dir: str | Path, relative_path: str) -> Path:
+    def _resolve_workspace_path(
+        self, workspace_dir: str | Path, relative_path: str
+    ) -> Path:
         workspace = Path(workspace_dir).resolve()
         candidate = (workspace / relative_path).resolve()
 

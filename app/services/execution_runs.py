@@ -21,7 +21,9 @@ from app.models.execution_run import (
 
 def _get_next_attempt_number(db: Session, task_id: int) -> int:
     current_max_attempt = db.scalar(
-        select(func.max(ExecutionRun.attempt_number)).where(ExecutionRun.task_id == task_id)
+        select(func.max(ExecutionRun.attempt_number)).where(
+            ExecutionRun.task_id == task_id
+        )
     )
     if current_max_attempt is None:
         return 1

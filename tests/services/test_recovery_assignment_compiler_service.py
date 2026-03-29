@@ -454,7 +454,9 @@ def test_compile_recovery_assignment_plan_returns_requires_replan_without_patchi
 
     current_task = make_task(project_id=project.id, title="Current batch task")
     future_task = make_task(project_id=project.id, title="Future batch task")
-    conflicting_new_task = make_task(project_id=project.id, title="Structural conflict task")
+    conflicting_new_task = make_task(
+        project_id=project.id, title="Structural conflict task"
+    )
 
     plan = make_execution_plan(
         plan_version=2,
@@ -565,7 +567,9 @@ def test_compile_recovery_assignment_plan_rejects_strategy_that_conflicts_with_r
                 rationale="The work can be deferred to the tail.",
             )
         ],
-        notes=["This output intentionally conflicts with the resolved assignment intent."],
+        notes=[
+            "This output intentionally conflicts with the resolved assignment intent."
+        ],
     )
 
     with pytest.raises(RecoveryAssignmentCompilerError) as exc_info:

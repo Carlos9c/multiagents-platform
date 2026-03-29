@@ -157,4 +157,6 @@ class RecoveryContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
     recovery_decisions: list[RecoveryDecisionSummary] = Field(default_factory=list)
     open_issues: list[RecoveryOpenIssue] = Field(default_factory=list)
-    recovery_created_tasks: list[RecoveryCreatedTaskRecord] = Field(default_factory=list)
+    recovery_created_tasks: list[RecoveryCreatedTaskRecord] = Field(
+        default_factory=list
+    )

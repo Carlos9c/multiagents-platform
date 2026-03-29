@@ -160,9 +160,21 @@ class OpenAIProvider(LLMProvider):
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
 
-            input_tokens = self._safe_usage_value(response, "input_tokens") if response is not None else None
-            output_tokens = self._safe_usage_value(response, "output_tokens") if response is not None else None
-            total_tokens = self._safe_usage_value(response, "total_tokens") if response is not None else None
+            input_tokens = (
+                self._safe_usage_value(response, "input_tokens")
+                if response is not None
+                else None
+            )
+            output_tokens = (
+                self._safe_usage_value(response, "output_tokens")
+                if response is not None
+                else None
+            )
+            total_tokens = (
+                self._safe_usage_value(response, "total_tokens")
+                if response is not None
+                else None
+            )
 
             logger.exception(
                 "llm_call_failed provider=openai model=%s schema=%s duration_ms=%d prompt_chars_total=%d input_tokens=%s output_tokens=%s total_tokens=%s error=%s",

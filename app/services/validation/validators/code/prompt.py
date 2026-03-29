@@ -55,7 +55,9 @@ def build_code_task_validator_user_prompt(
     execution = validation_input.execution
     request_context = validation_input.request_context
 
-    unsupported_ids = [item.evidence_id for item in renderable_evidence.unsupported_items]
+    unsupported_ids = [
+        item.evidence_id for item in renderable_evidence.unsupported_items
+    ]
 
     return f"""
 Validate this task execution result.

@@ -47,7 +47,9 @@ class CandidateAtomicTask(BaseModel):
     @model_validator(mode="after")
     def validate_atomic_level(self):
         if self.planning_level != "atomic":
-            raise ValueError("Execution sequencer only accepts atomic tasks as candidates.")
+            raise ValueError(
+                "Execution sequencer only accepts atomic tasks as candidates."
+            )
         return self
 
 
@@ -141,6 +143,7 @@ class ExecutionBatch(BaseModel):
                 raise ValueError("Non-patch batches cannot define patch_index.")
 
         return self
+
 
 class CheckpointDefinition(BaseModel):
     checkpoint_id: str
@@ -281,7 +284,9 @@ class ExecutionPlan(BaseModel):
         if final_checkpoint is None:
             raise ValueError("The final batch must have a valid final checkpoint.")
         if final_checkpoint.after_batch_id != final_batch.batch_id:
-            raise ValueError("The final checkpoint must point to the final execution batch.")
+            raise ValueError(
+                "The final checkpoint must point to the final execution batch."
+            )
         if "stage_closure" not in final_checkpoint.evaluation_focus:
             raise ValueError(
                 "The final checkpoint must include 'stage_closure' in evaluation_focus."

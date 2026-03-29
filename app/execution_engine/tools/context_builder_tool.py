@@ -22,9 +22,7 @@ def build_selected_file_context(
         blocks.append(f"RELEVANCE: {file_selection.relevance}")
 
         if file_selection.symbol_hints:
-            blocks.append(
-                "SYMBOL_HINTS: " + ", ".join(file_selection.symbol_hints)
-            )
+            blocks.append("SYMBOL_HINTS: " + ", ".join(file_selection.symbol_hints))
 
         if not abs_path.exists() or not abs_path.is_file():
             blocks.append("CONTENT: [missing file]")
@@ -38,7 +36,10 @@ def build_selected_file_context(
             blocks.append("")
             continue
 
-        if not file_selection.include_full_content and len(content) > max_chars_per_file:
+        if (
+            not file_selection.include_full_content
+            and len(content) > max_chars_per_file
+        ):
             content = content[:max_chars_per_file] + "\n...[truncated]"
 
         blocks.append("CONTENT_START")

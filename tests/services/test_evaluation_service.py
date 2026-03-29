@@ -170,7 +170,9 @@ def test_build_stage_evaluation_request_includes_new_structured_summaries(
     assert request["project_name"] == project.name
     assert request["project_description"] == project.description
 
-    recovery_tasks_created_summary = json.loads(request["recovery_tasks_created_summary"])
+    recovery_tasks_created_summary = json.loads(
+        request["recovery_tasks_created_summary"]
+    )
     assert recovery_tasks_created_summary["created_task_count"] == 1
     assert (
         recovery_tasks_created_summary["created_tasks"][0]["created_task_id"]
@@ -189,7 +191,9 @@ def test_build_stage_evaluation_request_includes_new_structured_summaries(
     ]
 
     pending_task_summary = json.loads(request["pending_task_summary"])
-    pending_task_ids = {item["task_id"] for item in pending_task_summary["pending_tasks"]}
+    pending_task_ids = {
+        item["task_id"] for item in pending_task_summary["pending_tasks"]
+    }
     assert pending_in_remaining_batch.id in pending_task_ids
     assert recovery_created_pending_task.id in pending_task_ids
     assert unrelated_pending_task.id in pending_task_ids
@@ -198,11 +202,20 @@ def test_build_stage_evaluation_request_includes_new_structured_summaries(
     pending_by_id = {
         item["task_id"]: item for item in pending_task_summary["pending_tasks"]
     }
-    assert pending_by_id[pending_in_remaining_batch.id]["is_in_remaining_batches"] is True
-    assert pending_by_id[pending_in_remaining_batch.id]["is_recovery_generated"] is False
+    assert (
+        pending_by_id[pending_in_remaining_batch.id]["is_in_remaining_batches"] is True
+    )
+    assert (
+        pending_by_id[pending_in_remaining_batch.id]["is_recovery_generated"] is False
+    )
 
-    assert pending_by_id[recovery_created_pending_task.id]["is_in_remaining_batches"] is False
-    assert pending_by_id[recovery_created_pending_task.id]["is_recovery_generated"] is True
+    assert (
+        pending_by_id[recovery_created_pending_task.id]["is_in_remaining_batches"]
+        is False
+    )
+    assert (
+        pending_by_id[recovery_created_pending_task.id]["is_recovery_generated"] is True
+    )
 
     checkpoint_artifact_window_summary = json.loads(
         request["checkpoint_artifact_window_summary"]
@@ -225,7 +238,9 @@ def test_build_stage_evaluation_request_includes_new_structured_summaries(
     task_state_summary = json.loads(request["task_state_summary"])
     assert len(task_state_summary["evaluated_tasks"]) == 1
     assert task_state_summary["evaluated_tasks"][0]["task_id"] == executed_task.id
-    assert task_state_summary["evaluated_tasks"][0]["latest_run"]["status"] == "succeeded"
+    assert (
+        task_state_summary["evaluated_tasks"][0]["latest_run"]["status"] == "succeeded"
+    )
 
     recovery_context_summary = json.loads(request["recovery_context_summary"])
     assert len(recovery_context_summary["recovery_created_tasks"]) == 1
@@ -236,8 +251,12 @@ def test_build_stage_evaluation_request_includes_new_structured_summaries(
 
     additional_context = json.loads(request["additional_context"])
     assert additional_context["project"]["project_id"] == project.id
-    assert additional_context["checkpoint_window"]["executed_task_ids"] == [executed_task.id]
-    assert additional_context["checkpoint_window"]["artifact_ids"] == [executed_artifact.id]
+    assert additional_context["checkpoint_window"]["executed_task_ids"] == [
+        executed_task.id
+    ]
+    assert additional_context["checkpoint_window"]["artifact_ids"] == [
+        executed_artifact.id
+    ]
     assert additional_context["next_batch"]["batch_id"] == "batch_2"
     assert (
         recovery_created_pending_task.id
@@ -359,10 +378,15 @@ def test_evaluate_checkpoint_passes_structured_request_to_model(
     assert remaining_batches_summary["remaining_batches"][0]["batch_id"] == "batch_2"
 
     pending_task_summary = json.loads(captured_kwargs["pending_task_summary"])
-    assert any(item["task_id"] == pending_task.id for item in pending_task_summary["pending_tasks"])
+    assert any(
+        item["task_id"] == pending_task.id
+        for item in pending_task_summary["pending_tasks"]
+    )
 
     checkpoint_artifact_window_summary = json.loads(
         captured_kwargs["checkpoint_artifact_window_summary"]
     )
     assert checkpoint_artifact_window_summary["artifact_count"] == 1
-    assert checkpoint_artifact_window_summary["artifacts"][0]["artifact_id"] == artifact.id
+    assert (
+        checkpoint_artifact_window_summary["artifacts"][0]["artifact_id"] == artifact.id
+    )

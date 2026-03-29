@@ -62,7 +62,9 @@ def test_insert_patch_batch_after_batch_creates_plan_local_patch(make_execution_
     assert trailing_batch.batch_id == "plan_3_batch_2"
     assert trailing_batch.task_ids == [20]
 
-    checkpoint_by_id = {checkpoint.checkpoint_id: checkpoint for checkpoint in patched.checkpoints}
+    checkpoint_by_id = {
+        checkpoint.checkpoint_id: checkpoint for checkpoint in patched.checkpoints
+    }
 
     assert patch_batch.checkpoint_id in checkpoint_by_id
     patch_checkpoint = checkpoint_by_id[patch_batch.checkpoint_id]

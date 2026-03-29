@@ -21,19 +21,12 @@ def _get_existing_tasks(
     if not task_ids:
         return []
 
-    return (
-        db.query(Task)
-        .filter(Task.id.in_(task_ids))
-        .order_by(Task.id.asc())
-        .all()
-    )
+    return db.query(Task).filter(Task.id.in_(task_ids)).order_by(Task.id.asc()).all()
 
 
 def _collect_affected_parent_ids(tasks: list[Task]) -> list[int]:
     parent_ids = {
-        task.parent_task_id
-        for task in tasks
-        if task.parent_task_id is not None
+        task.parent_task_id for task in tasks if task.parent_task_id is not None
     }
     return sorted(parent_ids)
 

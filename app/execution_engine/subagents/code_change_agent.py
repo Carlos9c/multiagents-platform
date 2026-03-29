@@ -189,9 +189,7 @@ class CodeChangeAgent(BaseSubagent):
                 "Generated files do not match the pending file operation plan."
             )
 
-        planned_by_path = {
-            item.path: item for item in pending_plan.sorted_operations()
-        }
+        planned_by_path = {item.path: item for item in pending_plan.sorted_operations()}
 
         ordered_generated_files = sorted(
             materialization.files,

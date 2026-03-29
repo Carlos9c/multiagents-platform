@@ -39,7 +39,5 @@ class OrchestratorTrace(BaseModel):
     def to_notes(self) -> list[str]:
         notes: list[str] = []
         for event in self.events:
-            notes.append(
-                f"[{event.timestamp_utc}] {event.event_type}: {event.payload}"
-            )
+            notes.append(f"[{event.timestamp_utc}] {event.event_type}: {event.payload}")
         return notes

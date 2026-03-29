@@ -1,0 +1,190 @@
+Only in /mnt/data/repo/multiagents-platform-master: .pytest_cache
+Only in /mnt/data/repo/multiagents-platform-master: .ruff_cache
+diff -ru /alembic/versions/644e34a21eef_new_parameter_in_tasks.py /alembic/versions/644e34a21eef_new_parameter_in_tasks.py
+--- /alembic/versions/644e34a21eef_new_parameter_in_tasks.py	2026-03-29 10:19:38.000000000 +0000
++++ /alembic/versions/644e34a21eef_new_parameter_in_tasks.py	2026-03-29 10:36:49.452884483 +0000
+@@ -7,13 +7,10 @@
+ """
+ from typing import Sequence, Union
+ 
+-from alembic import op
+-import sqlalchemy as sa
+-
+ 
+ # revision identifiers, used by Alembic.
+-revision: str = '644e34a21eef'
+-down_revision: Union[str, Sequence[str], None] = '14b764188bf0'
++revision: str = "644e34a21eef"
++down_revision: Union[str, Sequence[str], None] = "14b764188bf0"
+ branch_labels: Union[str, Sequence[str], None] = None
+ depends_on: Union[str, Sequence[str], None] = None
+ 
+diff -ru /alembic/versions/bef2798eaab3_add_execution_run_reporting_fields.py /alembic/versions/bef2798eaab3_add_execution_run_reporting_fields.py
+--- /alembic/versions/bef2798eaab3_add_execution_run_reporting_fields.py	2026-03-29 10:19:38.000000000 +0000
++++ /alembic/versions/bef2798eaab3_add_execution_run_reporting_fields.py	2026-03-29 10:36:49.453304352 +0000
+@@ -7,13 +7,10 @@
+ """
+ from typing import Sequence, Union
+ 
+-from alembic import op
+-import sqlalchemy as sa
+-
+ 
+ # revision identifiers, used by Alembic.
+-revision: str = 'bef2798eaab3'
+-down_revision: Union[str, Sequence[str], None] = '78d3d05ff24a'
++revision: str = "bef2798eaab3"
++down_revision: Union[str, Sequence[str], None] = "78d3d05ff24a"
+ branch_labels: Union[str, Sequence[str], None] = None
+ depends_on: Union[str, Sequence[str], None] = None
+ 
+Only in /app: __pycache__
+Only in /app/api: __pycache__
+Only in /app/core: __pycache__
+Only in /app/db: __pycache__
+Only in /app/execution_engine: __pycache__
+Only in /app/execution_engine/agent_runtime: __pycache__
+Only in /app/execution_engine/engines: __pycache__
+Only in /app/execution_engine/subagents: __pycache__
+Only in /app/execution_engine/tools: __pycache__
+Only in /app/models: __pycache__
+Only in /app/schemas: __pycache__
+Only in /app/services: __pycache__
+Only in /app/services/llm: __pycache__
+diff -ru /app/services/local_workspace_runtime.py /app/services/local_workspace_runtime.py
+--- /app/services/local_workspace_runtime.py	2026-03-29 10:19:38.000000000 +0000
++++ /app/services/local_workspace_runtime.py	2026-03-29 10:36:49.454129889 +0000
+@@ -1,4 +1,4 @@
+-﻿from __future__ import annotations
++from __future__ import annotations
+ 
+ import filecmp
+ import shutil
+@@ -6,7 +6,7 @@
+ from pathlib import Path
+ 
+ from app.schemas.workspace import WorkspaceChangeSet
+-from app.services.project_storage import CODE_DOMAIN, ProjectStorageService
++from app.services.project_storage import ProjectStorageService
+ from app.services.workspace_runtime import (
+     BaseWorkspaceRuntime,
+     CommandResult,
+diff -ru /app/services/project_workflow_service.py /app/services/project_workflow_service.py
+--- /app/services/project_workflow_service.py	2026-03-29 10:19:38.000000000 +0000
++++ /app/services/project_workflow_service.py	2026-03-29 10:37:04.469343731 +0000
+@@ -511,7 +511,6 @@
+ ) -> tuple[WorkflowIterationSummary, str, int, ExecutionPlan, bool]:
+     starting_plan_version = plan.plan_version
+     processed_batch_ids: list[str] = []
+-    reopened_finalization = False
+     resulting_status = "execution_in_progress"
+     current_finalization_iteration_count = finalization_iteration_count
+     iteration_requires_replan = False
+@@ -588,7 +587,6 @@
+         resolved_intent_type = post_batch_result.resolved_intent_type
+         requires_manual_review = post_batch_result.requires_manual_review
+         should_close_stage = post_batch_result.should_close_stage
+-        reopened_finalization = post_batch_result.reopened_finalization
+         patched_execution_plan = post_batch_result.patched_execution_plan
+ 
+         if requires_manual_review or getattr(
+diff -ru /app/services/task_execution_service.py /app/services/task_execution_service.py
+--- /app/services/task_execution_service.py	2026-03-29 10:19:38.000000000 +0000
++++ /app/services/task_execution_service.py	2026-03-29 10:36:49.456390723 +0000
+@@ -30,7 +30,6 @@
+     PLANNING_LEVEL_ATOMIC,
+     PENDING_ENGINE_ROUTING_EXECUTOR,
+     TASK_STATUS_COMPLETED,
+-    TASK_STATUS_FAILED,
+     TASK_STATUS_PARTIAL,
+     Task,
+ )
+Only in /app/services/validation: __pycache__
+Only in /app/services/validation/evidence: __pycache__
+Only in /app/services/validation/router: __pycache__
+Only in /app/services/validation/validators: __pycache__
+Only in /app/services/validation/validators/code: __pycache__
+Only in /tests: __pycache__
+Only in /tests/api: __pycache__
+diff -ru /tests/conftest.py /tests/conftest.py
+--- /tests/conftest.py	2026-03-29 10:19:38.000000000 +0000
++++ /tests/conftest.py	2026-03-29 10:37:04.470381984 +0000
+@@ -1,4 +1,10 @@
++# ruff: noqa: E402
+ import os
++
++os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
++os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
++os.environ.setdefault("OPENAI_API_KEY", "test-key")
++
+ import sys
+ from collections.abc import Iterator
+ from pathlib import Path
+@@ -11,9 +17,6 @@
+ ROOT_DIR = Path(__file__).resolve().parents[1]
+ sys.path.insert(0, str(ROOT_DIR))
+ 
+-os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
+-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+-os.environ.setdefault("OPENAI_API_KEY", "test-key")
+ os.environ.setdefault("AGENTS_PROJECTS_ROOT", str(Path.cwd() / ".pytest_agents_projects"))
+ 
+ from app.db.base import Base
+Only in /tests/execution_engine: __pycache__
+diff -ru /tests/execution_engine/test_execution_engine.py /tests/execution_engine/test_execution_engine.py
+--- /tests/execution_engine/test_execution_engine.py	2026-03-29 10:19:38.000000000 +0000
++++ /tests/execution_engine/test_execution_engine.py	2026-03-29 10:36:49.457860661 +0000
+@@ -602,7 +602,7 @@
+                 )
+             )
+ 
+-            decision = self._decide_next_action(
++            self._decide_next_action(
+                 request=request,
+                 runtime_state=runtime_state,
+                 resolution_state=resolution_state,
+Only in /tests/schemas: __pycache__
+Only in /tests/services: __pycache__
+diff -ru /tests/services/test_live_plan_mutation_service.py /tests/services/test_live_plan_mutation_service.py
+--- /tests/services/test_live_plan_mutation_service.py	2026-03-29 10:19:38.000000000 +0000
++++ /tests/services/test_live_plan_mutation_service.py	2026-03-29 10:36:49.458613280 +0000
+@@ -4,7 +4,6 @@
+ from app.schemas.post_batch_intent import ResolvedPostBatchIntent
+ from app.schemas.recovery import RecoveryContext
+ from app.services.live_plan_mutation_service import (
+-    LivePlanMutationServiceError,
+     mutate_live_plan,
+ )
+ 
+diff -ru /tests/services/test_project_workflow_service.py /tests/services/test_project_workflow_service.py
+--- /tests/services/test_project_workflow_service.py	2026-03-29 10:19:38.000000000 +0000
++++ /tests/services/test_project_workflow_service.py	2026-03-29 10:36:49.460771986 +0000
+@@ -4,7 +4,6 @@
+ from app.models.artifact import Artifact
+ import pytest
+ 
+-from app.models.project import Project
+ from app.models.task import (
+     EXECUTION_ENGINE,
+     PENDING_ENGINE_ROUTING_EXECUTOR,
+@@ -451,7 +450,7 @@
+     make_project,
+     make_execution_plan,
+ ):
+-    project = make_project(plan_version=1)
++    make_project(plan_version=1)
+ 
+     plan_v1 = make_execution_plan(
+         plan_version=1,
+diff -ru /tests/services/test_task_hierarchy_service.py /tests/services/test_task_hierarchy_service.py
+--- /tests/services/test_task_hierarchy_service.py	2026-03-29 10:19:38.000000000 +0000
++++ /tests/services/test_task_hierarchy_service.py	2026-03-29 10:36:49.461630174 +0000
+@@ -10,7 +10,6 @@
+     TASK_STATUS_PENDING,
+ )
+ from app.services.recovery_service import (
+-    RecoveryServiceError,
+     materialize_recovery_decision,
+ )
+ 
+Only in /tests/services/validation: __pycache__

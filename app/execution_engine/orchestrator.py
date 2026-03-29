@@ -27,7 +27,10 @@ from app.execution_engine.next_action import (
 )
 from app.execution_engine.resolution_state import ResolutionState
 from app.execution_engine.state import ExecutionState
-from app.execution_engine.subagent_registry import SubagentRegistry, SubagentRegistryError
+from app.execution_engine.subagent_registry import (
+    SubagentRegistry,
+    SubagentRegistryError,
+)
 from app.execution_engine.subagents.base import SubagentRejectedStepError
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
@@ -158,7 +161,9 @@ def _normalize_decision(
 ) -> NextActionDecision:
     allowed = _allowed_actions(request, state, runtime_state)
 
-    if decision.action == ACTION_RUN_COMMAND and not (decision.command and decision.command.strip()):
+    if decision.action == ACTION_RUN_COMMAND and not (
+        decision.command and decision.command.strip()
+    ):
         return NextActionDecision(
             action=ACTION_FINISH,
             rationale=(
@@ -168,9 +173,8 @@ def _normalize_decision(
             target_paths=[],
             command=None,
             expected_outcome="Hand off to external validation.",
-            risk_flags=list(decision.risk_flags) + [
-                "run_command_missing_command_overridden_to_finish"
-            ],
+            risk_flags=list(decision.risk_flags)
+            + ["run_command_missing_command_overridden_to_finish"],
         )
 
     if (
@@ -187,9 +191,8 @@ def _normalize_decision(
             target_paths=[],
             command=None,
             expected_outcome="Hand off to external validation.",
-            risk_flags=list(decision.risk_flags) + [
-                "completion_run_command_capped_overridden_to_finish"
-            ],
+            risk_flags=list(decision.risk_flags)
+            + ["completion_run_command_capped_overridden_to_finish"],
         )
 
     if decision.action in allowed:
@@ -214,9 +217,7 @@ def _normalize_decision(
         else [],
         command=None,
         expected_outcome=None,
-        risk_flags=list(decision.risk_flags) + [
-            "action_overridden_by_phase_policy"
-        ],
+        risk_flags=list(decision.risk_flags) + ["action_overridden_by_phase_policy"],
     )
 
 
@@ -428,7 +429,9 @@ class ExecutionOrchestrator:
                     details="The orchestrator selected an unregistered subagent.",
                     remaining_scope=request.task_description or request.task_title,
                     blockers_found=[str(exc)],
-                    validation_notes=["Registry misconfiguration in orchestrator loop."],
+                    validation_notes=[
+                        "Registry misconfiguration in orchestrator loop."
+                    ],
                     execution_agent_sequence=list(executed_subagents),
                     evidence=resolution_state.evidence,
                 )
@@ -495,9 +498,7 @@ class ExecutionOrchestrator:
         runtime_state: ExecutionState,
         resolution_state: ResolutionState,
     ) -> NextActionDecision:
-        schema = to_openai_strict_json_schema(
-            NextActionDecision.model_json_schema()
-        )
+        schema = to_openai_strict_json_schema(NextActionDecision.model_json_schema())
         raw = self.runtime.generate_structured(
             system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
             user_prompt=_build_orchestrator_prompt(
@@ -517,7 +518,9 @@ class ExecutionOrchestrator:
                 rejection_reason=str(exc),
                 remaining_scope=request.task_description or request.task_title,
                 blockers_found=["invalid_next_action_output"],
-                validation_notes=["The orchestrator returned invalid structured output."],
+                validation_notes=[
+                    "The orchestrator returned invalid structured output."
+                ],
                 failure_code="invalid_next_action_output",
             ) from exc
 

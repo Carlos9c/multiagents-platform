@@ -163,7 +163,9 @@ def _build_execution_trajectory_summary(
     source_task: Task,
     source_run: ExecutionRun,
 ) -> str:
-    canonical_sequence = source_task.last_execution_agent_sequence or source_run.execution_agent_sequence
+    canonical_sequence = (
+        source_task.last_execution_agent_sequence or source_run.execution_agent_sequence
+    )
 
     sequence_steps: list[str] = []
     if canonical_sequence:
@@ -282,11 +284,7 @@ def materialize_recovery_decision(
 
     parent_task_id = _infer_parent_task_id_for_created_tasks(source_task)
 
-    sibling_count = (
-        db.query(Task)
-        .filter(Task.parent_task_id == parent_task_id)
-        .count()
-    )
+    sibling_count = db.query(Task).filter(Task.parent_task_id == parent_task_id).count()
     next_sequence_order = sibling_count + 1
 
     created_tasks: list[Task] = []
@@ -341,7 +339,8 @@ def build_recovery_context_entry(
                 source_task_id=decision.source_task_id,
                 issue_type="progress_blocked",
                 summary=decision.covered_gap_summary,
-                recommended_action=decision.evaluation_guidance or decision.execution_guidance,
+                recommended_action=decision.evaluation_guidance
+                or decision.execution_guidance,
             )
         )
 
@@ -354,7 +353,9 @@ def build_recovery_context_entry(
                 confidence=decision.confidence,
                 reason=decision.reason,
                 still_blocks_progress=decision.still_blocks_progress,
-                created_task_ids=[task.created_task_id for task in created_task_records],
+                created_task_ids=[
+                    task.created_task_id for task in created_task_records
+                ],
             )
         ],
         open_issues=open_issues,

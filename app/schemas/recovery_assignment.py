@@ -104,7 +104,9 @@ class ExecutedBatchAssignmentSummary(BaseModel):
         self.goal = _clean_required(self.goal)
         self.summary = _clean_required(self.summary)
 
-        self.key_findings = [item.strip() for item in self.key_findings if item and item.strip()]
+        self.key_findings = [
+            item.strip() for item in self.key_findings if item and item.strip()
+        ]
 
         for field_name in (
             "executed_task_ids",
@@ -149,12 +151,16 @@ class AssignmentEvaluationSignals(BaseModel):
         self.decision = _clean_required(self.decision)
         self.decision_summary = _clean_required(self.decision_summary)
         self.recommended_next_action = _clean_optional(self.recommended_next_action)
-        self.recommended_next_action_reason = _clean_optional(self.recommended_next_action_reason)
+        self.recommended_next_action_reason = _clean_optional(
+            self.recommended_next_action_reason
+        )
 
         self.decision_signals = [
             item.strip() for item in self.decision_signals if item and item.strip()
         ]
-        self.key_risks = [item.strip() for item in self.key_risks if item and item.strip()]
+        self.key_risks = [
+            item.strip() for item in self.key_risks if item and item.strip()
+        ]
         self.notes = [item.strip() for item in self.notes if item and item.strip()]
 
         return self
@@ -273,7 +279,9 @@ class RemainingBatchSummary(BaseModel):
             raise ValueError("task_ids must contain only positive integers.")
         self.task_ids = _dedupe_preserve_order(self.task_ids)
 
-        self.task_titles = [item.strip() for item in self.task_titles if item and item.strip()]
+        self.task_titles = [
+            item.strip() for item in self.task_titles if item and item.strip()
+        ]
 
         if self.task_titles and len(self.task_titles) != len(self.task_ids):
             raise ValueError(
@@ -300,7 +308,9 @@ class LivePlanSummaryForAssignment(BaseModel):
 
         batch_ids = [batch.batch_id for batch in self.remaining_batches]
         if len(batch_ids) != len(set(batch_ids)):
-            raise ValueError("remaining_batches cannot contain duplicate batch_id values.")
+            raise ValueError(
+                "remaining_batches cannot contain duplicate batch_id values."
+            )
 
         return self
 
@@ -388,10 +398,12 @@ class NewTaskExistingTaskRelationship(BaseModel):
 class KnownAssignmentRelationships(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    new_task_internal_dependencies: list[NewTaskInternalDependency] = Field(default_factory=list)
-    new_task_to_existing_task_dependencies: list[NewTaskExistingTaskRelationship] = Field(
+    new_task_internal_dependencies: list[NewTaskInternalDependency] = Field(
         default_factory=list
     )
+    new_task_to_existing_task_dependencies: list[
+        NewTaskExistingTaskRelationship
+    ] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_relationships(self) -> "KnownAssignmentRelationships":
@@ -490,7 +502,9 @@ class RecoveryAssignmentInput(BaseModel):
 
         pending_ids = [task.task_id for task in self.pending_valid_tasks]
         if len(pending_ids) != len(set(pending_ids)):
-            raise ValueError("pending_valid_tasks cannot contain duplicate task_id values.")
+            raise ValueError(
+                "pending_valid_tasks cannot contain duplicate task_id values."
+            )
 
         return self
 
@@ -514,17 +528,25 @@ class AssignmentTaskAssessment(BaseModel):
         self.rationale = _clean_required(self.rationale)
 
         if any(task_id <= 0 for task_id in self.depends_on_new_task_ids):
-            raise ValueError("depends_on_new_task_ids must contain only positive integers.")
+            raise ValueError(
+                "depends_on_new_task_ids must contain only positive integers."
+            )
         if any(task_id <= 0 for task_id in self.depends_on_existing_task_ids):
-            raise ValueError("depends_on_existing_task_ids must contain only positive integers.")
+            raise ValueError(
+                "depends_on_existing_task_ids must contain only positive integers."
+            )
 
-        self.depends_on_new_task_ids = _dedupe_preserve_order(self.depends_on_new_task_ids)
+        self.depends_on_new_task_ids = _dedupe_preserve_order(
+            self.depends_on_new_task_ids
+        )
         self.depends_on_existing_task_ids = _dedupe_preserve_order(
             self.depends_on_existing_task_ids
         )
 
         if self.task_id in self.depends_on_new_task_ids:
-            raise ValueError("A task cannot depend on itself in depends_on_new_task_ids.")
+            raise ValueError(
+                "A task cannot depend on itself in depends_on_new_task_ids."
+            )
 
         return self
 
@@ -628,9 +650,13 @@ class RecoveryAssignmentLLMOutput(BaseModel):
 
         task_ids_from_assessments = [item.task_id for item in self.task_assessments]
         if len(task_ids_from_assessments) != len(set(task_ids_from_assessments)):
-            raise ValueError("task_assessments cannot contain duplicate task_id values.")
+            raise ValueError(
+                "task_assessments cannot contain duplicate task_id values."
+            )
 
-        suggested_cluster_ids = {item.suggested_cluster_id for item in self.task_assessments}
+        suggested_cluster_ids = {
+            item.suggested_cluster_id for item in self.task_assessments
+        }
         unknown_suggested = suggested_cluster_ids.difference(cluster_ids)
         if unknown_suggested:
             raise ValueError(
@@ -640,7 +666,9 @@ class RecoveryAssignmentLLMOutput(BaseModel):
 
         cluster_task_id_set: set[int] = set()
         for cluster in self.clusters:
-            repeated = set(cluster.task_ids_in_execution_order).intersection(cluster_task_id_set)
+            repeated = set(cluster.task_ids_in_execution_order).intersection(
+                cluster_task_id_set
+            )
             if repeated:
                 raise ValueError(
                     "A task cannot appear in more than one cluster. "
@@ -650,8 +678,12 @@ class RecoveryAssignmentLLMOutput(BaseModel):
 
         assessment_task_id_set = set(task_ids_from_assessments)
         if cluster_task_id_set != assessment_task_id_set:
-            missing_in_clusters = sorted(assessment_task_id_set.difference(cluster_task_id_set))
-            missing_in_assessments = sorted(cluster_task_id_set.difference(assessment_task_id_set))
+            missing_in_clusters = sorted(
+                assessment_task_id_set.difference(cluster_task_id_set)
+            )
+            missing_in_assessments = sorted(
+                cluster_task_id_set.difference(assessment_task_id_set)
+            )
             raise ValueError(
                 "task_assessments and clusters must cover exactly the same task ids. "
                 f"missing_in_clusters={missing_in_clusters}, "
@@ -679,7 +711,8 @@ class RecoveryAssignmentLLMOutput(BaseModel):
         for assessment in self.task_assessments:
             cluster = cluster_by_id[assessment.suggested_cluster_id]
             cluster_task_positions = {
-                task_id: index for index, task_id in enumerate(cluster.task_ids_in_execution_order)
+                task_id: index
+                for index, task_id in enumerate(cluster.task_ids_in_execution_order)
             }
             current_position = cluster_task_positions[assessment.task_id]
 

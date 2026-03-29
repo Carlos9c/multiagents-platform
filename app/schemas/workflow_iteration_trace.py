@@ -89,10 +89,14 @@ class WorkflowIterationTrace(BaseModel):
             ("unassigned_task_ids", self.unassigned_task_ids),
         ):
             if any(value <= 0 for value in values):
-                raise ValueError(f"{collection_name} must contain only positive integers.")
+                raise ValueError(
+                    f"{collection_name} must contain only positive integers."
+                )
 
         if set(self.successful_task_ids) - set(self.executed_task_ids):
-            raise ValueError("successful_task_ids must be a subset of executed_task_ids.")
+            raise ValueError(
+                "successful_task_ids must be a subset of executed_task_ids."
+            )
 
         if (
             self.finalization_iteration_count > self.max_finalization_iterations

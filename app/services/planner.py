@@ -33,22 +33,16 @@ def validate_task_quality(tasks: list[Task]) -> None:
             raise ValueError(f"Vague task title not allowed: {task.title}")
 
         if len((task.implementation_notes or "").strip()) < 60:
-            raise ValueError(
-                f"implementation_notes too short in task: {task.title}"
-            )
+            raise ValueError(f"implementation_notes too short in task: {task.title}")
 
         if len((task.acceptance_criteria or "").strip()) < 30:
-            raise ValueError(
-                f"acceptance_criteria too short in task: {task.title}"
-            )
+            raise ValueError(f"acceptance_criteria too short in task: {task.title}")
 
         if len((task.out_of_scope or "").strip()) < 20:
             raise ValueError(f"out_of_scope too short in task: {task.title}")
 
         if len((task.technical_constraints or "").strip()) < 20:
-            raise ValueError(
-                f"technical_constraints too short in task: {task.title}"
-            )
+            raise ValueError(f"technical_constraints too short in task: {task.title}")
 
 
 def generate_project_plan(db: Session, project_id: int) -> dict:

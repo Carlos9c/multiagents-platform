@@ -113,7 +113,10 @@ def test_build_validation_routing_input_collects_task_execution_and_evidence_sum
     assert routing_input.evidence.changed_file_paths == ["app/service.py"]
     assert routing_input.evidence.command_count == 1
     assert routing_input.evidence.artifact_refs == ["artifact_id=123"]
-    assert routing_input.evidence.allowed_paths == ["app/service.py", "tests/test_service.py"]
+    assert routing_input.evidence.allowed_paths == [
+        "app/service.py",
+        "tests/test_service.py",
+    ]
     assert routing_input.evidence.related_task_ids == [900]
 
 
@@ -147,7 +150,9 @@ def test_validate_execution_result_orchestrates_route_build_and_dispatch(
     source_dir = tmp_path / "source"
     workspace_dir.mkdir()
     source_dir.mkdir()
-    (workspace_dir / "app_service.py").write_text("def run():\n    return 'ok'\n", encoding="utf-8")
+    (workspace_dir / "app_service.py").write_text(
+        "def run():\n    return 'ok'\n", encoding="utf-8"
+    )
 
     persisted_artifact = make_artifact(
         project_id=project.id,

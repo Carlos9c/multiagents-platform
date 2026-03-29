@@ -278,9 +278,7 @@ def call_recovery_model(
     remaining_plan_summary: str | None = None,
 ) -> RecoveryDecision:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        RecoveryDecision.model_json_schema()
-    )
+    strict_schema = to_openai_strict_json_schema(RecoveryDecision.model_json_schema())
 
     first_user_prompt = build_recovery_user_prompt(
         source_task_summary=source_task_summary,

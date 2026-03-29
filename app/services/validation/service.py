@@ -69,7 +69,9 @@ def build_validation_routing_input(
             blockers_found=list(execution_result.blockers_found or []),
             validation_notes=list(execution_result.validation_notes or []),
             output_snapshot=execution_result.output_snapshot,
-            execution_agent_sequence=list(execution_result.execution_agent_sequence or []),
+            execution_agent_sequence=list(
+                execution_result.execution_agent_sequence or []
+            ),
         ),
         evidence=ValidationRoutingEvidenceSummary(
             changed_file_paths=[

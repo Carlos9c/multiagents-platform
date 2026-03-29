@@ -39,8 +39,12 @@ def _build_engine_result(
         decision=decision,
         summary=summary,
         details="Execution details.",
-        completed_scope="Completed scope." if decision == EXECUTION_DECISION_PARTIAL else None,
-        remaining_scope="Remaining scope." if decision != EXECUTION_DECISION_PARTIAL else None,
+        completed_scope="Completed scope."
+        if decision == EXECUTION_DECISION_PARTIAL
+        else None,
+        remaining_scope="Remaining scope."
+        if decision != EXECUTION_DECISION_PARTIAL
+        else None,
         blockers_found=[],
         validation_notes=[],
         output_snapshot="executor output",
@@ -63,8 +67,12 @@ def _set_task_status(db, task_id: int, status: str) -> str:
     return task.status
 
 
-def _patch_engine(monkeypatch, engine_result: ExecutionResult, *, captured_request: dict | None = None):
-    def _fake_build_execution_request(db, task, execution_run_id, resolved_executor_type):
+def _patch_engine(
+    monkeypatch, engine_result: ExecutionResult, *, captured_request: dict | None = None
+):
+    def _fake_build_execution_request(
+        db, task, execution_run_id, resolved_executor_type
+    ):
         request = types.SimpleNamespace(
             task_id=task.id,
             project_id=task.project_id,
@@ -198,7 +206,9 @@ def test_execute_task_sync_rejects_non_atomic_task(
         executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
     )
 
-    with pytest.raises(TaskExecutionServiceError, match="Only atomic tasks can be executed"):
+    with pytest.raises(
+        TaskExecutionServiceError, match="Only atomic tasks can be executed"
+    ):
         execute_task_sync(db_session, non_atomic_task.id)
 
 
@@ -319,7 +329,11 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
     )
 
     promoted = {"called": False}
-    expected_sequence = ["context_selection_agent", "placement_resolver_agent", "code_change_agent"]
+    expected_sequence = [
+        "context_selection_agent",
+        "placement_resolver_agent",
+        "code_change_agent",
+    ]
 
     _patch_engine(
         monkeypatch,

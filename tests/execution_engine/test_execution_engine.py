@@ -237,7 +237,9 @@ def test_code_change_agent_applies_pending_operations_and_marks_applied(tmp_path
 
     existing_main = workspace / "app" / "main.py"
     existing_main.parent.mkdir(parents=True, exist_ok=True)
-    existing_main.write_text("from fastapi import FastAPI\n\napp = FastAPI()\n", encoding="utf-8")
+    existing_main.write_text(
+        "from fastapi import FastAPI\n\napp = FastAPI()\n", encoding="utf-8"
+    )
 
     request = _make_request(workspace)
 
@@ -316,8 +318,12 @@ def test_code_change_agent_applies_pending_operations_and_marks_applied(tmp_path
     )
 
     assert (workspace / "app" / "api" / "notes.py").exists()
-    assert "APIRouter" in (workspace / "app" / "api" / "notes.py").read_text(encoding="utf-8")
-    assert "include_router" in (workspace / "app" / "main.py").read_text(encoding="utf-8")
+    assert "APIRouter" in (workspace / "app" / "api" / "notes.py").read_text(
+        encoding="utf-8"
+    )
+    assert "include_router" in (workspace / "app" / "main.py").read_text(
+        encoding="utf-8"
+    )
 
     assert next_state.pending_operation_paths == []
     assert sorted(next_state.applied_operation_paths) == [
@@ -397,12 +403,16 @@ def test_code_change_agent_rolls_back_if_write_fails(tmp_path, monkeypatch):
         ]
     )
 
-    from app.execution_engine.subagents import code_change_agent as code_change_agent_module
+    from app.execution_engine.subagents import (
+        code_change_agent as code_change_agent_module,
+    )
 
     real_write = code_change_agent_module.write_text_file
     calls = {"count": 0}
 
-    def failing_write(*, root_dir: str, relative_path: str, content: str, encoding: str = "utf-8") -> str:
+    def failing_write(
+        *, root_dir: str, relative_path: str, content: str, encoding: str = "utf-8"
+    ) -> str:
         calls["count"] += 1
         if calls["count"] == 2:
             raise RuntimeError("simulated write failure")
@@ -568,7 +578,10 @@ def test_orchestrator_phase_policy_prevents_return_to_context_after_planning(tmp
     result = orchestrator.run(request)
 
     assert result.decision == "partial"
-    assert any(item.path == "docs/notes-api-contract.md" for item in result.evidence.changed_files)
+    assert any(
+        item.path == "docs/notes-api-contract.md"
+        for item in result.evidence.changed_files
+    )
     joined_notes = "\n".join(result.evidence.notes)
     assert "action_overridden_by_phase_policy" in joined_notes
 
@@ -602,7 +615,7 @@ def test_orchestrator_finish_with_pending_operations_reports_blocker(tmp_path):
                 )
             )
 
-            decision = self._decide_next_action(
+            self._decide_next_action(
                 request=request,
                 runtime_state=runtime_state,
                 resolution_state=resolution_state,
@@ -615,7 +628,9 @@ def test_orchestrator_finish_with_pending_operations_reports_blocker(tmp_path):
             )
 
             blockers_found = (
-                [f"pending_operations={','.join(resolution_state.pending_operation_paths)}"]
+                [
+                    f"pending_operations={','.join(resolution_state.pending_operation_paths)}"
+                ]
                 if resolution_state.has_pending_operations()
                 else []
             )

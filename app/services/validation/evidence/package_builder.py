@@ -21,7 +21,9 @@ class ValidationEvidenceBuilderError(Exception):
     """Raised when validation evidence cannot be assembled."""
 
 
-def _read_text_file_if_exists(path: Path, *, max_chars: int = 40000) -> tuple[bool, str | None]:
+def _read_text_file_if_exists(
+    path: Path, *, max_chars: int = 40000
+) -> tuple[bool, str | None]:
     if not path.exists() or not path.is_file():
         return False, None
 
@@ -45,7 +47,9 @@ def _build_produced_file_evidence_item(
     workspace_path: str | None,
     source_path: str | None,
 ) -> ValidationEvidenceItem:
-    workspace_candidate = Path(workspace_path) / relative_path if workspace_path else None
+    workspace_candidate = (
+        Path(workspace_path) / relative_path if workspace_path else None
+    )
     if workspace_candidate is not None:
         exists, content = _read_text_file_if_exists(workspace_candidate)
         if exists:
@@ -131,7 +135,9 @@ def _build_persisted_artifact_evidence_item(
     return ValidationEvidenceItem(
         evidence_id=f"artifact:{artifact.id}",
         evidence_kind="persisted_artifact",
-        media_type="application/json" if artifact.content and artifact.content.strip().startswith("{") else "text/plain",
+        media_type="application/json"
+        if artifact.content and artifact.content.strip().startswith("{")
+        else "text/plain",
         representation_kind="artifact_preview",
         source="persisted_artifact",
         logical_name=artifact.artifact_type,
@@ -243,7 +249,9 @@ def build_task_validation_input(
             )
         )
 
-    for index, artifact_ref in enumerate(execution_result.evidence.artifacts_created or []):
+    for index, artifact_ref in enumerate(
+        execution_result.evidence.artifacts_created or []
+    ):
         evidence_items.append(
             _build_artifact_ref_evidence_item(
                 index=index,

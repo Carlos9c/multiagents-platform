@@ -112,13 +112,17 @@ class PostBatchResult(BaseModel):
             ("problematic_run_ids", self.problematic_run_ids),
         ):
             if any(value <= 0 for value in values):
-                raise ValueError(f"{collection_name} must contain only positive integers.")
+                raise ValueError(
+                    f"{collection_name} must contain only positive integers."
+                )
 
         executed_set = set(self.executed_task_ids)
         successful_set = set(self.successful_task_ids)
 
         if not successful_set.issubset(executed_set):
-            raise ValueError("successful_task_ids must be a subset of executed_task_ids.")
+            raise ValueError(
+                "successful_task_ids must be a subset of executed_task_ids."
+            )
 
         if (
             self.finalization_iteration_count > self.max_finalization_iterations
@@ -425,7 +429,10 @@ class PostBatchResult(BaseModel):
                 raise ValueError(
                     "status='checkpoint_blocked' cannot use resolved_intent_type='continue'."
                 )
-            if self.can_continue_after_application and self.resolved_intent_type != "assign":
+            if (
+                self.can_continue_after_application
+                and self.resolved_intent_type != "assign"
+            ):
                 raise ValueError(
                     "status='checkpoint_blocked' only allows can_continue_after_application=True for assign."
                 )
@@ -445,12 +452,18 @@ class PostBatchResult(BaseModel):
                 "was triggered by the finalization guard."
             )
 
-        if self.should_close_stage and not self.evaluation_decision.project_stage_closed:
+        if (
+            self.should_close_stage
+            and not self.evaluation_decision.project_stage_closed
+        ):
             raise ValueError(
                 "should_close_stage=true requires evaluation_decision.project_stage_closed=true."
             )
 
-        if self.resolved_intent_type == "assign" and self.patched_execution_plan is None:
+        if (
+            self.resolved_intent_type == "assign"
+            and self.patched_execution_plan is None
+        ):
             raise ValueError(
                 "resolved_intent_type='assign' requires patched_execution_plan to be present."
             )

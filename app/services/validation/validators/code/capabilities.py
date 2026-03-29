@@ -34,6 +34,9 @@ def supports_code_validation_evidence(item: ValidationEvidenceItem) -> bool:
         return False
     if item.media_type not in CODE_VALIDATOR_CAPABILITIES.supported_media_types:
         return False
-    if item.representation_kind not in CODE_VALIDATOR_CAPABILITIES.supported_representation_kinds:
+    if (
+        item.representation_kind
+        not in CODE_VALIDATOR_CAPABILITIES.supported_representation_kinds
+    ):
         return False
     return True

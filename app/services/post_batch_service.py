@@ -42,7 +42,10 @@ from app.schemas.recovery_assignment import (
 )
 from app.schemas.workflow_iteration_trace import WorkflowIterationTrace
 from app.services.artifacts import create_artifact
-from app.services.evaluation_service import evaluate_checkpoint, persist_evaluation_decision
+from app.services.evaluation_service import (
+    evaluate_checkpoint,
+    persist_evaluation_decision,
+)
 from app.services.live_plan_mutation_service import (
     LivePlanMutationServiceError,
     mutate_live_plan,
@@ -184,7 +187,9 @@ def _persist_recovery_assignment_payload(
 
 
 def _get_batch(plan: ExecutionPlan, batch_id: str) -> ExecutionBatch:
-    batch = next((batch for batch in plan.execution_batches if batch.batch_id == batch_id), None)
+    batch = next(
+        (batch for batch in plan.execution_batches if batch.batch_id == batch_id), None
+    )
     if not batch:
         raise PostBatchServiceError(
             f"Batch '{batch_id}' not found in execution plan version {plan.plan_version}"
@@ -193,7 +198,9 @@ def _get_batch(plan: ExecutionPlan, batch_id: str) -> ExecutionBatch:
 
 
 def _get_checkpoint_for_batch(plan: ExecutionPlan, batch_id: str):
-    checkpoint = next((cp for cp in plan.checkpoints if cp.after_batch_id == batch_id), None)
+    checkpoint = next(
+        (cp for cp in plan.checkpoints if cp.after_batch_id == batch_id), None
+    )
     if checkpoint is None:
         raise PostBatchServiceError(
             f"Batch '{batch_id}' has no checkpoint associated in execution plan version "
@@ -209,6 +216,7 @@ def _get_latest_run_for_task(db: Session, task_id: int) -> ExecutionRun | None:
         .order_by(ExecutionRun.id.desc())
         .first()
     )
+
 
 def _parse_validation_artifact_payload(
     validation_artifact: Artifact,
@@ -404,7 +412,11 @@ def _get_artifact_ids_in_checkpoint_window(
 
 def _build_next_batch_summary(plan: ExecutionPlan, batch_id: str) -> str | None:
     batch_index = next(
-        (index for index, batch in enumerate(plan.execution_batches) if batch.batch_id == batch_id),
+        (
+            index
+            for index, batch in enumerate(plan.execution_batches)
+            if batch.batch_id == batch_id
+        ),
         None,
     )
     if batch_index is None:
@@ -419,7 +431,11 @@ def _build_next_batch_summary(plan: ExecutionPlan, batch_id: str) -> str | None:
 
 def _build_remaining_plan_summary(plan: ExecutionPlan, batch_id: str) -> str | None:
     batch_index = next(
-        (index for index, batch in enumerate(plan.execution_batches) if batch.batch_id == batch_id),
+        (
+            index
+            for index, batch in enumerate(plan.execution_batches)
+            if batch.batch_id == batch_id
+        ),
         None,
     )
     if batch_index is None:
@@ -431,7 +447,9 @@ def _build_remaining_plan_summary(plan: ExecutionPlan, batch_id: str) -> str | N
 
     payload = {
         "plan_version": plan.plan_version,
-        "remaining_batches": [batch.model_dump(mode="json") for batch in remaining_batches],
+        "remaining_batches": [
+            batch.model_dump(mode="json") for batch in remaining_batches
+        ],
         "blocked_task_ids": plan.blocked_task_ids,
         "sequencing_rationale": plan.sequencing_rationale,
         "uncertainties": plan.uncertainties,
@@ -564,7 +582,10 @@ def _validate_stage_evaluation_coherence(
     replan_required = _normalize_bool(_read_attr(replan, "required"), False)
     replan_level = _normalize_string(_read_attr(replan, "level"), "")
 
-    if recommended_next_action == "replan_remaining_work" and remaining_plan_still_valid:
+    if (
+        recommended_next_action == "replan_remaining_work"
+        and remaining_plan_still_valid
+    ):
         raise PostBatchServiceError(
             "Checkpoint evaluation is contradictory: recommended_next_action='replan_remaining_work' "
             "requires remaining_plan_still_valid=False."
@@ -627,7 +648,9 @@ def _normalize_non_final_close_intent(
     if is_final_batch or intent.intent_type != "close":
         return intent
 
-    decision_signals = list(dict.fromkeys(intent.decision_signals + ["non_final_close_degraded"]))
+    decision_signals = list(
+        dict.fromkeys(intent.decision_signals + ["non_final_close_degraded"])
+    )
 
     return ResolvedPostBatchIntent(
         intent_type="continue",
@@ -659,7 +682,8 @@ def _build_recovery_assignment_executed_batch_summary(
     partial_or_failed_task_ids = [
         summary.task_id
         for summary in task_run_summaries
-        if summary.task_id in executed_task_ids and summary.task_id not in successful_task_ids
+        if summary.task_id in executed_task_ids
+        and summary.task_id not in successful_task_ids
     ]
 
     key_findings: list[str] = []
@@ -744,7 +768,8 @@ def _build_recovery_assignment_new_tasks(
     recovery_context: RecoveryContext,
 ) -> list[RecoveryTaskForAssignment]:
     created_task_records_by_id = {
-        record.created_task_id: record for record in recovery_context.recovery_created_tasks
+        record.created_task_id: record
+        for record in recovery_context.recovery_created_tasks
     }
     tasks = _get_tasks_by_ids(
         db=db,
@@ -752,7 +777,9 @@ def _build_recovery_assignment_new_tasks(
         task_ids=created_recovery_task_ids,
     )
 
-    parent_ids = [task.parent_task_id for task in tasks if task.parent_task_id is not None]
+    parent_ids = [
+        task.parent_task_id for task in tasks if task.parent_task_id is not None
+    ]
     parent_titles: dict[int, str] = {}
     if parent_ids:
         parent_tasks = _get_tasks_by_ids(
@@ -778,7 +805,9 @@ def _build_recovery_assignment_new_tasks(
                 task_type=task.task_type,
                 priority=task.priority,
                 parent_task_id=task.parent_task_id,
-                parent_task_title=parent_titles.get(task.parent_task_id) if task.parent_task_id else None,
+                parent_task_title=parent_titles.get(task.parent_task_id)
+                if task.parent_task_id
+                else None,
                 sequence_order=task.sequence_order,
                 source_task_id=record.source_task_id if record else None,
                 source_run_id=record.source_run_id if record else None,
@@ -861,7 +890,9 @@ def _build_recovery_assignment_pending_valid_tasks(
         .all()
     )
 
-    parent_ids = [task.parent_task_id for task in tasks if task.parent_task_id is not None]
+    parent_ids = [
+        task.parent_task_id for task in tasks if task.parent_task_id is not None
+    ]
     parent_titles: dict[int, str] = {}
     if parent_ids:
         parent_tasks = (
@@ -879,7 +910,9 @@ def _build_recovery_assignment_pending_valid_tasks(
             task_id=task.id,
             title=task.title,
             parent_task_id=task.parent_task_id,
-            parent_task_title=parent_titles.get(task.parent_task_id) if task.parent_task_id else None,
+            parent_task_title=parent_titles.get(task.parent_task_id)
+            if task.parent_task_id
+            else None,
             status=task.status,
             is_blocked=bool(task.is_blocked),
             sequence_order=task.sequence_order,
@@ -932,7 +965,9 @@ def _build_recovery_assignment_input(
             task_run_summaries=task_run_summaries,
         ),
         evaluation_signals=AssignmentEvaluationSignals(
-            decision=_normalize_string(_read_attr(evaluation_decision, "decision"), "stage_incomplete"),
+            decision=_normalize_string(
+                _read_attr(evaluation_decision, "decision"), "stage_incomplete"
+            ),
             decision_summary=_normalize_string(
                 _read_attr(evaluation_decision, "decision_summary"),
                 "Checkpoint evaluation decided that the current plan can continue with controlled assignment.",
@@ -945,17 +980,23 @@ def _build_recovery_assignment_input(
                 _read_attr(evaluation_decision, "recommended_next_action_reason"),
                 "New recovery work must be assigned before the next batch starts.",
             ),
-            plan_change_scope=_read_attr(evaluation_decision, "plan_change_scope", "none"),
+            plan_change_scope=_read_attr(
+                evaluation_decision, "plan_change_scope", "none"
+            ),
             remaining_plan_still_valid=_normalize_bool(
                 _read_attr(evaluation_decision, "remaining_plan_still_valid"),
                 True,
             ),
-            new_recovery_tasks_blocking=_read_attr(evaluation_decision, "new_recovery_tasks_blocking"),
+            new_recovery_tasks_blocking=_read_attr(
+                evaluation_decision, "new_recovery_tasks_blocking"
+            ),
             single_task_tail_risk=_normalize_bool(
                 _read_attr(evaluation_decision, "single_task_tail_risk"),
                 False,
             ),
-            decision_signals=list(_read_attr(evaluation_decision, "decision_signals", []) or []),
+            decision_signals=list(
+                _read_attr(evaluation_decision, "decision_signals", []) or []
+            ),
             key_risks=list(_read_attr(evaluation_decision, "key_risks", []) or []),
             notes=list(_read_attr(evaluation_decision, "notes", []) or []),
         ),
@@ -984,7 +1025,9 @@ def _reconcile_hierarchy_after_batch_changes(
     executed_task_ids: list[int],
     created_recovery_task_ids: list[int],
 ) -> None:
-    affected_task_ids = list(dict.fromkeys(executed_task_ids + created_recovery_task_ids))
+    affected_task_ids = list(
+        dict.fromkeys(executed_task_ids + created_recovery_task_ids)
+    )
 
     try:
         reconcile_task_hierarchy_after_changes(
@@ -1045,12 +1088,17 @@ def process_batch_after_execution(
             plan_version=plan.plan_version,
         )
 
-        latest_validation_artifact = _get_latest_validation_artifact_for_task(db, task.id)
+        latest_validation_artifact = _get_latest_validation_artifact_for_task(
+            db, task.id
+        )
 
         summary_failure_type = latest_run.failure_type
         summary_failure_code = latest_run.failure_code
 
-        if task.status in {TASK_STATUS_FAILED, TASK_STATUS_PARTIAL} and latest_validation_artifact:
+        if (
+            task.status in {TASK_STATUS_FAILED, TASK_STATUS_PARTIAL}
+            and latest_validation_artifact
+        ):
             summary_failure_type = summary_failure_type or "validation_decision"
             summary_failure_code = summary_failure_code or f"task_{task.status}"
 
@@ -1210,9 +1258,7 @@ def process_batch_after_execution(
     decision_signals.has_new_recovery_pending_tasks = (
         new_recovery_pending_task_count > 0
     )
-    decision_signals.new_recovery_pending_task_count = (
-        new_recovery_pending_task_count
-    )
+    decision_signals.new_recovery_pending_task_count = new_recovery_pending_task_count
 
     resolved_intent = resolve_post_batch_intent(decision_signals)
     resolved_intent = _normalize_non_final_close_intent(
@@ -1258,7 +1304,9 @@ def process_batch_after_execution(
             ) from exc
 
         assigned_task_ids = list(mutation_result.metadata.get("assigned_task_ids", []))
-        unassigned_task_ids = list(mutation_result.metadata.get("unassigned_task_ids", []))
+        unassigned_task_ids = list(
+            mutation_result.metadata.get("unassigned_task_ids", [])
+        )
 
         if mutation_result.mutation_kind == "assignment":
             patched_execution_plan = mutation_result.patched_execution_plan
@@ -1417,8 +1465,17 @@ def process_batch_after_execution(
             status = "completed_with_evaluation"
         elif resolved_intent.intent_type == "assign":
             status = "completed_with_evaluation"
-        elif resolved_intent.intent_type in {"resequence", "replan", "manual_review", "close"}:
-            status = "checkpoint_blocked" if resolved_intent.intent_type != "close" else "project_stage_closed"
+        elif resolved_intent.intent_type in {
+            "resequence",
+            "replan",
+            "manual_review",
+            "close",
+        }:
+            status = (
+                "checkpoint_blocked"
+                if resolved_intent.intent_type != "close"
+                else "project_stage_closed"
+            )
         else:
             raise PostBatchServiceError(
                 f"Unsupported resolved intent_type '{resolved_intent.intent_type}'."

@@ -77,7 +77,9 @@ class WorkflowIterationSummary(BaseModel):
                 "starting_plan_version cannot be greater than ending_plan_version."
             )
 
-        if not (self.starting_plan_version <= self.plan_version <= self.ending_plan_version):
+        if not (
+            self.starting_plan_version <= self.plan_version <= self.ending_plan_version
+        ):
             raise ValueError(
                 "plan_version must be within [starting_plan_version, ending_plan_version]."
             )
@@ -183,9 +185,7 @@ class ProjectWorkflowResult(BaseModel):
         completed_set = set(self.completed_batches)
         blocked_set = set(self.blocked_batches)
         if completed_set & blocked_set:
-            raise ValueError(
-                "completed_batches and blocked_batches must be disjoint."
-            )
+            raise ValueError("completed_batches and blocked_batches must be disjoint.")
 
         if self.final_stage_closed and self.manual_review_required:
             raise ValueError(
@@ -193,9 +193,7 @@ class ProjectWorkflowResult(BaseModel):
             )
 
         if self.final_stage_closed and self.status != "stage_closed":
-            raise ValueError(
-                "final_stage_closed=True requires status='stage_closed'."
-            )
+            raise ValueError("final_stage_closed=True requires status='stage_closed'.")
 
         if self.manual_review_required and self.status != "awaiting_manual_review":
             raise ValueError(
@@ -203,9 +201,7 @@ class ProjectWorkflowResult(BaseModel):
             )
 
         if self.status == "stage_closed" and not self.final_stage_closed:
-            raise ValueError(
-                "status='stage_closed' requires final_stage_closed=True."
-            )
+            raise ValueError("status='stage_closed' requires final_stage_closed=True.")
 
         if self.status == "awaiting_manual_review" and not self.manual_review_required:
             raise ValueError(
@@ -215,7 +211,10 @@ class ProjectWorkflowResult(BaseModel):
         if self.iterations:
             last_iteration = self.iterations[-1]
 
-            if self.plan_version is not None and self.plan_version != last_iteration.plan_version:
+            if (
+                self.plan_version is not None
+                and self.plan_version != last_iteration.plan_version
+            ):
                 raise ValueError(
                     "plan_version must match the last iteration plan_version."
                 )
@@ -225,7 +224,10 @@ class ProjectWorkflowResult(BaseModel):
                     "final_stage_closed=True requires the last iteration to have should_close_stage=True."
                 )
 
-            if self.manual_review_required and not last_iteration.requires_manual_review:
+            if (
+                self.manual_review_required
+                and not last_iteration.requires_manual_review
+            ):
                 raise ValueError(
                     "manual_review_required=True requires the last iteration to have requires_manual_review=True."
                 )

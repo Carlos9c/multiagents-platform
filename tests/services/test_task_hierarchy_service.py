@@ -10,7 +10,6 @@ from app.models.task import (
     TASK_STATUS_PENDING,
 )
 from app.services.recovery_service import (
-    RecoveryServiceError,
     materialize_recovery_decision,
 )
 
@@ -122,7 +121,10 @@ def test_manual_review_keeps_source_partial_and_creates_no_tasks(
 
 
 def test_retry_action_is_rejected_in_current_workflow():
-    with pytest.raises(ValidationError, match="Input should be 'reatomize', 'insert_followup' or 'manual_review'"):
+    with pytest.raises(
+        ValidationError,
+        match="Input should be 'reatomize', 'insert_followup' or 'manual_review'",
+    ):
         RecoveryDecision(
             source_task_id=1,
             source_run_id=1,
