@@ -21,7 +21,7 @@ from app.services.project_memory_service import (
     persist_project_operational_context,
 )
 
-CODE_VALIDATION_RESULT_ARTIFACT_TYPE = "code_validation_result"
+VALIDATION_RESULT_ARTIFACT_TYPE = "validation_result"
 EVALUATION_DECISION_ARTIFACT_TYPE = "evaluation_decision"
 
 
@@ -186,7 +186,7 @@ def _task_to_stage_evidence(
         (
             artifact
             for artifact in reversed(task_artifacts)
-            if artifact.artifact_type == CODE_VALIDATION_RESULT_ARTIFACT_TYPE
+            if artifact.artifact_type == VALIDATION_RESULT_ARTIFACT_TYPE
         ),
         None,
     )

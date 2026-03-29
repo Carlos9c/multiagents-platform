@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import json
 import logging
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -33,6 +34,7 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
     Task,
 )
+from app.services.artifacts import create_artifact
 from app.services.execution_runs import (
     create_execution_run,
     get_execution_run,
@@ -53,6 +55,7 @@ from app.services.tasks import (
 )
 from app.services.validation.service import (
     ValidationServiceError,
+    ValidationServiceResult,
     validate_execution_result,
 )
 
@@ -60,6 +63,8 @@ logger = logging.getLogger(__name__)
 
 
 SUPPORTED_EXECUTORS = {EXECUTION_ENGINE}
+VALIDATION_RESULT_ARTIFACT_TYPE = "validation_result"
+VALIDATION_RESULT_ARTIFACT_CREATED_BY = "task_execution_service"
 
 
 class TaskExecutionServiceError(Exception):
@@ -341,6 +346,75 @@ def _apply_validation_result_to_task(
     )
 
 
+def _serialize_validation_result_artifact(
+    *,
+    task: Task,
+    run_id: int,
+    validation_service_result: ValidationServiceResult,
+    final_task_status: str,
+    workspace_promoted_to_source: bool,
+) -> dict[str, Any]:
+    validation_result = validation_service_result.validation_result
+    routing_decision = validation_service_result.routing_decision
+
+    return {
+        "project_id": task.project_id,
+        "task_id": task.id,
+        "execution_run_id": run_id,
+        "artifact_type": VALIDATION_RESULT_ARTIFACT_TYPE,
+        "validator_key": validation_result.validator_key,
+        "discipline": validation_result.discipline,
+        "validation_mode": routing_decision.validation_mode,
+        "decision": validation_result.decision,
+        "summary": validation_result.summary,
+        "validated_scope": validation_result.validated_scope,
+        "missing_scope": validation_result.missing_scope,
+        "blockers": list(validation_result.blockers or []),
+        "manual_review_required": validation_result.manual_review_required,
+        "followup_validation_required": validation_result.followup_validation_required,
+        "recommended_next_validator_keys": list(
+            validation_result.recommended_next_validator_keys or []
+        ),
+        "partial_validation_summary": validation_result.partial_validation_summary,
+        "final_task_status": final_task_status,
+        "workspace_promoted_to_source": workspace_promoted_to_source,
+        "validated_evidence_ids": list(validation_result.validated_evidence_ids or []),
+        "unconsumed_evidence_ids": list(validation_result.unconsumed_evidence_ids or []),
+        "findings": [
+            finding.model_dump(mode="json") for finding in validation_result.findings
+        ],
+        "metadata": dict(validation_result.metadata or {}),
+    }
+
+
+def _persist_validation_result_artifact(
+    db: Session,
+    *,
+    task: Task,
+    run_id: int,
+    validation_service_result: ValidationServiceResult,
+    final_task_status: str,
+    workspace_promoted_to_source: bool,
+) -> Artifact:
+    artifact_payload = _serialize_validation_result_artifact(
+        task=task,
+        run_id=run_id,
+        validation_service_result=validation_service_result,
+        final_task_status=final_task_status,
+        workspace_promoted_to_source=workspace_promoted_to_source,
+    )
+
+    return create_artifact(
+        db=db,
+        project_id=task.project_id,
+        task_id=task.id,
+        artifact_type=VALIDATION_RESULT_ARTIFACT_TYPE,
+        content=json.dumps(artifact_payload, ensure_ascii=False),
+        created_by=VALIDATION_RESULT_ARTIFACT_CREATED_BY,
+        auto_commit=True,
+    )
+
+
 def _validate_after_execution(
     db: Session,
     *,
@@ -383,6 +457,8 @@ def _validate_after_execution(
         validation_result.followup_validation_required,
     )
 
+    workspace_promoted_to_source = False
+
     if decision == "completed":
         refreshed_task_for_promotion = _get_task_or_raise(db, task.id)
         _promote_validated_workspace_to_source(
@@ -390,6 +466,7 @@ def _validate_after_execution(
             task=refreshed_task_for_promotion,
             run_id=run_id,
         )
+        workspace_promoted_to_source = True
         final_task_status = _apply_validation_result_to_task(
             db=db,
             task_id=task.id,
@@ -438,18 +515,28 @@ def _validate_after_execution(
             f"Unsupported validation decision '{decision}'."
         )
 
+    _persist_validation_result_artifact(
+        db=db,
+        task=task,
+        run_id=run_id,
+        validation_service_result=validation_service_result,
+        final_task_status=final_task_status,
+        workspace_promoted_to_source=workspace_promoted_to_source,
+    )
+
     _reconcile_hierarchy_or_raise(
         db=db,
         affected_task_ids=[task.id],
     )
 
     refreshed_task = _get_task_or_raise(db, task.id)
+    refreshed_run = _get_execution_run_or_raise(db, run_id)
 
     return _build_sync_result(
         task=refreshed_task,
         run_id=run_id,
         resolved_executor_type=resolved_executor_type,
-        run_status=execution_run.status,
+        run_status=refreshed_run.status,
         output_snapshot=execution_result.output_snapshot,
         message=message,
         final_task_status=final_task_status,

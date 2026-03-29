@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import filecmp
 import shutil
 import subprocess
 from pathlib import Path
 
-from app.schemas.code_execution import WorkspaceChangeSet
+from app.schemas.workspace import WorkspaceChangeSet
 from app.services.project_storage import CODE_DOMAIN, ProjectStorageService
 from app.services.workspace_runtime import (
     BaseWorkspaceRuntime,
@@ -218,27 +218,13 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         # git diff --no-index semantics:
         # 0 => no differences
         # 1 => differences found
-        # >1 => actual failure
         if result.returncode == 0:
-            return result.stdout.strip()
-
+            return "No changes detected."
         if result.returncode == 1:
-            return result.stdout.strip()
+            return result.stdout or "Changes detected, but diff output is empty."
 
-        stderr = (result.stderr or "").strip()
-        stdout = (result.stdout or "").strip()
-
-        if stderr:
-            return (
-                f"Diff generation failed with exit code {result.returncode}: {stderr}"
-            )
-
-        if stdout:
-            return (
-                f"Diff generation failed with exit code {result.returncode}: {stdout}"
-            )
-
-        return f"Diff generation failed with exit code {result.returncode}."
+        stderr = result.stderr.strip()
+        return f"Diff generation failed with exit code {result.returncode}: {stderr}"
 
     def promote_workspace_to_source(
         self,
@@ -247,19 +233,14 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         domain_name: str,
     ) -> Path:
         prepared = self._get_prepared_workspace(project_id, execution_run_id, domain_name)
+        domain_paths = self.storage_service.ensure_domain_storage(project_id, domain_name)
 
-        if prepared.source_dir is None:
-            raise WorkspaceRuntimeError(
-                f"Domain '{domain_name}' does not define a source directory to promote into."
-            )
+        if domain_paths.source_dir.exists():
+            shutil.rmtree(domain_paths.source_dir)
 
-        if prepared.source_dir.exists():
-            shutil.rmtree(prepared.source_dir)
-
-        prepared.source_dir.mkdir(parents=True, exist_ok=True)
-        self._copy_tree_contents(prepared.workspace_dir, prepared.source_dir)
-
-        return prepared.source_dir
+        domain_paths.source_dir.mkdir(parents=True, exist_ok=True)
+        self._copy_tree_contents(prepared.workspace_dir, domain_paths.source_dir)
+        return domain_paths.source_dir
 
     def cleanup_workspace(self, project_id: int, execution_run_id: int) -> None:
         run_paths = self.get_execution_workspace_paths(project_id, execution_run_id)
@@ -273,16 +254,15 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         timeout_seconds: int = 120,
         allowed_exit_codes: set[int] | None = None,
     ) -> CommandResult:
-        allowed_exit_codes = allowed_exit_codes or {0}
-        workspace = Path(workspace_dir).resolve()
+        if not command:
+            raise WorkspaceRuntimeError("Command cannot be empty.")
 
+        workspace = Path(workspace_dir).resolve()
         if not workspace.exists():
-            raise WorkspaceRuntimeError(
-                f"Workspace '{workspace}' does not exist for command execution."
-            )
+            raise WorkspaceRuntimeError("Workspace directory does not exist.")
 
         try:
-            result = subprocess.run(
+            completed = subprocess.run(
                 command,
                 cwd=workspace,
                 capture_output=True,
@@ -293,29 +273,27 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
                 check=False,
             )
         except FileNotFoundError as exc:
-            raise WorkspaceRuntimeError(
-                f"Command executable was not found: {command[0]}"
-            ) from exc
+            raise WorkspaceRuntimeError(f"Command executable not found: {command[0]}") from exc
         except subprocess.TimeoutExpired as exc:
             raise WorkspaceRuntimeError(
                 f"Command timed out after {timeout_seconds} seconds: {' '.join(command)}"
             ) from exc
 
-        command_result = CommandResult(
-            command=command,
-            exit_code=result.returncode,
-            stdout=result.stdout or "",
-            stderr=result.stderr or "",
-        )
-
-        if result.returncode not in allowed_exit_codes:
+        valid_exit_codes = allowed_exit_codes or {0}
+        if completed.returncode not in valid_exit_codes:
             raise WorkspaceRuntimeError(
-                "Command execution failed. "
-                f"exit_code={result.returncode}, command={' '.join(command)}, "
-                f"stderr={(result.stderr or '').strip()}"
+                "Command failed with exit code "
+                f"{completed.returncode}: {' '.join(command)}\n"
+                f"STDOUT:\n{completed.stdout}\n"
+                f"STDERR:\n{completed.stderr}"
             )
 
-        return command_result
+        return CommandResult(
+            command=command,
+            exit_code=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
 
     def _get_prepared_workspace(
         self,
@@ -323,12 +301,12 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         execution_run_id: int,
         domain_name: str,
     ) -> PreparedWorkspace:
-        domain_paths = self.storage_service.ensure_domain_storage(project_id, domain_name)
         run_paths = self.get_execution_workspace_paths(project_id, execution_run_id)
+        domain_paths = self.storage_service.ensure_domain_storage(project_id, domain_name)
 
         if not run_paths.workspace_dir.exists():
             raise WorkspaceRuntimeError(
-                f"Workspace for project={project_id}, run={execution_run_id} does not exist."
+                f"Workspace for execution_run_id={execution_run_id} does not exist."
             )
 
         return PreparedWorkspace(
@@ -339,41 +317,27 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
             source_dir=domain_paths.source_dir,
         )
 
-    def _resolve_workspace_path(
-        self,
-        workspace_dir: str | Path,
-        relative_path: str,
-    ) -> Path:
+    def _resolve_workspace_path(self, workspace_dir: str | Path, relative_path: str) -> Path:
         workspace = Path(workspace_dir).resolve()
-
-        if not workspace.exists():
-            raise WorkspaceRuntimeError(f"Workspace '{workspace}' does not exist.")
-
-        normalized_relative = Path(relative_path)
-        if normalized_relative.is_absolute():
-            raise WorkspaceRuntimeError(
-                f"Absolute paths are not allowed inside workspace operations: '{relative_path}'."
-            )
-
-        resolved = (workspace / normalized_relative).resolve()
+        candidate = (workspace / relative_path).resolve()
 
         try:
-            resolved.relative_to(workspace)
+            candidate.relative_to(workspace)
         except ValueError as exc:
             raise WorkspaceRuntimeError(
-                f"Path escapes workspace boundary: '{relative_path}'."
+                f"Path '{relative_path}' escapes the workspace boundary."
             ) from exc
 
-        return resolved
+        return candidate
 
-    @staticmethod
-    def _copy_tree_contents(source_dir: Path, destination_dir: Path) -> None:
-        destination_dir.mkdir(parents=True, exist_ok=True)
+    def _copy_tree_contents(self, source_dir: Path, destination_dir: Path) -> None:
+        for source_path in source_dir.rglob("*"):
+            relative_path = source_path.relative_to(source_dir)
+            destination_path = destination_dir / relative_path
 
-        for item in source_dir.iterdir():
-            destination_item = destination_dir / item.name
-            if item.is_dir():
-                shutil.copytree(item, destination_item, dirs_exist_ok=True)
-            else:
-                destination_item.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(item, destination_item)
+            if source_path.is_dir():
+                destination_path.mkdir(parents=True, exist_ok=True)
+                continue
+
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, destination_path)

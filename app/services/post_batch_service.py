@@ -75,7 +75,7 @@ NON_TERMINAL_RUN_STATUSES = {
     EXECUTION_RUN_STATUS_RUNNING,
 }
 
-CODE_VALIDATION_RESULT_ARTIFACT_TYPE = "code_validation_result"
+VALIDATION_RESULT_ARTIFACT_TYPE = "validation_result"
 
 
 class PostBatchServiceError(Exception):
@@ -219,7 +219,7 @@ def _get_latest_validation_artifact_for_task(
         db.query(Artifact)
         .filter(
             Artifact.task_id == task_id,
-            Artifact.artifact_type == CODE_VALIDATION_RESULT_ARTIFACT_TYPE,
+            Artifact.artifact_type == VALIDATION_RESULT_ARTIFACT_TYPE,
         )
         .order_by(Artifact.id.desc())
         .first()
@@ -285,7 +285,7 @@ def _require_validation_artifact_for_problematic_task(
     if validation_artifact is None:
         raise PostBatchServiceError(
             f"Batch '{batch_id}' in plan version {plan_version} cannot be processed because "
-            f"task {task.id} is '{task.status}' but has no '{CODE_VALIDATION_RESULT_ARTIFACT_TYPE}' artifact."
+            f"task {task.id} is '{task.status}' but has no '{VALIDATION_RESULT_ARTIFACT_TYPE}' artifact."
         )
     return validation_artifact
 

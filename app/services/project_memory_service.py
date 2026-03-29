@@ -50,7 +50,7 @@ _RECENT_ARTIFACT_TYPES = {
     "execution_engine_working_set",
     "execution_engine_edit_plan",
     "execution_engine_result",
-    "code_validation_result",
+    "validation_result",
     "recovery_decision",
     "post_batch_result",
     "evaluation_decision",

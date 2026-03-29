@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.schemas.code_execution import WorkspaceChangeSet
+from app.schemas.workspace import WorkspaceChangeSet
 
 
 class WorkspaceRuntimeError(Exception):
