@@ -1024,3 +1024,77 @@ def test_validation_artifacts_remain_linked_to_the_correct_execution_run_across_
     assert payloads_by_run[second_run.id]["final_task_status"] == TASK_STATUS_PARTIAL
     assert payloads_by_run[second_run.id]["task_id"] == task.id
     assert payloads_by_run[second_run.id]["followup_validation_required"] is True
+
+
+def test_post_validation_failure_before_commit_does_not_leave_terminal_artifact_or_closed_task(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+):
+    project = make_project()
+    task = make_task(
+        project_id=project.id,
+        title="Atomic closure must not persist partial state",
+        status="pending",
+        executor_type=EXECUTION_ENGINE,
+    )
+
+    expected_sequence = [
+        "context_selection_agent",
+        "code_change_agent",
+        "command_runner_agent",
+    ]
+
+    _patch_workspace_runtime(monkeypatch)
+    _patch_execution_request(
+        monkeypatch,
+        allowed_paths=["app_service.py"],
+        relevant_files=["app_service.py"],
+    )
+    _patch_engine(
+        monkeypatch,
+        _build_engine_result(
+            task_id=task.id,
+            decision=EXECUTION_DECISION_COMPLETED,
+            execution_agent_sequence=expected_sequence,
+        ),
+    )
+    _patch_validation_service(
+        monkeypatch,
+        validation_decision="completed",
+        final_task_status=TASK_STATUS_COMPLETED,
+    )
+
+    original_commit = db_session.commit
+    state = {"commit_calls": 0}
+
+    def fail_on_closure_commit():
+        state["commit_calls"] += 1
+        # 1: create_execution_run
+        # 2: mark_execution_run_started + mark_task_running
+        # 3: mark_execution_run_succeeded + agent sequence
+        # 4: closure commit (artifact + task terminal status)
+        if state["commit_calls"] == 4:
+            raise RuntimeError("closure commit failed")
+        return original_commit()
+
+    monkeypatch.setattr(db_session, "commit", fail_on_closure_commit)
+
+    with pytest.raises(
+        TaskExecutionServiceError,
+        match="post-validation processing failed|closure commit failed",
+    ):
+        execute_task_sync(db_session, task.id)
+
+    db_session.expire_all()
+    task = db_session.get(type(task), task.id)
+    run = _get_latest_run_for_task(db_session, task.id)
+    validation_artifacts = _get_validation_artifacts_for_task(db_session, task.id)
+
+    assert task.status == TASK_STATUS_FAILED
+    assert run.status == EXECUTION_RUN_STATUS_FAILED
+    assert validation_artifacts == []
+
+    assert json.loads(task.last_execution_agent_sequence) == expected_sequence
+    assert json.loads(run.execution_agent_sequence) == expected_sequence

@@ -11,6 +11,11 @@ from app.schemas.recovery import RecoveryDecision
 from app.services.recovery_service import (
     materialize_recovery_decision,
 )
+from app.services.task_hierarchy_reconciliation_service import (
+    TaskHierarchyReconciliationServiceError,
+    reconcile_task_hierarchy_after_changes,
+)
+from app.services.task_hierarchy_service import TaskHierarchyServiceError
 
 
 def test_reatomize_creates_new_atomic_tasks_and_keeps_source_failed(
@@ -137,3 +142,76 @@ def test_retry_action_is_rejected_in_current_workflow():
             created_tasks=[],
             decision_origin="post_batch_recovery",
         )
+
+
+def test_reconcile_task_hierarchy_after_changes_rolls_back_flushed_parent_changes_on_failure(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+):
+    project = make_project()
+
+    parent_one = make_task(
+        project_id=project.id,
+        title="Parent one",
+        planning_level="composite",
+        status="pending",
+    )
+    child_one = make_task(
+        project_id=project.id,
+        parent_task_id=parent_one.id,
+        title="Child one",
+        planning_level="atomic",
+        status="completed",
+    )
+
+    parent_two = make_task(
+        project_id=project.id,
+        title="Parent two",
+        planning_level="composite",
+        status="pending",
+    )
+    child_two = make_task(
+        project_id=project.id,
+        parent_task_id=parent_two.id,
+        title="Child two",
+        planning_level="atomic",
+        status="completed",
+    )
+
+    original_consolidate_single_parent = __import__(
+        "app.services.task_hierarchy_service",
+        fromlist=["_consolidate_single_parent"],
+    )._consolidate_single_parent
+
+    calls = {"count": 0}
+
+    def wrapped_consolidate_single_parent(db, parent_task):
+        calls["count"] += 1
+        change = original_consolidate_single_parent(db, parent_task)
+        if calls["count"] == 2:
+            raise TaskHierarchyServiceError("boom after flush")
+        return change
+
+    monkeypatch.setattr(
+        "app.services.task_hierarchy_service._consolidate_single_parent",
+        wrapped_consolidate_single_parent,
+    )
+
+    with pytest.raises(
+        TaskHierarchyReconciliationServiceError,
+        match="Failed to reconcile affected parent hierarchies",
+    ):
+        reconcile_task_hierarchy_after_changes(
+            db=db_session,
+            affected_task_ids=[child_one.id, child_two.id],
+        )
+
+    db_session.expire_all()
+
+    refreshed_parent_one = db_session.get(type(parent_one), parent_one.id)
+    refreshed_parent_two = db_session.get(type(parent_two), parent_two.id)
+
+    assert refreshed_parent_one.status == "pending"
+    assert refreshed_parent_two.status == "pending"
