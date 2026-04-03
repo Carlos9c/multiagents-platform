@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from sqlalchemy.orm import Session
+
 from app.execution_engine.contracts import ExecutionRequest
 from app.execution_engine.execution_plan import ExecutionStep
 from app.execution_engine.resolution_state import ResolutionState
@@ -26,6 +28,7 @@ class BaseSubagent(ABC):
     def execute_step(
         self,
         *,
+        db: Session,
         request: ExecutionRequest,
         step: ExecutionStep,
         state: ResolutionState,

@@ -36,6 +36,9 @@ class ExecutionRunBase(BaseModel):
     remaining_scope: str | None = None
     blockers_found: str | None = None
     validation_notes: str | None = None
+    changed_files: str | None = None
+    files_read: str | None = None
+    change_dependencies: str | None = None
 
     @field_validator("status")
     @classmethod

@@ -1,8 +1,13 @@
 # app/services/execution_runs.py
 
+from __future__ import annotations
+
+import json
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.artifact import Artifact
 from app.models.execution_run import (
     EXECUTION_RUN_STATUS_FAILED,
     EXECUTION_RUN_STATUS_PARTIAL,
@@ -10,15 +15,16 @@ from app.models.execution_run import (
     EXECUTION_RUN_STATUS_REJECTED,
     EXECUTION_RUN_STATUS_RUNNING,
     EXECUTION_RUN_STATUS_SUCCEEDED,
-    FAILURE_TYPE_INTERNAL,
     FAILURE_TYPE_UNKNOWN,
     RECOVERY_ACTION_MANUAL_REVIEW,
     RECOVERY_ACTION_NONE,
-    VALID_EXECUTION_RUN_STATUSES,
     VALID_FAILURE_TYPES,
     VALID_RECOVERY_ACTIONS,
     ExecutionRun,
 )
+from app.models.task import TASK_STATUS_COMPLETED, Task
+
+VALIDATION_RESULT_ARTIFACT_TYPE = "validation_result"
 
 
 def _finalize_persistence(
@@ -41,6 +47,18 @@ def _get_next_attempt_number(db: Session, task_id: int) -> int:
     if current_max_attempt is None:
         return 1
     return int(current_max_attempt) + 1
+
+
+def _parse_artifact_json_content(artifact: Artifact) -> dict | None:
+    try:
+        payload = json.loads(artifact.content or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    return payload
 
 
 def create_execution_run(
@@ -88,6 +106,9 @@ def mark_execution_run_started(
     run.remaining_scope = None
     run.blockers_found = None
     run.validation_notes = None
+    run.changed_files = None
+    run.files_read = None
+    run.change_dependencies = None
 
     _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
@@ -103,6 +124,9 @@ def mark_execution_run_succeeded(
     artifacts_created: str | None = None,
     completed_scope: str | None = None,
     validation_notes: str | None = None,
+    changed_files: str | None = None,
+    files_read: str | None = None,
+    change_dependencies: str | None = None,
     auto_commit: bool = True,
 ) -> ExecutionRun | None:
     run = db.get(ExecutionRun, run_id)
@@ -123,6 +147,9 @@ def mark_execution_run_succeeded(
     run.remaining_scope = None
     run.blockers_found = None
     run.validation_notes = validation_notes
+    run.changed_files = changed_files
+    run.files_read = files_read
+    run.change_dependencies = change_dependencies
 
     _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
@@ -140,6 +167,9 @@ def mark_execution_run_partial(
     remaining_scope: str | None = None,
     blockers_found: str | None = None,
     validation_notes: str | None = None,
+    changed_files: str | None = None,
+    files_read: str | None = None,
+    change_dependencies: str | None = None,
     recovery_action: str = RECOVERY_ACTION_MANUAL_REVIEW,
     auto_commit: bool = True,
 ) -> ExecutionRun | None:
@@ -167,6 +197,9 @@ def mark_execution_run_partial(
     run.remaining_scope = remaining_scope
     run.blockers_found = blockers_found
     run.validation_notes = validation_notes
+    run.changed_files = changed_files
+    run.files_read = files_read
+    run.change_dependencies = change_dependencies
 
     _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
@@ -187,6 +220,9 @@ def mark_execution_run_failed(
     remaining_scope: str | None = None,
     blockers_found: str | None = None,
     validation_notes: str | None = None,
+    changed_files: str | None = None,
+    files_read: str | None = None,
+    change_dependencies: str | None = None,
     auto_commit: bool = True,
 ) -> ExecutionRun | None:
     if failure_type not in VALID_FAILURE_TYPES:
@@ -217,6 +253,9 @@ def mark_execution_run_failed(
     run.remaining_scope = remaining_scope
     run.blockers_found = blockers_found
     run.validation_notes = validation_notes
+    run.changed_files = changed_files
+    run.files_read = files_read
+    run.change_dependencies = change_dependencies
 
     _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
@@ -233,6 +272,9 @@ def mark_execution_run_rejected(
     execution_agent_sequence: str | None = None,
     blockers_found: str | None = None,
     validation_notes: str | None = None,
+    changed_files: str | None = None,
+    files_read: str | None = None,
+    change_dependencies: str | None = None,
     auto_commit: bool = True,
 ) -> ExecutionRun | None:
     if recovery_action not in VALID_RECOVERY_ACTIONS:
@@ -258,38 +300,77 @@ def mark_execution_run_rejected(
     run.remaining_scope = None
     run.blockers_found = blockers_found
     run.validation_notes = validation_notes
+    run.changed_files = changed_files
+    run.files_read = files_read
+    run.change_dependencies = change_dependencies
 
     _finalize_persistence(db, entity=run, auto_commit=auto_commit)
     return run
-
-
-def set_execution_run_internal_error(
-    db: Session,
-    run_id: int,
-    error_message: str,
-    failure_code: str = "internal_executor_error",
-    auto_commit: bool = True,
-) -> ExecutionRun | None:
-    return mark_execution_run_failed(
-        db=db,
-        run_id=run_id,
-        error_message=error_message,
-        failure_type=FAILURE_TYPE_INTERNAL,
-        failure_code=failure_code,
-        recovery_action=RECOVERY_ACTION_MANUAL_REVIEW,
-        validation_notes="The executor failed due to an internal unexpected error.",
-        auto_commit=auto_commit,
-    )
 
 
 def get_execution_run(db: Session, run_id: int) -> ExecutionRun | None:
     return db.get(ExecutionRun, run_id)
 
 
-def validate_execution_run_status(value: str) -> str:
-    if value not in VALID_EXECUTION_RUN_STATUSES:
-        raise ValueError(
-            f"Invalid execution run status '{value}'. "
-            f"Allowed values: {sorted(VALID_EXECUTION_RUN_STATUSES)}"
+def get_completion_execution_run_for_task(
+    db: Session,
+    task_id: int,
+) -> ExecutionRun | None:
+    """
+    Return the execution run that caused the task to reach `completed`.
+
+    The source of truth is the validation_result artifact linked to the task:
+    - artifact_type == "validation_result"
+    - payload["final_task_status"] == "completed"
+    - payload["execution_run_id"] identifies the canonical run
+
+    If the task is not currently completed, or no consistent completion artifact exists,
+    return None.
+    """
+    task = db.get(Task, task_id)
+    if not task:
+        return None
+
+    if task.status != TASK_STATUS_COMPLETED:
+        return None
+
+    completion_artifacts = (
+        db.query(Artifact)
+        .filter(
+            Artifact.task_id == task_id,
+            Artifact.artifact_type == VALIDATION_RESULT_ARTIFACT_TYPE,
         )
-    return value
+        .order_by(Artifact.id.asc())
+        .all()
+    )
+
+    completion_run_id: int | None = None
+
+    for artifact in completion_artifacts:
+        payload = _parse_artifact_json_content(artifact)
+        if not payload:
+            continue
+
+        if payload.get("task_id") != task_id:
+            continue
+
+        if payload.get("final_task_status") != TASK_STATUS_COMPLETED:
+            continue
+
+        artifact_run_id = payload.get("execution_run_id")
+        if not isinstance(artifact_run_id, int):
+            continue
+
+        completion_run_id = artifact_run_id
+
+    if completion_run_id is None:
+        return None
+
+    run = db.get(ExecutionRun, completion_run_id)
+    if not run:
+        return None
+
+    if run.task_id != task_id:
+        return None
+
+    return run

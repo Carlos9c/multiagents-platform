@@ -43,6 +43,30 @@ class ProjectExecutionContext(BaseModel):
     related_tasks: list[RelatedTaskSummary] = Field(default_factory=list)
 
 
+class HistoricalTaskRunContext(BaseModel):
+    task_id: int
+    execution_run_id: int
+    selection_rule: str
+    selection_reason: str
+
+    title: str
+    description: str | None = None
+    summary: str | None = None
+    objective: str | None = None
+
+    run_summary: str | None = None
+    completed_scope: str | None = None
+    validation_notes: list[str] = Field(default_factory=list)
+
+    changed_files: list[str] = Field(default_factory=list)
+    files_read: list[str] = Field(default_factory=list)
+    change_dependencies: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class HistoricalExecutionContext(BaseModel):
+    selected_task_runs: list[HistoricalTaskRunContext] = Field(default_factory=list)
+
+
 class ExecutionRequest(BaseModel):
     task_id: int
     project_id: int
@@ -52,7 +76,11 @@ class ExecutionRequest(BaseModel):
     task_description: str | None = None
     task_summary: str | None = None
     objective: str | None = None
+    proposed_solution: str | None = None
+    implementation_notes: str | None = None
+    implementation_steps: str | None = None
     acceptance_criteria: str | None = None
+    tests_required: str | None = None
     technical_constraints: str | None = None
     out_of_scope: str | None = None
 
@@ -65,6 +93,7 @@ class ExecutionRequest(BaseModel):
     blocked_paths: list[str] = Field(default_factory=list)
 
     context: ProjectExecutionContext
+    historical_context: HistoricalExecutionContext | None = None
 
 
 class ChangedFile(BaseModel):
@@ -81,6 +110,8 @@ class CommandExecution(BaseModel):
 
 class ExecutionEvidence(BaseModel):
     changed_files: list[ChangedFile] = Field(default_factory=list)
+    files_read: list[str] = Field(default_factory=list)
+    change_dependencies: dict[str, list[str]] = Field(default_factory=dict)
     commands: list[CommandExecution] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     artifacts_created: list[str] = Field(default_factory=list)

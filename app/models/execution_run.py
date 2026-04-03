@@ -94,6 +94,10 @@ class ExecutionRun(Base):
     blockers_found: Mapped[str | None] = mapped_column(Text, nullable=True)
     validation_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    changed_files: Mapped[str | None] = mapped_column(Text, nullable=True)
+    files_read: Mapped[str | None] = mapped_column(Text, nullable=True)
+    change_dependencies: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     task = relationship("Task", backref="execution_runs")
     parent_run = relationship(
         "ExecutionRun",

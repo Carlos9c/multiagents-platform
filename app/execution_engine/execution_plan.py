@@ -5,19 +5,13 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 STEP_KIND_INSPECT_CONTEXT = "inspect_context"
-STEP_KIND_RESOLVE_FILE_OPERATIONS = "resolve_file_operations"
 STEP_KIND_APPLY_FILE_OPERATIONS = "apply_file_operations"
 STEP_KIND_RUN_COMMAND = "run_command"
-STEP_KIND_REPAIR = "repair"
-STEP_KIND_SUMMARIZE = "summarize"
 
 VALID_STEP_KINDS = {
     STEP_KIND_INSPECT_CONTEXT,
-    STEP_KIND_RESOLVE_FILE_OPERATIONS,
     STEP_KIND_APPLY_FILE_OPERATIONS,
     STEP_KIND_RUN_COMMAND,
-    STEP_KIND_REPAIR,
-    STEP_KIND_SUMMARIZE,
 }
 
 
@@ -25,11 +19,8 @@ class ExecutionStep(BaseModel):
     id: str
     kind: Literal[
         "inspect_context",
-        "resolve_file_operations",
         "apply_file_operations",
         "run_command",
-        "repair",
-        "summarize",
     ]
     subagent_name: str
     title: str

@@ -42,7 +42,6 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
         requires_workspace=True,
         available_actions=[
             "inspect_context",
-            "resolve_file_operations",
             "apply_file_operations",
             "run_command",
             "finish",
@@ -54,6 +53,8 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
             "Keep manual investigation, external research, and human-only validation out of the core task deliverable.",
             "It is acceptable to create or modify multiple related files when they belong to one coherent implementation slice.",
             "Bootstrap from an effectively empty workspace is allowed when the task objective clearly implies a minimal initial structure.",
+            "Execution context may include historical task/run context and project memory to preserve consistency.",
+            "The implementation agent may decide which files to create or modify when that is necessary to complete the task correctly.",
         ],
         hard_limits=[
             "The orchestrator executes one next action at a time and should prefer the minimum useful step.",
@@ -65,17 +66,15 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
         subagents=[
             SubagentCapability(
                 name="context_selection_agent",
-                role="Selects the smallest useful repository context for the task.",
+                role="Selects historical task/run context needed to execute the current atomic task and enriches the execution request.",
                 step_kinds=["inspect_context"],
                 uses_tools=[
-                    "list_workspace_files",
-                    "build_selected_file_context",
-                    "read_text_file",
+                    "build_context_selection_input",
                 ],
                 strengths=[
-                    "Scans workspace files and chooses likely integration points.",
-                    "Builds compact file context for downstream agents.",
-                    "Prefers a small but sufficient context set.",
+                    "Selects relevant completed historical tasks and runs.",
+                    "Uses project context excerpt and historical task catalog for context selection.",
+                    "Enriches the execution request before implementation begins.",
                 ],
                 limits=[
                     "Does not modify files.",
@@ -83,38 +82,26 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                 ],
             ),
             SubagentCapability(
-                name="placement_resolver_agent",
-                role="Plans which repository-relative files should be created or modified.",
-                step_kinds=["resolve_file_operations"],
-                uses_tools=[],
-                strengths=[
-                    "Converts task intent into a concrete artifact plan.",
-                    "Can infer a minimal bootstrap structure when the workspace is effectively empty.",
-                    "Produces sequence and dependency-aware file operation plans.",
-                ],
-                limits=[
-                    "Does not write files itself.",
-                    "Should stay within the current atomic task scope.",
-                ],
-            ),
-            SubagentCapability(
                 name="code_change_agent",
-                role="Materializes the approved file operation plan into actual file contents.",
+                role="Implements the task by deciding which files to create or modify and materializing full final contents in the workspace.",
                 step_kinds=["apply_file_operations"],
                 uses_tools=[
+                    "list_workspace_files",
                     "read_text_file",
                     "capture_file_snapshot",
                     "restore_file_snapshot",
                     "write_text_file",
                 ],
                 strengths=[
-                    "Reads existing file content before modifying it.",
+                    "Can bootstrap a minimal file set from an empty workspace when the task requires it.",
+                    "Uses current project structure, historical context, and related files to decide coherent output paths.",
                     "Writes full final file content for create/modify operations.",
                     "Uses snapshots to support rollback on failure.",
                 ],
                 limits=[
-                    "Requires a valid pending file operation plan.",
-                    "Must only implement the approved artifact set.",
+                    "Does not validate task completion.",
+                    "Must write only inside the workspace root.",
+                    "Must preserve operation integrity: modify for existing files, create for new files.",
                 ],
             ),
             SubagentCapability(
@@ -135,17 +122,18 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
         ],
         tools=[
             ToolCapability(
-                name="list_workspace_files",
-                purpose="List repository-relative files under the workspace.",
+                name="build_context_selection_input",
+                purpose="Build the historical task catalog and project context excerpt used by context selection.",
                 notes=[
-                    "Used by context selection to understand the available file surface.",
+                    "Skips LLM context selection when no completed historical tasks are available.",
                 ],
             ),
             ToolCapability(
-                name="build_selected_file_context",
-                purpose="Build a structured context block for selected files.",
+                name="list_workspace_files",
+                purpose="List repository-relative files under the workspace.",
                 notes=[
-                    "Reads selected files and packages reason/relevance/content.",
+                    "Used by the implementation agent to understand the current project file surface.",
+                    "May return an empty list when bootstrapping from an empty workspace.",
                 ],
             ),
             ToolCapability(
@@ -163,6 +151,10 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
             ToolCapability(
                 name="write_text_file",
                 purpose="Safely write file content under the workspace root.",
+                notes=[
+                    "Creates intermediate directories when necessary.",
+                    "Rejects writes outside the workspace root.",
+                ],
             ),
             ToolCapability(
                 name="run_command",

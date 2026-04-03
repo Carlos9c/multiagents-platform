@@ -16,7 +16,7 @@ from app.execution_engine.contracts import (
     EXECUTION_DECISION_PARTIAL,
     EXECUTION_DECISION_REJECTED,
 )
-from app.execution_engine.request_adapter import build_execution_request
+from app.execution_engine.request_adapter import build_placeholder_execution_request
 from app.models.artifact import Artifact
 from app.models.execution_run import (
     FAILURE_TYPE_INTERNAL,
@@ -187,6 +187,29 @@ def _store_task_execution_agent_sequence(
     task.last_execution_agent_sequence = execution_agent_sequence_json
     db.add(task)
     db.flush()
+
+
+def _serialize_files_read_from_engine_result(result) -> str | None:
+    files_read = list(result.evidence.files_read or [])
+    if not files_read:
+        return None
+    return json.dumps(files_read, ensure_ascii=False)
+
+
+def _serialize_change_dependencies_from_engine_result(result) -> str | None:
+    change_dependencies = dict(result.evidence.change_dependencies or {})
+    if not change_dependencies:
+        return None
+    return json.dumps(change_dependencies, ensure_ascii=False)
+
+
+def _serialize_changed_files_from_engine_result(result) -> str | None:
+    changed_files = [
+        item.model_dump(mode="json") for item in (result.evidence.changed_files or [])
+    ]
+    if not changed_files:
+        return None
+    return json.dumps(changed_files, ensure_ascii=False)
 
 
 def _extract_artifacts_created_from_engine_result(result) -> str | None:
@@ -406,6 +429,9 @@ def _mark_task_and_run_failed_after_post_execution_error(
             (execution_result.validation_notes or []) + (validation_notes or [])
         )
         or None,
+        changed_files=_serialize_changed_files_from_engine_result(execution_result),
+        files_read=_serialize_files_read_from_engine_result(execution_result),
+        change_dependencies=_serialize_change_dependencies_from_engine_result(execution_result),
         auto_commit=False,
     )
     _store_task_execution_agent_sequence(
@@ -715,6 +741,9 @@ def _handle_terminal_execution_outcome(
             remaining_scope=engine_result.remaining_scope,
             blockers_found=blockers_found,
             validation_notes="; ".join(engine_result.validation_notes or []),
+            changed_files=_serialize_changed_files_from_engine_result(engine_result),
+            files_read=_serialize_files_read_from_engine_result(engine_result),
+            change_dependencies=_serialize_change_dependencies_from_engine_result(engine_result),
             auto_commit=False,
         )
         mark_task_failed(db, task.id, auto_commit=False)
@@ -751,6 +780,9 @@ def _handle_terminal_execution_outcome(
             execution_agent_sequence=execution_agent_sequence_json,
             blockers_found=blockers_found,
             validation_notes="; ".join(engine_result.validation_notes or []),
+            changed_files=_serialize_changed_files_from_engine_result(engine_result),
+            files_read=_serialize_files_read_from_engine_result(engine_result),
+            change_dependencies=_serialize_change_dependencies_from_engine_result(engine_result),
             auto_commit=False,
         )
         mark_task_failed(db, task.id, auto_commit=False)
@@ -810,7 +842,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             run_id=run_id,
         )
 
-        execution_request = build_execution_request(
+        execution_request = build_placeholder_execution_request(
             db=db,
             task=task,
             execution_run_id=run_id,
@@ -818,7 +850,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
         )
 
         logger.info(
-            "execution_request_built task_id=%s run_id=%s workspace=%s source=%s",
+            "execution_request_placeholder_built task_id=%s run_id=%s workspace=%s source=%s",
             task.id,
             run_id,
             execution_request.context.workspace_path,
@@ -861,6 +893,9 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 artifacts_created=_extract_artifacts_created_from_engine_result(engine_result),
                 completed_scope=engine_result.completed_scope,
                 validation_notes="; ".join(engine_result.validation_notes or []),
+                changed_files=_serialize_changed_files_from_engine_result(engine_result),
+                files_read=_serialize_files_read_from_engine_result(engine_result),
+                change_dependencies=_serialize_change_dependencies_from_engine_result(engine_result),
                 auto_commit=False,
             )
             _store_task_execution_agent_sequence(

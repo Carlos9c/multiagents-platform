@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sqlalchemy.orm import Session
+
 from app.execution_engine.contracts import ExecutionRequest
 from app.execution_engine.execution_plan import STEP_KIND_RUN_COMMAND, ExecutionStep
 from app.execution_engine.resolution_state import ResolutionState
@@ -16,6 +18,7 @@ class CommandRunnerAgent(BaseSubagent):
     def execute_step(
         self,
         *,
+        db: Session, 
         request: ExecutionRequest,
         step: ExecutionStep,
         state: ResolutionState,
