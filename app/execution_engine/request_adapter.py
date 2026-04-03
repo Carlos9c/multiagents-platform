@@ -117,25 +117,6 @@ def _build_related_tasks(
     return related
 
 
-def _build_relevant_files(
-    *,
-    project_context,
-    historical_context: HistoricalExecutionContext | None,
-) -> list[str]:
-    paths: list[str] = []
-
-    for item in project_context.referenced_paths:
-        if item.path:
-            paths.append(item.path)
-
-    if historical_context is not None:
-        for selected in historical_context.selected_task_runs:
-            paths.extend(selected.changed_files)
-            paths.extend(selected.files_read)
-
-    return list(dict.fromkeys(path for path in paths if path))
-
-
 def _build_historical_execution_context(
     db: Session,
     *,
@@ -278,10 +259,7 @@ def adapt_execution_request(
         project_id=request.context.project_id,
         source_path=request.context.source_path,
         workspace_path=request.context.workspace_path,
-        relevant_files=_build_relevant_files(
-            project_context=project_context,
-            historical_context=historical_context,
-        ),
+        relevant_files=list(request.context.relevant_files),
         key_decisions=_build_key_decisions(project_context),
         related_tasks=_build_related_tasks(project_context, request.task_id),
     )
