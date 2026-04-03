@@ -243,18 +243,14 @@ def _validate_generated_files(
     files: list[MaterializedFile],
 ) -> None:
     if not files:
-        raise SubagentRejectedStepError(
-            "Code change agent returned no files to materialize."
-        )
+        raise SubagentRejectedStepError("Code change agent returned no files to materialize.")
 
     root = Path(workspace_root).resolve()
     seen_paths: set[str] = set()
 
     for item in files:
         if not item.path or not item.path.strip():
-            raise SubagentRejectedStepError(
-                "Code change agent returned an empty file path."
-            )
+            raise SubagentRejectedStepError("Code change agent returned an empty file path.")
 
         rel_path = item.path.strip()
         if rel_path in seen_paths:
@@ -300,18 +296,14 @@ class CodeChangeAgent(BaseSubagent):
         state: ResolutionState,
     ) -> ResolutionState:
         if not self.supports_step_kind(step.kind):
-            raise SubagentRejectedStepError(
-                f"{self.name} does not support step kind '{step.kind}'"
-            )
+            raise SubagentRejectedStepError(f"{self.name} does not support step kind '{step.kind}'")
 
         state.increment_materialization_attempts()
 
         user_prompt, files_read = _build_user_prompt(request, state)
         _append_files_read(state, files_read)
 
-        schema = to_openai_strict_json_schema(
-            FileMaterializationResult.model_json_schema()
-        )
+        schema = to_openai_strict_json_schema(FileMaterializationResult.model_json_schema())
         raw = self.runtime.generate_structured(
             system_prompt=CODE_CHANGE_AGENT_SYSTEM_PROMPT,
             user_prompt=user_prompt,
@@ -322,9 +314,7 @@ class CodeChangeAgent(BaseSubagent):
         try:
             materialization = FileMaterializationResult.model_validate(raw)
         except ValidationError as exc:
-            raise SubagentRejectedStepError(
-                f"Invalid code change output: {str(exc)}"
-            ) from exc
+            raise SubagentRejectedStepError(f"Invalid code change output: {str(exc)}") from exc
 
         _validate_generated_files(
             workspace_root=request.context.workspace_path,
@@ -355,17 +345,13 @@ class CodeChangeAgent(BaseSubagent):
                 successfully_written_paths.append(generated.path)
 
                 change_type = (
-                    CHANGE_TYPE_CREATED
-                    if generated.operation == "create"
-                    else CHANGE_TYPE_MODIFIED
+                    CHANGE_TYPE_CREATED if generated.operation == "create" else CHANGE_TYPE_MODIFIED
                 )
 
                 state.evidence.changed_files.append(
                     ChangedFile(path=generated.path, change_type=change_type)
                 )
-                state.evidence.notes.append(
-                    f"Wrote file {generated.path} at {absolute_path}"
-                )
+                state.evidence.notes.append(f"Wrote file {generated.path} at {absolute_path}")
                 state.evidence.notes.append(
                     f"Rationale for {generated.path}: {generated.rationale}"
                 )

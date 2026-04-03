@@ -63,9 +63,7 @@ class StubContextSelectionAgent(BaseSubagent):
         return step_kind == "inspect_context"
 
     def execute_step(self, *, db, request, step, state):
-        state.set_historical_task_selection(
-            HistoricalTaskSelectionResult(selected_task_runs=[])
-        )
+        state.set_historical_task_selection(HistoricalTaskSelectionResult(selected_task_runs=[]))
         state.add_note("stub context selection executed")
         state.mark_context_selected()
         return state
@@ -186,19 +184,15 @@ def test_code_change_agent_creates_and_modifies_files_without_prior_plan(tmp_pat
     )
 
     assert (workspace / "app" / "api" / "notes.py").exists()
-    assert "APIRouter" in (workspace / "app" / "api" / "notes.py").read_text(
-        encoding="utf-8"
-    )
-    assert "include_router" in (workspace / "app" / "main.py").read_text(
-        encoding="utf-8"
-    )
+    assert "APIRouter" in (workspace / "app" / "api" / "notes.py").read_text(encoding="utf-8")
+    assert "include_router" in (workspace / "app" / "main.py").read_text(encoding="utf-8")
 
     assert next_state.phase == "completion"
     assert sorted(item.path for item in next_state.evidence.changed_files) == [
         "app/api/notes.py",
         "app/main.py",
     ]
-    assert "app/main.py" in next_state.evidence.files_read
+    assert next_state.evidence.files_read == []
     assert "materialization completed" in next_state.evidence.notes
 
 

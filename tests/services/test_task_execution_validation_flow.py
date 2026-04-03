@@ -78,17 +78,20 @@ def _patch_execution_request(
         )
 
     monkeypatch.setattr(
-        "app.services.task_execution_service.build_execution_request",
+        "app.services.task_execution_service.build_placeholder_execution_request",
         _fake_build_execution_request,
     )
 
 
 def _patch_engine(monkeypatch, engine_result: ExecutionResult):
+    def _fake_execute(db, request):
+        return engine_result
+
     monkeypatch.setattr(
         "app.services.task_execution_service.get_execution_engine",
         lambda db: types.SimpleNamespace(
             backend_name="test_engine",
-            execute=lambda request: engine_result,
+            execute=_fake_execute,
         ),
     )
 

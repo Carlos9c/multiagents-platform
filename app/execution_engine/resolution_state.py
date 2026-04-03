@@ -4,8 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.execution_engine.contracts import ExecutionEvidence, ExecutionRequest
 from app.execution_engine.context_selection import HistoricalTaskSelectionResult
+from app.execution_engine.contracts import ExecutionEvidence, ExecutionRequest
 from app.execution_engine.monitoring import OrchestratorTrace
 
 ExecutionPhase = Literal[
@@ -68,7 +68,5 @@ class ResolutionState(BaseModel):
 
     def has_outputs(self) -> bool:
         return bool(
-            self.evidence.changed_files
-            or self.evidence.commands
-            or self.evidence.artifacts_created
+            self.evidence.changed_files or self.evidence.commands or self.evidence.artifacts_created
         )

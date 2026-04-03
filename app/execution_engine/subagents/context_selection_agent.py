@@ -3,19 +3,18 @@ from __future__ import annotations
 import json
 
 from pydantic import ValidationError
-
 from sqlalchemy.orm import Session
 
-from app.execution_engine.contracts import ExecutionRequest
-from app.execution_engine.resolution_state import ResolutionState
-from app.execution_engine.execution_plan import ExecutionStep
 from app.execution_engine.agent_runtime import BaseAgentRuntime
 from app.execution_engine.context_selection import (
     ContextBuilderResult,
     HistoricalTaskCatalogEntry,
     HistoricalTaskSelectionResult,
 )
+from app.execution_engine.contracts import ExecutionRequest
+from app.execution_engine.execution_plan import ExecutionStep
 from app.execution_engine.request_adapter import adapt_execution_request
+from app.execution_engine.resolution_state import ResolutionState
 from app.execution_engine.subagents.base import (
     BaseSubagent,
     SubagentRejectedStepError,
@@ -141,9 +140,7 @@ def _build_historical_task_selection_user_prompt(
         },
         {
             "rule": "direct_historical_dependency",
-            "meaning": (
-                "The current task depends directly on the result of that previous task."
-            ),
+            "meaning": ("The current task depends directly on the result of that previous task."),
         },
         {
             "rule": "required_operational_context",
@@ -233,10 +230,7 @@ def _validate_historical_task_selection(
     *,
     catalog: list[HistoricalTaskCatalogEntry],
 ) -> HistoricalTaskSelectionResult:
-    valid_pairs = {
-        (entry.task_id, entry.execution_run_id)
-        for entry in catalog
-    }
+    valid_pairs = {(entry.task_id, entry.execution_run_id) for entry in catalog}
 
     selected_pairs: set[tuple[int, int]] = set()
 
@@ -247,9 +241,7 @@ def _validate_historical_task_selection(
                 "Selected task/run pair is not present in the completed historical task catalog."
             )
         if pair in selected_pairs:
-            raise SubagentRejectedStepError(
-                "Duplicate task/run pair returned by selector."
-            )
+            raise SubagentRejectedStepError("Duplicate task/run pair returned by selector.")
         selected_pairs.add(pair)
 
     return result
@@ -262,9 +254,7 @@ def call_context_selection_model(
     context_input: ContextBuilderResult,
 ) -> HistoricalTaskSelectionResult:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        HistoricalTaskSelectionResult.model_json_schema()
-    )
+    strict_schema = to_openai_strict_json_schema(HistoricalTaskSelectionResult.model_json_schema())
 
     first_user_prompt = _build_historical_task_selection_user_prompt(
         current_task=current_task,
@@ -320,7 +310,7 @@ class ContextSelectionAgent(BaseSubagent):
     def execute_step(
         self,
         *,
-        db: Session, 
+        db: Session,
         request: ExecutionRequest,
         step: ExecutionStep,
         state: ResolutionState,
@@ -352,9 +342,7 @@ class ContextSelectionAgent(BaseSubagent):
                 context_selection_result=state.historical_task_selection,
             )
             state.replace_execution_request(enriched_request)
-            state.add_note(
-                "No completed historical tasks available. Context selection skipped."
-            )
+            state.add_note("No completed historical tasks available. Context selection skipped.")
             state.mark_context_selected()
             return state
 

@@ -204,9 +204,7 @@ def _serialize_change_dependencies_from_engine_result(result) -> str | None:
 
 
 def _serialize_changed_files_from_engine_result(result) -> str | None:
-    changed_files = [
-        item.model_dump(mode="json") for item in (result.evidence.changed_files or [])
-    ]
+    changed_files = [item.model_dump(mode="json") for item in (result.evidence.changed_files or [])]
     if not changed_files:
         return None
     return json.dumps(changed_files, ensure_ascii=False)
@@ -865,7 +863,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             getattr(execution_engine, "backend_name", execution_engine.__class__.__name__),
         )
 
-        engine_result = execution_engine.execute(execution_request)
+        engine_result = execution_engine.execute(db, execution_request)
 
         logger.info(
             "execution_engine_completed task_id=%s run_id=%s decision=%s summary=%s",
@@ -895,7 +893,9 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
                 validation_notes="; ".join(engine_result.validation_notes or []),
                 changed_files=_serialize_changed_files_from_engine_result(engine_result),
                 files_read=_serialize_files_read_from_engine_result(engine_result),
-                change_dependencies=_serialize_change_dependencies_from_engine_result(engine_result),
+                change_dependencies=_serialize_change_dependencies_from_engine_result(
+                    engine_result
+                ),
                 auto_commit=False,
             )
             _store_task_execution_agent_sequence(

@@ -160,9 +160,7 @@ def _build_historical_execution_context(
 
         changed_files = _deserialize_changed_files(selected_run.changed_files)
         files_read = _deserialize_string_list(selected_run.files_read)
-        change_dependencies = _deserialize_change_dependencies(
-            selected_run.change_dependencies
-        )
+        change_dependencies = _deserialize_change_dependencies(selected_run.change_dependencies)
 
         selected_task_runs.append(
             HistoricalTaskRunContext(
@@ -176,9 +174,7 @@ def _build_historical_execution_context(
                 objective=selected_task.objective,
                 run_summary=selected_run.work_summary,
                 completed_scope=selected_run.completed_scope,
-                validation_notes=_split_semicolon_or_multiline_text(
-                    selected_run.validation_notes
-                ),
+                validation_notes=_split_semicolon_or_multiline_text(selected_run.validation_notes),
                 changed_files=changed_files,
                 files_read=files_read,
                 change_dependencies=change_dependencies,

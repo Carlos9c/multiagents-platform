@@ -466,9 +466,7 @@ class ExecutionOrchestrator:
             task_id=active_request.task_id,
             payload={"max_steps": self.budget.max_steps},
         )
-        resolution_state.evidence.notes.extend(
-            resolution_state.orchestrator_trace.to_notes()
-        )
+        resolution_state.evidence.notes.extend(resolution_state.orchestrator_trace.to_notes())
 
         return ExecutionResult(
             task_id=active_request.task_id,

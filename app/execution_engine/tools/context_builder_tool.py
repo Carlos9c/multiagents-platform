@@ -58,9 +58,7 @@ def _build_project_context_excerpt(project_context) -> str | None:
 
     if project_context.key_decisions:
         decisions = [
-            f"- {item.summary}"
-            for item in project_context.key_decisions[:8]
-            if item.summary
+            f"- {item.summary}" for item in project_context.key_decisions[:8] if item.summary
         ]
         if decisions:
             lines.append("Key decisions:\n" + "\n".join(decisions))
@@ -83,8 +81,7 @@ def _build_project_context_excerpt(project_context) -> str | None:
 
     if project_context.open_gaps:
         lines.append(
-            "Open gaps:\n"
-            + "\n".join(f"- {item}" for item in project_context.open_gaps[:8])
+            "Open gaps:\n" + "\n".join(f"- {item}" for item in project_context.open_gaps[:8])
         )
 
     excerpt = "\n\n".join(line for line in lines if line.strip())
@@ -131,12 +128,8 @@ def _build_completed_task_catalog(
                 run_summary=completion_run.work_summary,
                 completed_scope=completion_run.completed_scope,
                 validation_notes=completion_run.validation_notes,
-                changed_files=_deserialize_changed_files(
-                    completion_run.changed_files
-                ),
-                files_read=_deserialize_string_list(
-                    completion_run.files_read
-                ),
+                changed_files=_deserialize_changed_files(completion_run.changed_files),
+                files_read=_deserialize_string_list(completion_run.files_read),
             )
         )
 

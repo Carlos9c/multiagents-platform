@@ -18,7 +18,7 @@ class CommandRunnerAgent(BaseSubagent):
     def execute_step(
         self,
         *,
-        db: Session, 
+        db: Session,
         request: ExecutionRequest,
         step: ExecutionStep,
         state: ResolutionState,

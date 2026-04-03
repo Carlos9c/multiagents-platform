@@ -6,12 +6,8 @@ from pydantic import BaseModel, Field
 
 HISTORICAL_SELECTION_RULE_SAME_FUNCTIONAL_SURFACE = "same_functional_surface"
 HISTORICAL_SELECTION_RULE_SAME_WORK_STRATEGY = "same_work_strategy"
-HISTORICAL_SELECTION_RULE_DIRECT_HISTORICAL_DEPENDENCY = (
-    "direct_historical_dependency"
-)
-HISTORICAL_SELECTION_RULE_REQUIRED_OPERATIONAL_CONTEXT = (
-    "required_operational_context"
-)
+HISTORICAL_SELECTION_RULE_DIRECT_HISTORICAL_DEPENDENCY = "direct_historical_dependency"
+HISTORICAL_SELECTION_RULE_REQUIRED_OPERATIONAL_CONTEXT = "required_operational_context"
 
 VALID_HISTORICAL_SELECTION_RULES = {
     HISTORICAL_SELECTION_RULE_SAME_FUNCTIONAL_SURFACE,
@@ -34,9 +30,7 @@ class HistoricalTaskRunSelection(BaseModel):
 
 
 class HistoricalTaskSelectionResult(BaseModel):
-    selected_task_runs: list[HistoricalTaskRunSelection] = Field(
-        default_factory=list
-    )
+    selected_task_runs: list[HistoricalTaskRunSelection] = Field(default_factory=list)
 
 
 class HistoricalTaskCatalogEntry(BaseModel):
@@ -61,7 +55,5 @@ class HistoricalTaskCatalogEntry(BaseModel):
 
 class ContextBuilderResult(BaseModel):
     should_invoke_context_selection_agent: bool
-    completed_task_catalog: list[HistoricalTaskCatalogEntry] = Field(
-        default_factory=list
-    )
+    completed_task_catalog: list[HistoricalTaskCatalogEntry] = Field(default_factory=list)
     project_context_excerpt: str | None = None
