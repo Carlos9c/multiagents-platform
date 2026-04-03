@@ -34,11 +34,33 @@ from app.services.task_execution_service import (
     TaskExecutionServiceError,
     execute_task_sync,
 )
-from app.services.validation.contracts import (
-    ResolvedValidationIntent,
-    ValidationResult,
-)
+from app.services.validation.contracts import ValidationResult
+from app.services.validation.router.schemas import ValidationRoutingDecision
 from app.services.validation.service import ValidationServiceError
+
+
+def _make_code_routing_decision() -> ValidationRoutingDecision:
+    return ValidationRoutingDecision(
+        validator_key="code_task_validator",
+        discipline="code",
+        validation_mode="post_execution",
+        requires_workspace=True,
+        requires_file_reading=True,
+        requires_changed_files=True,
+        requires_command_results=True,
+        requires_artifacts=True,
+        requires_output_snapshot=True,
+        requires_execution_agent_sequence=True,
+        require_manual_review_if_evidence_missing=True,
+        validation_focus=[
+            "acceptance_criteria_alignment",
+            "scope_completion",
+            "repository_changes",
+            "constraint_compliance",
+        ],
+        routing_rationale="Route code execution results to the code task validator.",
+        open_questions=[],
+    )
 
 
 def _patch_workspace_runtime(
@@ -129,20 +151,7 @@ def _patch_validation_service(
     followup_validation_required: bool = False,
 ):
     def _fake_resolve_validation_route(*, routing_input):
-        return ResolvedValidationIntent(
-            validator_key="code_task_validator",
-            discipline="code",
-            validation_mode="post_execution",
-            requires_workspace=True,
-            requires_artifacts=True,
-            requires_changed_files=True,
-            requires_commands=True,
-            requires_execution_context=True,
-            requires_output_snapshot=True,
-            requires_agent_sequence=True,
-            requires_file_reading=True,
-            notes=[],
-        )
+        return _make_code_routing_decision()
 
     def _fake_dispatch_validation(*, intent, validation_input):
         return ValidationResult(
@@ -679,7 +688,7 @@ def test_failure_path_degrades_task_and_run_even_if_reconciliation_also_fails(
 
     with pytest.raises(
         TaskExecutionServiceError,
-        match="post-validation processing failed|artifact persistence failed|reconcile failed",
+        match="post-validation processing failed|artifact persistence failed",
     ):
         execute_task_sync(db_session, task.id)
 
@@ -982,7 +991,6 @@ def test_validation_artifacts_remain_linked_to_the_correct_execution_run_across_
     assert first_payload["task_id"] == task.id
     assert first_payload["decision"] == "completed"
 
-    # Reopen the task explicitly to simulate a second valid execution cycle for the same task.
     task.status = "pending"
     db_session.add(task)
     db_session.commit()
@@ -1074,10 +1082,6 @@ def test_post_validation_failure_before_commit_does_not_leave_terminal_artifact_
 
     def fail_on_closure_commit():
         state["commit_calls"] += 1
-        # 1: create_execution_run
-        # 2: mark_execution_run_started + mark_task_running
-        # 3: mark_execution_run_succeeded + agent sequence
-        # 4: closure commit (artifact + task terminal status)
         if state["commit_calls"] == 4:
             raise RuntimeError("closure commit failed")
         return original_commit()

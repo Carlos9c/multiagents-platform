@@ -19,10 +19,32 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
 )
 from app.services.task_execution_service import execute_task_sync
-from app.services.validation.contracts import (
-    ResolvedValidationIntent,
-    ValidationResult,
-)
+from app.services.validation.contracts import ValidationResult
+from app.services.validation.router.schemas import ValidationRoutingDecision
+
+
+def _make_code_routing_decision() -> ValidationRoutingDecision:
+    return ValidationRoutingDecision(
+        validator_key="code_task_validator",
+        discipline="code",
+        validation_mode="post_execution",
+        requires_workspace=True,
+        requires_file_reading=True,
+        requires_changed_files=True,
+        requires_command_results=True,
+        requires_artifacts=True,
+        requires_output_snapshot=True,
+        requires_execution_agent_sequence=True,
+        require_manual_review_if_evidence_missing=True,
+        validation_focus=[
+            "acceptance_criteria_alignment",
+            "scope_completion",
+            "repository_changes",
+            "constraint_compliance",
+        ],
+        routing_rationale="Route code execution results to the code task validator.",
+        open_questions=[],
+    )
 
 
 def _patch_workspace_runtime(monkeypatch, *, promoted_state: dict | None = None):
@@ -107,20 +129,7 @@ def _patch_validation_service_flow(
     def _fake_resolve_validation_route(*, routing_input):
         if capture is not None:
             capture["routing_input"] = routing_input
-        return ResolvedValidationIntent(
-            validator_key="code_task_validator",
-            discipline="code",
-            validation_mode="post_execution",
-            requires_workspace=True,
-            requires_artifacts=True,
-            requires_changed_files=True,
-            requires_commands=True,
-            requires_execution_context=True,
-            requires_output_snapshot=True,
-            requires_agent_sequence=True,
-            requires_file_reading=True,
-            notes=[],
-        )
+        return _make_code_routing_decision()
 
     def _fake_dispatch_validation(*, intent, validation_input):
         if capture is not None:

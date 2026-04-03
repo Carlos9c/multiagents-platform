@@ -88,6 +88,42 @@ def build_validation_routing_input(
     )
 
 
+def _resolve_validation_intent(
+    routing_decision: ValidationRoutingDecision,
+) -> ResolvedValidationIntent:
+    notes: list[str] = []
+
+    if routing_decision.routing_rationale:
+        notes.append(routing_decision.routing_rationale)
+
+    notes.extend(item for item in routing_decision.validation_focus if item)
+    notes.extend(item for item in routing_decision.open_questions if item)
+
+    deduped_notes: list[str] = []
+    seen: set[str] = set()
+    for item in notes:
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped_notes.append(normalized)
+
+    return ResolvedValidationIntent(
+        validator_key=routing_decision.validator_key,
+        discipline=routing_decision.discipline,
+        validation_mode=routing_decision.validation_mode,
+        requires_workspace=routing_decision.requires_workspace,
+        requires_artifacts=routing_decision.requires_artifacts,
+        requires_changed_files=routing_decision.requires_changed_files,
+        requires_commands=routing_decision.requires_command_results,
+        requires_execution_context=True,
+        requires_output_snapshot=routing_decision.requires_output_snapshot,
+        requires_agent_sequence=routing_decision.requires_execution_agent_sequence,
+        requires_file_reading=routing_decision.requires_file_reading,
+        notes=deduped_notes,
+    )
+
+
 def _build_validator_input(
     *,
     routing_decision: ResolvedValidationIntent,
@@ -195,8 +231,10 @@ def validate_execution_result(
         routing_input=routing_input,
     )
 
+    resolved_intent = _resolve_validation_intent(routing_decision)
+
     validator_input = _build_validator_input(
-        routing_decision=routing_decision,
+        routing_decision=resolved_intent,
         task=task,
         execution_request=execution_request,
         execution_result=execution_result,
@@ -205,12 +243,12 @@ def validate_execution_result(
     )
 
     validation_result = dispatch_validation(
-        intent=routing_decision,
+        intent=resolved_intent,
         validation_input=validator_input,
     )
 
     _assert_validation_result_consistency(
-        routing_decision=routing_decision,
+        routing_decision=resolved_intent,
         validation_result=validation_result,
     )
 

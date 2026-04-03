@@ -12,11 +12,36 @@ from app.execution_engine.contracts import (
     RelatedTaskSummary,
 )
 from app.services.validation.contracts import ValidationResult
+from app.services.validation.router.schemas import ValidationRoutingDecision
 from app.services.validation.service import (
     ValidationServiceError,
     build_validation_routing_input,
     validate_execution_result,
 )
+
+
+def _make_code_routing_decision() -> ValidationRoutingDecision:
+    return ValidationRoutingDecision(
+        validator_key="code_task_validator",
+        discipline="code",
+        validation_mode="post_execution",
+        requires_workspace=True,
+        requires_file_reading=True,
+        requires_changed_files=True,
+        requires_command_results=True,
+        requires_artifacts=True,
+        requires_output_snapshot=True,
+        requires_execution_agent_sequence=True,
+        require_manual_review_if_evidence_missing=True,
+        validation_focus=[
+            "acceptance_criteria_alignment",
+            "scope_completion",
+            "repository_changes",
+            "constraint_compliance",
+        ],
+        routing_rationale="Route code execution results to the code task validator.",
+        open_questions=[],
+    )
 
 
 def test_build_validation_routing_input_collects_task_execution_and_evidence_summary(
@@ -220,22 +245,7 @@ def test_validate_execution_result_orchestrates_route_build_and_dispatch(
 
     def fake_resolve_validation_route(*, routing_input):
         captured["routing_input"] = routing_input
-        from app.services.validation.contracts import ResolvedValidationIntent
-
-        return ResolvedValidationIntent(
-            validator_key="code_task_validator",
-            discipline="code",
-            validation_mode="post_execution",
-            requires_workspace=True,
-            requires_artifacts=True,
-            requires_changed_files=True,
-            requires_commands=True,
-            requires_execution_context=True,
-            requires_output_snapshot=True,
-            requires_agent_sequence=True,
-            requires_file_reading=True,
-            notes=[],
-        )
+        return _make_code_routing_decision()
 
     def fake_dispatch_validation(*, intent, validation_input):
         captured["intent"] = intent
@@ -364,22 +374,7 @@ def test_validate_execution_result_rejects_completed_with_failed_final_status(
     )
 
     def fake_resolve_validation_route(*, routing_input):
-        from app.services.validation.contracts import ResolvedValidationIntent
-
-        return ResolvedValidationIntent(
-            validator_key="code_task_validator",
-            discipline="code",
-            validation_mode="post_execution",
-            requires_workspace=True,
-            requires_artifacts=True,
-            requires_changed_files=True,
-            requires_commands=True,
-            requires_execution_context=True,
-            requires_output_snapshot=True,
-            requires_agent_sequence=True,
-            requires_file_reading=True,
-            notes=[],
-        )
+        return _make_code_routing_decision()
 
     def fake_dispatch_validation(*, intent, validation_input):
         return ValidationResult(
@@ -496,22 +491,7 @@ def test_validate_execution_result_rejects_completed_with_followup_validation_re
     )
 
     def fake_resolve_validation_route(*, routing_input):
-        from app.services.validation.contracts import ResolvedValidationIntent
-
-        return ResolvedValidationIntent(
-            validator_key="code_task_validator",
-            discipline="code",
-            validation_mode="post_execution",
-            requires_workspace=True,
-            requires_artifacts=True,
-            requires_changed_files=True,
-            requires_commands=True,
-            requires_execution_context=True,
-            requires_output_snapshot=True,
-            requires_agent_sequence=True,
-            requires_file_reading=True,
-            notes=[],
-        )
+        return _make_code_routing_decision()
 
     def fake_dispatch_validation(*, intent, validation_input):
         return ValidationResult(
@@ -628,22 +608,7 @@ def test_validate_execution_result_rejects_manual_review_without_manual_review_r
     )
 
     def fake_resolve_validation_route(*, routing_input):
-        from app.services.validation.contracts import ResolvedValidationIntent
-
-        return ResolvedValidationIntent(
-            validator_key="code_task_validator",
-            discipline="code",
-            validation_mode="post_execution",
-            requires_workspace=True,
-            requires_artifacts=True,
-            requires_changed_files=True,
-            requires_commands=True,
-            requires_execution_context=True,
-            requires_output_snapshot=True,
-            requires_agent_sequence=True,
-            requires_file_reading=True,
-            notes=[],
-        )
+        return _make_code_routing_decision()
 
     def fake_dispatch_validation(*, intent, validation_input):
         return ValidationResult(
@@ -760,22 +725,7 @@ def test_validate_execution_result_rejects_validator_key_mismatch(
     )
 
     def fake_resolve_validation_route(*, routing_input):
-        from app.services.validation.contracts import ResolvedValidationIntent
-
-        return ResolvedValidationIntent(
-            validator_key="code_task_validator",
-            discipline="code",
-            validation_mode="post_execution",
-            requires_workspace=True,
-            requires_artifacts=True,
-            requires_changed_files=True,
-            requires_commands=True,
-            requires_execution_context=True,
-            requires_output_snapshot=True,
-            requires_agent_sequence=True,
-            requires_file_reading=True,
-            notes=[],
-        )
+        return _make_code_routing_decision()
 
     def fake_dispatch_validation(*, intent, validation_input):
         return ValidationResult(

@@ -70,7 +70,7 @@ def test_run_command_rejects_path_argument_outside_workspace(tmp_path: Path):
             command=f'"{sys.executable}" "{outside_file}"',
             cwd=str(tmp_path),
         )
-        
+
 
 def test_run_command_returns_timeout_result_instead_of_raising(tmp_path: Path):
     result = run_command(
@@ -85,7 +85,7 @@ def test_run_command_returns_timeout_result_instead_of_raising(tmp_path: Path):
 
 def test_run_command_truncates_large_stdout(tmp_path: Path):
     result = run_command(
-        command=f'{sys.executable} -c "print(\'x\' * 40000)"',
+        command=f"{sys.executable} -c \"print('x' * 40000)\"",
         cwd=str(tmp_path),
     )
 

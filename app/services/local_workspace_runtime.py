@@ -235,12 +235,58 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         prepared = self._get_prepared_workspace(project_id, execution_run_id, domain_name)
         domain_paths = self.storage_service.ensure_domain_storage(project_id, domain_name)
 
-        if domain_paths.source_dir.exists():
-            shutil.rmtree(domain_paths.source_dir)
+        workspace_dir = prepared.workspace_dir.resolve()
+        source_dir = domain_paths.source_dir.resolve()
+        parent_dir = source_dir.parent
 
-        domain_paths.source_dir.mkdir(parents=True, exist_ok=True)
-        self._copy_tree_contents(prepared.workspace_dir, domain_paths.source_dir)
-        return domain_paths.source_dir
+        if not workspace_dir.exists() or not workspace_dir.is_dir():
+            raise WorkspaceRuntimeError(
+                f"Workspace for execution_run_id={execution_run_id} does not exist."
+            )
+
+        parent_dir.mkdir(parents=True, exist_ok=True)
+
+        staging_dir = parent_dir / f"{source_dir.name}.staging"
+        backup_dir = parent_dir / f"{source_dir.name}.backup"
+
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+
+        try:
+            staging_dir.mkdir(parents=True, exist_ok=False)
+            self._copy_tree_contents(workspace_dir, staging_dir)
+
+            if source_dir.exists():
+                source_dir.rename(backup_dir)
+
+            staging_dir.rename(source_dir)
+
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir)
+
+            return source_dir
+
+        except Exception as exc:
+            try:
+                if source_dir.exists() and backup_dir.exists():
+                    shutil.rmtree(source_dir)
+                    backup_dir.rename(source_dir)
+                elif not source_dir.exists() and backup_dir.exists():
+                    backup_dir.rename(source_dir)
+            except Exception as rollback_exc:
+                raise WorkspaceRuntimeError(
+                    "Failed to promote workspace to source and rollback also failed. "
+                    f"Original error: {exc}. Rollback error: {rollback_exc}"
+                ) from exc
+
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+
+            raise WorkspaceRuntimeError(
+                f"Failed to promote workspace to source safely: {exc}"
+            ) from exc
 
     def cleanup_workspace(self, project_id: int, execution_run_id: int) -> None:
         run_paths = self.get_execution_workspace_paths(project_id, execution_run_id)
