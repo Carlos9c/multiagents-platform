@@ -44,7 +44,7 @@ from app.services.execution_runs import (
     mark_execution_run_succeeded,
 )
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
-from app.services.project_storage import CODE_DOMAIN, ProjectStorageService
+from app.services.project_storage import ProjectStorageService
 from app.services.task_hierarchy_reconciliation_service import (
     TaskHierarchyReconciliationServiceError,
     reconcile_task_hierarchy_after_changes,
@@ -228,8 +228,8 @@ def _prepare_execution_workspace(
     This must happen before building the execution request and before the
     execution engine starts, so that:
     - the workspace path exists
-    - source baseline is copied into the run workspace
-    - validation can later inspect the same isolated workspace
+    - the workspace is an empty editable overlay for this run
+    - the canonical source path is available for candidate materialization and validation
     """
     try:
         storage_service = ProjectStorageService()
@@ -238,16 +238,16 @@ def _prepare_execution_workspace(
         prepared = workspace_runtime.prepare_workspace(
             project_id=task.project_id,
             execution_run_id=run_id,
-            domain_name=CODE_DOMAIN,
         )
 
         logger.info(
-            "execution_workspace_prepared task_id=%s run_id=%s project_id=%s workspace=%s source=%s",
+            "execution_workspace_prepared task_id=%s run_id=%s project_id=%s workspace=%s run_dir=%s source=%s",
             task.id,
             run_id,
             task.project_id,
             str(prepared.workspace_dir),
-            str(prepared.source_dir) if prepared.source_dir else "",
+            str(prepared.run_dir),
+            str(prepared.source_dir),
         )
     except Exception as exc:
         raise TaskExecutionServiceError(
@@ -261,7 +261,7 @@ def _promote_validated_workspace_to_source(
     run_id: int,
 ) -> None:
     """
-    Promote the isolated execution workspace into canonical project source.
+    Promote the execution-run workspace overlay into canonical project source.
 
     This is intentionally executed only after:
     - execution finished
@@ -269,6 +269,9 @@ def _promote_validated_workspace_to_source(
 
     And before:
     - the final task status is persisted as completed
+
+    Promotion applies the run overlay onto the canonical source tree.
+    It must not promote any ephemeral run_dir used for command verification.
 
     This helper must not persist task or run state. Callers are responsible
     for degrading the orchestration state coherently if promotion fails.
@@ -279,11 +282,10 @@ def _promote_validated_workspace_to_source(
         workspace_runtime.promote_workspace_to_source(
             project_id=task.project_id,
             execution_run_id=run_id,
-            domain_name=CODE_DOMAIN,
         )
     except Exception as exc:
         raise TaskExecutionServiceError(
-            f"Task {task.id} passed validation but its workspace could not be promoted to source: {str(exc)}"
+            f"Task {task.id} passed validation but its workspace overlay could not be promoted to source: {str(exc)}"
         ) from exc
 
 

@@ -343,6 +343,83 @@ def _require_validation_artifact_for_problematic_task(
     return validation_artifact
 
 
+def _build_execution_failure_validation_context_summary(
+    *,
+    task: Task,
+    latest_run: ExecutionRun,
+) -> str:
+    payload = {
+        "task_id": task.id,
+        "task_status": task.status,
+        "validation_available": False,
+        "recovery_posture": "execution_failed_before_validation",
+        "reason": (
+            "Execution terminated before validation started. Recovery must reason primarily "
+            "from execution evidence for this task."
+        ),
+        "execution_failure_context": {
+            "run_id": latest_run.id,
+            "run_status": latest_run.status,
+            "failure_type": latest_run.failure_type,
+            "failure_code": latest_run.failure_code,
+            "work_summary": latest_run.work_summary,
+            "work_details": latest_run.work_details,
+            "completed_scope": latest_run.completed_scope,
+            "remaining_scope": latest_run.remaining_scope,
+            "blockers_found": latest_run.blockers_found,
+            "validation_notes": latest_run.validation_notes,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _build_problematic_task_validation_context_summary(
+    db: Session,
+    *,
+    task: Task,
+    latest_run: ExecutionRun,
+    batch_id: str,
+    plan_version: int,
+) -> str:
+    validation_artifact = _get_latest_validation_artifact_for_task(db, task.id)
+
+    if validation_artifact is not None:
+        return _build_validation_context_summary(
+            task=task,
+            validation_artifact=validation_artifact,
+        )
+
+    if task.status == TASK_STATUS_PARTIAL:
+        raise PostBatchServiceError(
+            f"Batch '{batch_id}' in plan version {plan_version} cannot be processed because "
+            f"task {task.id} is '{TASK_STATUS_PARTIAL}' but has no '{VALIDATION_RESULT_ARTIFACT_TYPE}' artifact. "
+            "Partial tasks must always come from a completed validation flow."
+        )
+
+    if task.status == TASK_STATUS_FAILED:
+        if latest_run.status in {
+            EXECUTION_RUN_STATUS_FAILED,
+            EXECUTION_RUN_STATUS_REJECTED,
+        }:
+            return _build_execution_failure_validation_context_summary(
+                task=task,
+                latest_run=latest_run,
+            )
+
+        raise PostBatchServiceError(
+            f"Batch '{batch_id}' in plan version {plan_version} cannot be processed because "
+            f"task {task.id} is '{TASK_STATUS_FAILED}' without a '{VALIDATION_RESULT_ARTIFACT_TYPE}' artifact, "
+            f"but latest run {latest_run.id} ended as '{latest_run.status}'. "
+            "A failed task without validation is only valid when execution terminated before validation "
+            "with run status 'failed' or 'rejected'."
+        )
+
+    raise PostBatchServiceError(
+        f"Batch '{batch_id}' in plan version {plan_version} requested recovery validation context "
+        f"for task {task.id} in unsupported status '{task.status}'."
+    )
+
+
 def _require_recovery_source_task_remains_terminal(
     db: Session,
     *,
@@ -1077,9 +1154,10 @@ def process_batch_after_execution(
         executed_task_ids.append(task.id)
 
         if task.status in {TASK_STATUS_FAILED, TASK_STATUS_PARTIAL}:
-            validation_artifact = _require_validation_artifact_for_problematic_task(
+            validation_context_summary = _build_problematic_task_validation_context_summary(
                 db=db,
                 task=task,
+                latest_run=latest_run,
                 batch_id=batch_id,
                 plan_version=plan.plan_version,
             )
@@ -1089,10 +1167,6 @@ def process_batch_after_execution(
             execution_context_summary = _build_execution_context_summary(
                 task=task,
                 latest_run=latest_run,
-            )
-            validation_context_summary = _build_validation_context_summary(
-                task=task,
-                validation_artifact=validation_artifact,
             )
 
             decision = generate_recovery_decision(

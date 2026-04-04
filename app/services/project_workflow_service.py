@@ -30,7 +30,6 @@ from app.services.post_batch_service import (
     process_batch_after_execution,
 )
 from app.services.project_storage import (
-    CODE_DOMAIN,
     ProjectStorageError,
     ProjectStorageService,
 )
@@ -56,10 +55,8 @@ def _bootstrap_project_storage_for_execution(project_id: int) -> None:
     try:
         storage_service = ProjectStorageService()
         storage_service.ensure_project_storage(project_id)
-        storage_service.ensure_domain_storage(project_id, CODE_DOMAIN)
         storage_service.write_project_storage_manifest(
             project_id=project_id,
-            enabled_domains=[CODE_DOMAIN],
         )
     except ProjectStorageError as exc:
         raise ProjectWorkflowServiceError(

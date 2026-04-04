@@ -16,7 +16,7 @@ from app.models.task import Task
 from app.services.execution_runs import get_execution_run
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_memory_service import build_project_operational_context
-from app.services.project_storage import CODE_DOMAIN, ProjectStorageService
+from app.services.project_storage import ProjectStorageService
 
 
 def _split_multiline_text(value: str | None) -> list[str]:
@@ -178,10 +178,7 @@ def build_placeholder_execution_request(
     storage_service = ProjectStorageService()
     workspace_runtime = LocalWorkspaceRuntime(storage_service=storage_service)
 
-    domain_paths = storage_service.ensure_domain_storage(
-        project_id=task.project_id,
-        domain_name=CODE_DOMAIN,
-    )
+    project_paths = storage_service.ensure_project_storage(task.project_id)
     workspace_paths = workspace_runtime.get_execution_workspace_paths(
         project_id=task.project_id,
         execution_run_id=execution_run_id,
@@ -207,7 +204,7 @@ def build_placeholder_execution_request(
 
     context = ProjectExecutionContext(
         project_id=task.project_id,
-        source_path=str(domain_paths.source_dir) if domain_paths.source_dir else "",
+        source_path=str(project_paths.source_dir),
         workspace_path=str(workspace_paths.workspace_dir),
         relevant_files=[],
         key_decisions=[],

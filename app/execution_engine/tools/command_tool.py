@@ -124,7 +124,7 @@ def _looks_like_path_argument(argument: str) -> bool:
     return False
 
 
-def _validate_path_arguments_within_workspace(argv: list[str], working_dir: Path) -> None:
+def _validate_path_arguments_within_execution_tree(argv: list[str], working_dir: Path) -> None:
     for argument in argv[1:]:
         if not _looks_like_path_argument(argument):
             continue
@@ -140,7 +140,7 @@ def _validate_path_arguments_within_workspace(argv: list[str], working_dir: Path
             resolved_candidate.relative_to(working_dir)
         except ValueError as exc:
             raise CommandToolError(
-                "Command contains a path argument outside the workspace: " f"{argument}"
+                "Command contains a path argument outside the execution tree: " f"{argument}"
             ) from exc
 
 
@@ -155,7 +155,7 @@ def run_command(
     argv = _validate_and_parse_command(command)
 
     _validate_executable(argv)
-    _validate_path_arguments_within_workspace(argv, working_dir)
+    _validate_path_arguments_within_execution_tree(argv, working_dir)
 
     try:
         completed = subprocess.run(

@@ -4,301 +4,291 @@
 
 Este proyecto implementa un sistema de ejecución autónoma de tareas basado en agentes, con un foco fuerte en:
 
-- Ejecución controlada de tareas atómicas  
-- Validación estructurada de resultados  
-- Persistencia consistente de artefactos  
-- Trazabilidad completa del flujo de trabajo  
-- Recuperación determinista ante fallos (en evolución)
+- Ejecución controlada de tareas atómicas
+- Validación estructurada de resultados
+- Persistencia consistente de artefactos
+- Trazabilidad completa del flujo de trabajo
+- Recuperación determinista ante fallos
+- Verificación repo-local explícita mediante evidencia operacional
 
-El sistema orquesta el siguiente flujo:
+Flujo principal:
 
-**Task → ExecutionRun → Execution → Validation → Artifact → Task closure → Hierarchy reconciliation**
+Task → ExecutionRun → Execution Orchestrator → Subagents → Validation → Artifact → Task closure → Hierarchy reconciliation
 
 ---
 
 ## 🧱 Componentes principales
 
 ### 1. Execution Engine
-- Ejecuta tareas mediante agentes
-- Produce `ExecutionResult` con:
-  - evidencia (archivos, comandos, etc.)
-  - resumen del trabajo
-  - estado (`completed`, `partial`, `failed`, `rejected`)
+- Ejecuta tareas mediante orquestador + subagentes
+- Produce `ExecutionResult` con evidencia acumulada
+
+Subagentes:
+- context_selection_agent
+- code_change_agent
+- command_runner_agent
 
 ---
 
-### 2. Task Execution Service
-- Orquesta todo el flujo:
-  - creación de run
+### 2. Orchestrator
+- Decide:
+  - call_subagent
+  - finish
+  - reject
+- Fases:
+  - discovery
+  - execution
+- Loop con budget
+- Diferencia:
+  - DECISION_REJECT → no hay ruta
+  - DECISION_INVALID → error, sigue loop
+
+---
+
+### 3. Task Execution Service
+- Orquesta:
+  - run
   - ejecución
   - validación
-  - persistencia final
-- Gestiona degradación ante errores
-- Garantiza atomicidad del cierre
+  - persistencia
+- Garantiza atomicidad
 
 ---
 
-### 3. Validation Service
-- Construye contexto de validación
-- Decide el validador (router)
-- Ejecuta validación (dispatcher)
-- Devuelve `ValidationResult` estructurado
+### 4. Validation Service
+- Construye contexto
+- Router → dispatcher
+- Devuelve `ValidationResult`
+- Consume evidencia, no ejecuta comandos
 
 ---
 
-### 4. Artifact System
-- Fuente de verdad del resultado validado
-- `validation_result` = cierre canónico de la tarea
-- Permite trazabilidad completa y auditoría
+### 5. Artifact System
+- Fuente de verdad
+- Resultado validado = cierre real
+- Base de auditoría
 
 ---
 
-### 5. Task Hierarchy
-- Consolida estado de tareas padre
-- Propaga cambios de forma determinista
-- Sin efectos colaterales parciales
+### 6. Workspace Runtime
+
+Estructura:
+
+project/
+- domain_data/source
+- executions/<run_id>/
+  - workspace
+  - run
+  - logs
+  - outputs
+
+Semántica:
+- source = base persistida
+- workspace = cambios
+- run = entorno efímero de verificación
+- run se elimina siempre
+- promoción = overlay sobre source
 
 ---
 
-### 6. (WIP) Post-Batch Processing
-- Evaluación tras ejecución de batches
-- Integración con:
-  - recovery
-  - evaluación de checkpoint
-  - mutación del plan
-
-⚠️ **Estado actual:** en revisión / rollback parcial  
-Se ha detectado desalineación entre:
-- contrato esperado por tests
-- implementación real del servicio
+### 7. Task Hierarchy
+- Propagación determinista
+- Sin efectos parciales
 
 ---
 
-## ✅ Estado actual del sistema
+### 8. Post-Batch (WIP)
+- Recovery
+- Evaluation
+- Plan mutation
 
-### 🔒 Consistencia transaccional
-- Eliminados commits intermedios peligrosos
-- Uso correcto de:
-  - `flush()` durante construcción
-  - `commit()` solo en puntos de frontera
-  - `rollback()` en fallos
+Estado: en reconstrucción
 
 ---
 
-### 🔁 Atomicidad garantizada
+## ✅ Estado actual
 
-El cierre de una tarea (validación + artifact + estado) es:
+### Consistencia
+- Sin commits intermedios
+- rollback correcto
 
-- Atómico  
-- Consistente  
-- Sin efectos parciales  
+### Atomicidad
+- cierre = atómico + consistente
 
----
-
-### 🧩 Contratos claros entre capas
-
-- Execution → produce intención  
-- Validation → produce decisión  
-- Artifact → fija la verdad  
-- Task → refleja el resultado final  
+### Contratos
+- Orchestrator → coordina
+- Subagents → producen evidencia
+- Validation → decide
+- Artifact → fija verdad
 
 ---
 
-### ⚠️ Post-batch (estado real)
-
-- Flujo parcialmente implementado  
-- Tests existentes definen el contrato esperado  
-- La implementación actual **no cumple completamente ese contrato**  
-- Se ha decidido hacer rollback para:
-  - evitar inconsistencias  
-  - rediseñar con claridad  
+### Orquestación
+- Ya no hay acciones abstractas
+- Se llaman subagentes reales
+- Simplificación clara del loop
 
 ---
 
-## 🧪 Invariantes implementadas
+### Workspace
+- Eliminado modelo incorrecto previo
+- run tree efímero correcto
+- evita contaminación y loops
+
+---
+
+### Evidencia
+- acumulativa
+- multi-agente
+- usable por validación
+
+---
+
+### Post-batch
+- normalización corregida
+- tests verdes en esa parte
+- flujo completo pendiente
+
+---
+
+## 🧪 Invariantes
 
 ### Ejecución
-- No se ejecutan tareas no ejecutables  
-- Run no se inicia en estados inválidos  
+- no estados inválidos
+- no repetir subagente
+- primer paso = context
+- finish requiere evidencia
+- invalid consume budget
 
----
+### Workspace
+- run siempre efímero
+- source único
+- sin legacy partitions
 
 ### Validación
-- Coherencia entre:
-  - `decision`  
-  - `final_task_status`  
-  - flags (`manual_review_required`, etc.)  
-- Mismatch de validator detectado  
-
----
+- coherencia decisión/estado
+- no ejecuta comandos
 
 ### Persistencia
-- 1 run → 1 artifact de validación  
-- Artifact consistente con task final  
-- Task terminal ⇔ artifact canónico presente  
-
----
+- 1 run → 1 artifact
+- task terminal ⇔ artifact
 
 ### Degradación
-- Fallos en post-validación:
-  - run = failed  
-  - task = failed  
-  - sin residuos inconsistentes  
+- fallo limpio
+- sin residuos
+
+### Plan
+- stage_closure correcto
+- consistencia batch
 
 ---
 
-### Reconciliación
-- Sin commits implícitos ocultos  
-- Rollback seguro ante fallo  
-- No hay estados intermedios persistidos  
+## 🧪 Tests
 
----
+Cubren:
 
-## 🧪 Cobertura de tests
+- flujo vertical
+- invariantes
+- workspace
+- orchestrator
+- plan mutation
 
-Se han reforzado los tests en tres niveles:
-
-### 1. Flujo vertical
-- execution → validation → cierre  
-
-### 2. Invariantes del sistema
-- atomicidad del cierre  
-- consistencia run/task/artifact  
-
-### 3. Validación semántica
-- incoherencias en `ValidationResult`  
-- enforcement de contratos  
-
-📌 Todos los tests del core (execution + validation) pasan en verde.
-
-⚠️ Tests de `post_batch_service` actualmente:
-- definen el contrato correcto  
-- pero la implementación no está alineada  
+Estado: core en verde
 
 ---
 
 ## 🚀 Últimos avances
 
-- Refactor completo del flujo execution + validation  
-- Eliminación de legacy en validadores y tests  
-- Introducción de invariantes explícitas del sistema  
-- Corrección de consistencia transaccional  
-- Aislamiento claro de responsabilidades  
-- Reconciliación jerárquica sin efectos parciales  
-- Tests de atomicidad y rollback  
-- Primer diseño completo de **post-batch + recovery + plan mutation (WIP)**  
+- Nuevo modelo de orquestador
+- Eliminación de actions legacy
+- Introducción:
+  - CALL
+  - FINISH
+  - REJECT
+  - INVALID
+- Eliminación de `kind`
+- Rediseño workspace:
+  - source / workspace / run
+- run_command con árbol efímero
+- limpieza automática
+- normalización de plan
+- separación clara de errores vs decisiones
 
 ---
 
 ## 🧹 Limpieza pendiente
 
-- Eliminar carpeta `workers` (no utilizada actualmente)  
-- Revisar posibles restos menores de código muerto  
-- Consolidar helpers de test duplicados  
+- eliminar workers
+- eliminar restos legacy
+- consolidar tests
+- simplificar evidencia
 
 ---
 
 ## 🔭 Próximos pasos
 
-### 🔥 Alta prioridad
+### Alta prioridad
 
-#### 1. Rediseño de `post_batch_service`
-Objetivo: alinear implementación con contrato real definido por tests.
+1. run_command end-to-end
+- comando + cwd correctos
+- evidencia persistida
+- validación consume evidencia
 
-Claves:
-- Recovery debe ser **parte obligatoria del flujo**, no opcional  
-- `created_recovery_task_ids` debe ser fuente de verdad  
-- `recovery_context` debe construirse explícitamente  
-- `evaluate_checkpoint` debe depender de recovery real  
-- `assign/resequence/replan` deben ser mutuamente coherentes  
+2. Mejorar evidencia
+- estructura clara
+- trazabilidad por agente
 
-👉 Enfoque recomendado:
-- Empezar desde tests (fuente de verdad)  
-- Implementar paso a paso:
-  1. recovery  
-  2. evaluation  
-  3. intent resolution  
-  4. mutation  
+3. post_batch_service
+- recovery → evaluation → mutation
+- coherencia total
 
----
-
-#### 2. Revisar `request_adapter`
-- Validar que el contexto que recibe el execution engine es:
-  - completo  
-  - coherente  
-  - suficiente  
+4. manual review
+- separar:
+  - user clarification
+  - gap interno
+  - constraint externo
 
 ---
 
-#### 3. End-to-end real
-- Tests que cubran:
-  - ejecución realista  
-  - validación completa  
-  - recovery  
-  - post-batch  
+### Media prioridad
+
+5. auditoría de validación  
+6. tests end-to-end reales  
+7. simplificación artifacts  
 
 ---
 
-### ⚙️ Media prioridad
+### Baja prioridad
 
-#### 4. `run_command` hardening
-- Mejor control de ejecución  
-- Seguridad / sandboxing  
-- Manejo robusto de errores  
+8. refactor estructural  
+9. configuración y portabilidad  
 
 ---
 
-#### 5. Revisión de artifacts
-- Evitar duplicidades  
-- Garantizar valor real  
-- Simplificar trazabilidad  
+## 🧠 Filosofía
 
----
-
-### 🧩 Baja prioridad
-
-#### 6. Refactor estructural
-- Dividir servicios grandes si crecen demasiado  
-- Mejorar organización modular  
-
----
-
-#### 7. Configuración y portabilidad
-- Storage  
-- Runtime  
-- Entornos  
-
----
-
-## 🧠 Filosofía del sistema
-
-Principio clave:
-
-> **La fuente de verdad no es la ejecución, sino el resultado validado.**
-
-Además:
-
-- No hay estados implícitos  
-- No hay efectos parciales persistidos  
-- Todo cierre es verificable vía artifact  
-- Los sistemas de recuperación deben ser **deterministas y auditables**
+- La verdad es el resultado validado
+- Validación no re-ejecuta
+- Usuario no tapa fallos del sistema
+- Sin estados implícitos
+- Sin efectos parciales
+- Evidencia acumulativa y auditable
+- Orquestador coordina agentes reales
 
 ---
 
 ## 📌 Estado final
 
-El core del sistema (execution + validation + cierre) está:
+Core:
+- estable
+- coherente
+- alineado con subagentes
+- sin legacy crítico
 
-- Estable  
-- Consistente  
-- Testeado  
-- Libre de efectos colaterales críticos  
+Post-batch:
+- bien definido
+- pendiente de cierre
 
-El sistema de post-batch está:
+Siguiente foco:
 
-- Bien diseñado a nivel de contrato (tests)  
-- Pendiente de implementación correcta  
-
-👉 El siguiente foco no es estabilidad, sino:
-
-**hacer que el sistema sea capaz de continuar de forma inteligente tras fallos (recovery + planificación dinámica).**
+cerrar run_command + mejorar evidencia + completar recovery y planificación dinámica

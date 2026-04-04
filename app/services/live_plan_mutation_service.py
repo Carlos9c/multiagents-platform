@@ -12,6 +12,7 @@ from app.schemas.post_batch_intent import ResolvedPostBatchIntent
 from app.schemas.recovery import RecoveryContext
 from app.services.execution_plan_patch_service import (
     insert_patch_batch_after_batch,
+    normalize_execution_plan_terminal_invariants,
     persist_patched_execution_plan,
 )
 from app.services.recovery_assignment_client import call_recovery_assignment_model
@@ -184,7 +185,9 @@ def mutate_live_plan(
                 "Recovery assignment completed without a patched execution plan."
             )
 
-        patched_execution_plan = compiled_assignment.patched_execution_plan
+        patched_execution_plan = normalize_execution_plan_terminal_invariants(
+            plan=compiled_assignment.patched_execution_plan
+        )
 
         persist_patched_execution_plan(
             db=db,

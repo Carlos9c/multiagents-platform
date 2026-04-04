@@ -78,10 +78,11 @@ def _patch_workspace_runtime(
     def _factory(storage_service):
         return types.SimpleNamespace(
             prepare_workspace=lambda **kwargs: types.SimpleNamespace(
+                project_id=kwargs["project_id"],
+                execution_run_id=kwargs["execution_run_id"],
                 workspace_dir=".",
+                run_dir=".",
                 source_dir=".",
-                logs_dir=".",
-                outputs_dir=".",
             ),
             promote_workspace_to_source=_promote_workspace_to_source,
         )
@@ -526,7 +527,7 @@ def test_workspace_promotion_failure_marks_execution_run_failed(
 
     with pytest.raises(
         TaskExecutionServiceError,
-        match="workspace could not be promoted to source",
+        match="could not be promoted to source",
     ):
         execute_task_sync(db_session, task.id)
 

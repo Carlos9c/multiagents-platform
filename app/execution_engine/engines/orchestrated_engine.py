@@ -23,7 +23,7 @@ class OrchestratedExecutionEngine(BaseExecutionEngine):
             subagents=[
                 ContextSelectionAgent(runtime=runtime),
                 CodeChangeAgent(runtime=runtime),
-                CommandRunnerAgent(),
+                CommandRunnerAgent(runtime=runtime),
             ]
         )
 

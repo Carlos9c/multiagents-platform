@@ -17,6 +17,7 @@ class ExecutionWorkspacePaths:
     execution_run_id: int
     execution_root: Path
     workspace_dir: Path
+    run_dir: Path
     logs_dir: Path
     outputs_dir: Path
 
@@ -25,22 +26,29 @@ class ExecutionWorkspacePaths:
 class PreparedWorkspace:
     project_id: int
     execution_run_id: int
-    domain_name: str
     workspace_dir: Path
-    source_dir: Path | None
+    run_dir: Path
+    source_dir: Path
 
 
 @dataclass(frozen=True)
 class CommandResult:
     command: list[str]
+    cwd: Path
     exit_code: int
     stdout: str
     stderr: str
+    timed_out: bool = False
 
 
 class BaseWorkspaceRuntime(ABC):
     """
     Runtime abstraction for isolated execution workspaces.
+
+    Storage model:
+    - source_dir: canonical persisted project tree
+    - workspace_dir: editable overlay for the current execution run
+    - run_dir: ephemeral candidate tree used only for command execution / verification
     """
 
     @abstractmethod
@@ -48,16 +56,48 @@ class BaseWorkspaceRuntime(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def ensure_domain_storage(self, project_id: int, domain_name: str) -> Path:
-        raise NotImplementedError
-
-    @abstractmethod
     def prepare_workspace(
         self,
         project_id: int,
         execution_run_id: int,
-        domain_name: str,
     ) -> PreparedWorkspace:
+        """
+        Prepare an empty editable workspace for the execution run.
+
+        Important:
+        - This must NOT hydrate workspace_dir with the persisted source tree.
+        - workspace_dir is an overlay/editing area, not the executable candidate tree.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def materialize_run_tree(
+        self,
+        project_id: int,
+        execution_run_id: int,
+        overlay_paths: list[str] | None = None,
+    ) -> Path:
+        """
+        Create the ephemeral candidate run tree by:
+
+        1. copying the canonical source tree into run_dir
+        2. overlaying the current execution-run materialized files from workspace_dir
+
+        overlay_paths:
+        - when provided, only those relative paths from workspace_dir are overlaid
+        - when omitted, the implementation may overlay the full workspace contents
+          as a transitional fallback, but the preferred behavior is explicit overlay
+
+        The returned path is the run_dir root.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def cleanup_run_tree(self, project_id: int, execution_run_id: int) -> None:
+        """
+        Remove the ephemeral run_dir used for verification.
+        This must be safe to call whether or not run_dir exists.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -103,8 +143,13 @@ class BaseWorkspaceRuntime(ABC):
         self,
         project_id: int,
         execution_run_id: int,
-        domain_name: str,
     ) -> WorkspaceChangeSet:
+        """
+        Collect the overlay changes authored in workspace_dir relative to the canonical source_dir.
+
+        This should describe what the current execution run changed, not the contents
+        of the ephemeral run tree.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -112,7 +157,6 @@ class BaseWorkspaceRuntime(ABC):
         self,
         project_id: int,
         execution_run_id: int,
-        domain_name: str,
     ) -> str:
         raise NotImplementedError
 
@@ -121,8 +165,13 @@ class BaseWorkspaceRuntime(ABC):
         self,
         project_id: int,
         execution_run_id: int,
-        domain_name: str,
     ) -> Path:
+        """
+        Apply the execution-run overlay into the canonical source tree.
+
+        This must promote the authored result of workspace_dir, not a previously
+        materialized run_dir.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -137,4 +186,10 @@ class BaseWorkspaceRuntime(ABC):
         timeout_seconds: int = 120,
         allowed_exit_codes: set[int] | None = None,
     ) -> CommandResult:
+        """
+        Execute a command in the provided directory.
+
+        In the intended design, callers should pass the ephemeral run_dir here,
+        not workspace_dir and never the canonical source_dir.
+        """
         raise NotImplementedError

@@ -9,11 +9,9 @@ from app.execution_engine.agent_runtime import BaseAgentRuntime
 from app.execution_engine.contracts import (
     CHANGE_TYPE_CREATED,
     CHANGE_TYPE_MODIFIED,
-    ChangedFile,
     ExecutionRequest,
 )
 from app.execution_engine.execution_plan import (
-    STEP_KIND_APPLY_FILE_OPERATIONS,
     ExecutionStep,
 )
 from app.execution_engine.file_operations import (
@@ -58,8 +56,9 @@ Important execution scope rule:
 - The objective is to complete the task fully, not merely to edit a predefined subset of files.
 
 Operation integrity rules:
-- Use modify only for files that already exist in the workspace.
-- Use create only for files that do not yet exist in the workspace.
+- Use modify for files that already exist in the project candidate baseline
+  (either already present in the run overlay workspace or present in the persisted source baseline).
+- Use create only for files that do not exist in either the run overlay workspace or the persisted source baseline.
 - Do not return duplicate paths.
 """.strip()
 
@@ -68,6 +67,70 @@ def _append_files_read(state: ResolutionState, paths: list[str]) -> None:
     for path in paths:
         if path not in state.evidence.files_read:
             state.evidence.files_read.append(path)
+
+
+def _get_source_root_from_request(request: ExecutionRequest) -> str | None:
+    context = request.context
+    source_path = getattr(context, "source_path", None)
+    if source_path:
+        return str(source_path)
+
+    source_dir = getattr(context, "source_dir", None)
+    if source_dir:
+        return str(source_dir)
+
+    return None
+
+
+def _resolve_candidate_file_for_read(
+    *,
+    workspace_root: str,
+    source_root: str | None,
+    relative_path: str,
+) -> Path | None:
+    workspace_candidate = (Path(workspace_root).resolve() / relative_path).resolve()
+    workspace_root_path = Path(workspace_root).resolve()
+
+    try:
+        workspace_candidate.relative_to(workspace_root_path)
+    except ValueError as exc:
+        raise SubagentRejectedStepError(
+            f"Refusing to read related file outside workspace boundary: {relative_path}"
+        ) from exc
+
+    if workspace_candidate.exists() and workspace_candidate.is_file():
+        return workspace_candidate
+
+    if source_root:
+        source_root_path = Path(source_root).resolve()
+        source_candidate = (source_root_path / relative_path).resolve()
+        try:
+            source_candidate.relative_to(source_root_path)
+        except ValueError as exc:
+            raise SubagentRejectedStepError(
+                f"Refusing to read related file outside source boundary: {relative_path}"
+            ) from exc
+
+        if source_candidate.exists() and source_candidate.is_file():
+            return source_candidate
+
+    return None
+
+
+def _candidate_file_exists(
+    *,
+    workspace_root: str,
+    source_root: str | None,
+    relative_path: str,
+) -> bool:
+    return (
+        _resolve_candidate_file_for_read(
+            workspace_root=workspace_root,
+            source_root=source_root,
+            relative_path=relative_path,
+        )
+        is not None
+    )
 
 
 def _build_historical_context_summary(request: ExecutionRequest) -> str:
@@ -105,29 +168,59 @@ def _build_project_context_summary(request: ExecutionRequest) -> str:
         for item in request.context.related_tasks
     ]
 
+    source_root = _get_source_root_from_request(request)
+
     return f"""
 - relevant_files: {request.context.relevant_files}
 - key_decisions: {request.context.key_decisions}
 - related_tasks: {related}
 - allowed_paths: {request.allowed_paths}
 - blocked_paths: {request.blocked_paths}
+- workspace_overlay_root: {request.context.workspace_path}
+- source_baseline_root: {source_root}
 """.strip()
 
 
 def _build_workspace_inventory_context(
     *,
     workspace_root: str,
+    source_root: str | None,
     max_files: int = 500,
 ) -> str:
-    files = list_workspace_files(workspace_root, max_files=max_files)
-    if not files:
-        return "[workspace is currently empty]"
-    return "\n".join(f"- {path}" for path in files)
+    overlay_files = list_workspace_files(workspace_root, max_files=max_files)
+
+    baseline_files: list[str] = []
+    if source_root:
+        baseline_root = Path(source_root).resolve()
+        if baseline_root.exists():
+            for path in baseline_root.rglob("*"):
+                if path.is_file():
+                    baseline_files.append(path.relative_to(baseline_root).as_posix())
+            baseline_files = sorted(baseline_files)[:max_files]
+
+    overlay_section = (
+        "\n".join(f"- {path}" for path in overlay_files)
+        if overlay_files
+        else "[workspace overlay is currently empty]"
+    )
+    baseline_section = (
+        "\n".join(f"- {path}" for path in baseline_files)
+        if baseline_files
+        else "[source baseline is currently empty]"
+    )
+
+    return (
+        "Workspace overlay inventory:\n"
+        f"{overlay_section}\n\n"
+        "Source baseline inventory:\n"
+        f"{baseline_section}"
+    )
 
 
 def _build_related_file_context(
     *,
     workspace_root: str,
+    source_root: str | None,
     request: ExecutionRequest,
     max_files: int = 12,
 ) -> tuple[str, list[str]]:
@@ -158,19 +251,32 @@ def _build_related_file_context(
     files_read: list[str] = []
 
     for rel_path in selected:
-        abs_path = Path(workspace_root) / rel_path
         parts.append(f"- path: {rel_path}")
 
-        if abs_path.exists() and abs_path.is_file():
-            try:
-                content = read_text_file(str(abs_path))
-                files_read.append(rel_path)
-                parts.append("  content:")
-                parts.append(content)
-            except Exception as exc:
-                parts.append(f"  content_error: {str(exc)}")
-        else:
+        resolved = _resolve_candidate_file_for_read(
+            workspace_root=workspace_root,
+            source_root=source_root,
+            relative_path=rel_path,
+        )
+
+        if resolved is None:
+            parts.append("  source: [missing file]")
             parts.append("  content: [missing file]")
+            continue
+
+        try:
+            content = read_text_file(str(resolved))
+            files_read.append(rel_path)
+            source_label = "workspace_overlay"
+            if source_root:
+                source_candidate = (Path(source_root).resolve() / rel_path).resolve()
+                if resolved == source_candidate:
+                    source_label = "source_baseline"
+            parts.append(f"  source: {source_label}")
+            parts.append("  content:")
+            parts.append(content)
+        except Exception as exc:
+            parts.append(f"  content_error: {str(exc)}")
 
     return "\n".join(parts), files_read
 
@@ -179,11 +285,15 @@ def _build_user_prompt(
     request: ExecutionRequest,
     state: ResolutionState,
 ) -> tuple[str, list[str]]:
+    source_root = _get_source_root_from_request(request)
+
     workspace_inventory = _build_workspace_inventory_context(
         workspace_root=request.context.workspace_path,
+        source_root=source_root,
     )
     related_file_context, files_read = _build_related_file_context(
         workspace_root=request.context.workspace_path,
+        source_root=source_root,
         request=request,
     )
 
@@ -212,7 +322,7 @@ Project context:
 Historical task context:
 {historical_context_summary}
 
-Workspace file inventory:
+Repository inventory:
 {workspace_inventory}
 
 Related file content:
@@ -226,9 +336,11 @@ Current orchestration state:
 - evidence_notes: {state.evidence.notes}
 
 Important:
-- Decide which files must be created or modified to complete the task correctly.
-- Use existing repository structure when that is the natural fit.
-- If the workspace is empty, bootstrap the minimal coherent file set required by the task.
+- The workspace is an editable overlay for this execution run.
+- The source baseline is the persisted project tree.
+- When deciding create vs modify, reason against the project candidate baseline:
+  workspace overlay takes precedence, then source baseline.
+- If the overlay is empty, bootstrap the minimal coherent file set required by the task.
 - The listed files are initial context, not a hard boundary.
 - Prefer completeness and coherence over artificial file limits.
 - Keep the implementation conservative and scoped.
@@ -240,6 +352,7 @@ Important:
 def _validate_generated_files(
     *,
     workspace_root: str,
+    source_root: str | None,
     files: list[MaterializedFile],
 ) -> None:
     if not files:
@@ -265,16 +378,22 @@ def _validate_generated_files(
                 f"Refusing to materialize file outside workspace root: {rel_path}"
             )
 
-        exists = destination.exists()
+        exists_in_candidate_baseline = _candidate_file_exists(
+            workspace_root=workspace_root,
+            source_root=source_root,
+            relative_path=rel_path,
+        )
 
-        if item.operation == "modify" and not exists:
+        if item.operation == "modify" and not exists_in_candidate_baseline:
             raise SubagentRejectedStepError(
-                f"File '{rel_path}' does not exist, so operation must be 'create' instead of 'modify'."
+                f"File '{rel_path}' does not exist in the project candidate baseline, "
+                "so operation must be 'create' instead of 'modify'."
             )
 
-        if item.operation == "create" and exists:
+        if item.operation == "create" and exists_in_candidate_baseline:
             raise SubagentRejectedStepError(
-                f"File '{rel_path}' already exists, so operation must be 'modify' instead of 'create'."
+                f"File '{rel_path}' already exists in the project candidate baseline, "
+                "so operation must be 'modify' instead of 'create'."
             )
 
 
@@ -284,9 +403,6 @@ class CodeChangeAgent(BaseSubagent):
     def __init__(self, runtime: BaseAgentRuntime) -> None:
         self.runtime = runtime
 
-    def supports_step_kind(self, step_kind: str) -> bool:
-        return step_kind == STEP_KIND_APPLY_FILE_OPERATIONS
-
     def execute_step(
         self,
         *,
@@ -295,13 +411,37 @@ class CodeChangeAgent(BaseSubagent):
         step: ExecutionStep,
         state: ResolutionState,
     ) -> ResolutionState:
-        if not self.supports_step_kind(step.kind):
-            raise SubagentRejectedStepError(f"{self.name} does not support step kind '{step.kind}'")
+        if step.subagent_name != self.name:
+            raise SubagentRejectedStepError(
+                f"{self.name} received a step for subagent '{step.subagent_name}'."
+            )
 
         state.increment_materialization_attempts()
 
+        source_root = _get_source_root_from_request(request)
+
         user_prompt, files_read = _build_user_prompt(request, state)
-        _append_files_read(state, files_read)
+        for path in files_read:
+            resolved = _resolve_candidate_file_for_read(
+                workspace_root=request.context.workspace_path,
+                source_root=source_root,
+                relative_path=path,
+            )
+            source_label = None
+            if resolved is not None:
+                workspace_candidate = (
+                    Path(request.context.workspace_path).resolve() / path
+                ).resolve()
+                if resolved == workspace_candidate:
+                    source_label = "workspace_overlay"
+                else:
+                    source_label = "source_baseline"
+
+            state.evidence.add_file_read(
+                path=path,
+                producer=self.name,
+                source=source_label,
+            )
 
         schema = to_openai_strict_json_schema(FileMaterializationResult.model_json_schema())
         raw = self.runtime.generate_structured(
@@ -318,6 +458,7 @@ class CodeChangeAgent(BaseSubagent):
 
         _validate_generated_files(
             workspace_root=request.context.workspace_path,
+            source_root=source_root,
             files=materialization.files,
         )
 
@@ -332,8 +473,6 @@ class CodeChangeAgent(BaseSubagent):
             relative_paths=snapshot_paths,
         )
 
-        successfully_written_paths: list[str] = []
-
         try:
             for generated in ordered_generated_files:
                 absolute_path = write_text_file(
@@ -342,18 +481,22 @@ class CodeChangeAgent(BaseSubagent):
                     content=generated.content,
                 )
 
-                successfully_written_paths.append(generated.path)
-
                 change_type = (
                     CHANGE_TYPE_CREATED if generated.operation == "create" else CHANGE_TYPE_MODIFIED
                 )
 
-                state.evidence.changed_files.append(
-                    ChangedFile(path=generated.path, change_type=change_type)
+                state.evidence.add_changed_file(
+                    path=generated.path,
+                    change_type=change_type,
+                    producer=self.name,
                 )
-                state.evidence.notes.append(f"Wrote file {generated.path} at {absolute_path}")
-                state.evidence.notes.append(
-                    f"Rationale for {generated.path}: {generated.rationale}"
+                state.evidence.add_note(
+                    message=f"Wrote file {generated.path} at {absolute_path}",
+                    producer=self.name,
+                )
+                state.evidence.add_note(
+                    message=f"Rationale for {generated.path}: {generated.rationale}",
+                    producer=self.name,
                 )
 
         except Exception:
@@ -363,11 +506,15 @@ class CodeChangeAgent(BaseSubagent):
             )
             raise
 
-        state.evidence.notes.extend(materialization.notes)
+        for note in materialization.notes:
+            state.evidence.add_note(
+                message=note,
+                producer=self.name,
+            )
+
         state.add_risk_flags(materialization.warnings)
         state.add_note(
             f"Artifact materialization completed for {len(ordered_generated_files)} files."
         )
-        state.phase = "completion"
 
         return state

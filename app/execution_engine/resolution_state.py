@@ -67,6 +67,4 @@ class ResolutionState(BaseModel):
         self.phase = "execution"
 
     def has_outputs(self) -> bool:
-        return bool(
-            self.evidence.changed_files or self.evidence.commands or self.evidence.artifacts_created
-        )
+        return self.evidence.has_outputs()

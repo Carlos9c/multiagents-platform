@@ -304,9 +304,6 @@ class ContextSelectionAgent(BaseSubagent):
     def __init__(self, runtime: BaseAgentRuntime) -> None:
         self.runtime = runtime
 
-    def supports_step_kind(self, step_kind: str) -> bool:
-        return step_kind == "inspect_context"
-
     def execute_step(
         self,
         *,
@@ -336,12 +333,18 @@ class ContextSelectionAgent(BaseSubagent):
             state.set_historical_task_selection(
                 HistoricalTaskSelectionResult(selected_task_runs=[])
             )
+
             enriched_request = adapt_execution_request(
                 db=db,
                 request=state.execution_request,
                 context_selection_result=state.historical_task_selection,
             )
             state.replace_execution_request(enriched_request)
+
+            state.evidence.add_note(
+                message="No completed historical tasks available. Context selection skipped.",
+                producer=self.name,
+            )
             state.add_note("No completed historical tasks available. Context selection skipped.")
             state.mark_context_selected()
             return state
@@ -360,6 +363,12 @@ class ContextSelectionAgent(BaseSubagent):
         )
         state.replace_execution_request(enriched_request)
 
+        selected_count = len(selection_result.selected_task_runs)
+
+        state.evidence.add_note(
+            message=f"Historical context selection completed. selected_task_runs={selected_count}.",
+            producer=self.name,
+        )
         state.add_note("Historical context selection completed.")
         state.mark_context_selected()
         return state

@@ -51,15 +51,21 @@ def _patch_workspace_runtime(monkeypatch, *, promoted_state: dict | None = None)
     def _factory(storage_service):
         return types.SimpleNamespace(
             prepare_workspace=lambda **kwargs: types.SimpleNamespace(
+                project_id=kwargs["project_id"],
+                execution_run_id=kwargs["execution_run_id"],
                 workspace_dir=".",
+                run_dir=".",
                 source_dir=".",
-                logs_dir=".",
-                outputs_dir=".",
             ),
             promote_workspace_to_source=lambda **kwargs: (
                 promoted_state.__setitem__("called", True) if promoted_state is not None else None
             ),
         )
+
+    monkeypatch.setattr(
+        "app.services.task_execution_service.LocalWorkspaceRuntime",
+        _factory,
+    )
 
     monkeypatch.setattr(
         "app.services.task_execution_service.LocalWorkspaceRuntime",

@@ -15,6 +15,9 @@ from app.schemas.recovery_assignment import (
     RecoveryAssignmentInput,
     RecoveryAssignmentLLMOutput,
 )
+from app.services.execution_plan_patch_service import (
+    normalize_execution_plan_terminal_invariants,
+)
 
 CompiledBatchAssignmentMode = Literal[
     "new_patch_batch",
@@ -811,11 +814,13 @@ def compile_recovery_assignment_plan(
         ]
     )
 
+    normalized_plan = normalize_execution_plan_terminal_invariants(plan=current_plan)
+
     return CompiledRecoveryAssignmentPlan(
         strategy=assignment_output.strategy,
         requires_replan=False,
         compiled_cluster_assignments=compiled_assignments,
-        patched_execution_plan=current_plan,
+        patched_execution_plan=normalized_plan,
         assigned_task_ids=assigned_task_ids,
         unassigned_task_ids=[],
         notes=list(assignment_output.notes),
