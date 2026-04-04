@@ -4,16 +4,16 @@
 
 Este proyecto implementa un sistema de ejecución autónoma de tareas basado en agentes, con un foco fuerte en:
 
-- Ejecución controlada de tareas atómicas
-- Validación estructurada de resultados
-- Persistencia consistente de artefactos
-- Trazabilidad completa del flujo de trabajo
-- Recuperación determinista ante fallos
-- Verificación repo-local explícita mediante evidencia operacional
+- Ejecución controlada de tareas atómicas  
+- Validación estructurada de resultados  
+- Persistencia consistente de artefactos  
+- Trazabilidad completa del flujo de trabajo  
+- Recuperación determinista ante fallos  
+- Verificación repo-local explícita mediante evidencia operacional  
 
 Flujo principal:
 
-Task → ExecutionRun → Execution Orchestrator → Subagents → Validation → Artifact → Task closure → Hierarchy reconciliation
+**Task → ExecutionRun → Execution Orchestrator → Subagents → Validation → Artifact → Task closure → Hierarchy reconciliation**
 
 ---
 
@@ -23,77 +23,96 @@ Task → ExecutionRun → Execution Orchestrator → Subagents → Validation �
 - Ejecuta tareas mediante orquestador + subagentes
 - Produce `ExecutionResult` con evidencia acumulada
 
-Subagentes:
-- context_selection_agent
-- code_change_agent
-- command_runner_agent
+Subagentes actuales:
+- `context_selection_agent`
+- `code_change_agent`
+- `command_runner_agent`
 
 ---
 
 ### 2. Orchestrator
 - Decide:
-  - call_subagent
-  - finish
-  - reject
+  - `call_subagent`
+  - `finish`
+  - `reject`
+  - `invalid` (guardrail, no decisión operativa real)
+
 - Fases:
-  - discovery
-  - execution
-- Loop con budget
-- Diferencia:
-  - DECISION_REJECT → no hay ruta
-  - DECISION_INVALID → error, sigue loop
+  - `discovery`
+  - `execution`
+
+- Loop controlado por budget
+
+- Notas clave:
+  - `reject` → salida válida (no ejecutable)
+  - `invalid` → error del LLM, consume budget y continúa
 
 ---
 
 ### 3. Task Execution Service
 - Orquesta:
-  - run
+  - creación de run
   - ejecución
   - validación
   - persistencia
-- Garantiza atomicidad
+  - promoción de workspace
+  - reconciliación jerárquica
+
+- Responsabilidad crítica:
+  - **garantizar atomicidad real del cierre**
+  - degradar correctamente en caso de fallo
 
 ---
 
 ### 4. Validation Service
-- Construye contexto
-- Router → dispatcher
+- Construye contexto de validación
+- Router → Dispatcher
 - Devuelve `ValidationResult`
-- Consume evidencia, no ejecuta comandos
+
+Características:
+- Consume evidencia
+- No ejecuta comandos
+- Decide estado final de la tarea
+
+⚠️ Estado actual:
+- **en revisión activa**
+- inconsistencias detectadas en integración con execution_service
 
 ---
 
 ### 5. Artifact System
-- Fuente de verdad
-- Resultado validado = cierre real
-- Base de auditoría
+- Fuente de verdad del sistema
+- Un resultado validado define el estado final
+- Base de auditoría completa
 
 ---
 
 ### 6. Workspace Runtime
 
 Estructura:
-
 project/
-- domain_data/source
-- executions/<run_id>/
-  - workspace
-  - run
-  - logs
-  - outputs
+├── domain_data/source
+├── executions/<run_id>/
+│ ├── workspace
+│ ├── run
+│ ├── logs
+│ └── outputs
+
 
 Semántica:
-- source = base persistida
-- workspace = cambios
-- run = entorno efímero de verificación
-- run se elimina siempre
-- promoción = overlay sobre source
+
+- `source` → estado persistido del proyecto  
+- `workspace` → overlay editable por ejecución  
+- `run` → entorno efímero para verificación  
+- `run` siempre se elimina  
+- promoción = overlay → source  
 
 ---
 
 ### 7. Task Hierarchy
 - Propagación determinista
 - Sin efectos parciales
+- Consistencia post-ejecución obligatoria
 
 ---
 
@@ -102,52 +121,70 @@ Semántica:
 - Evaluation
 - Plan mutation
 
-Estado: en reconstrucción
+Estado: **parcialmente reconstruido**
 
 ---
 
 ## ✅ Estado actual
 
-### Consistencia
-- Sin commits intermedios
-- rollback correcto
+### 🧩 Contratos y arquitectura
 
-### Atomicidad
-- cierre = atómico + consistente
-
-### Contratos
-- Orchestrator → coordina
-- Subagents → producen evidencia
-- Validation → decide
-- Artifact → fija verdad
+- Orchestrator desacoplado correctamente
+- Subagentes alineados con contratos nuevos
+- Eliminación de acciones abstractas legacy
+- Flujo basado en decisiones reales (`call_subagent`, etc.)
 
 ---
 
-### Orquestación
-- Ya no hay acciones abstractas
-- Se llaman subagentes reales
-- Simplificación clara del loop
+### ⚙️ Ejecución
+
+- Flujo execution → validation integrado
+- Persistencia estructurada de:
+  - changed_files
+  - commands
+  - artifacts
+- Evidencia acumulativa multi-agente
 
 ---
 
-### Workspace
-- Eliminado modelo incorrecto previo
-- run tree efímero correcto
-- evita contaminación y loops
+### 🗂️ Workspace
+
+- Modelo correcto implementado:
+  - overlay + baseline + run efímero
+- Eliminado modelo previo inconsistente
+- Aislamiento garantizado entre ejecuciones
 
 ---
 
-### Evidencia
-- acumulativa
-- multi-agente
-- usable por validación
+### 🧪 Tests
+
+- Tests del orchestrator → ✅ verdes  
+- Tests de subagentes → ✅ verdes  
+- Tests de command_tool → ✅ corregidos  
+
+⚠️ Problema actual:
+- **tests de invariantes de ejecución fallando**
+- causa: integración con validation
 
 ---
 
-### Post-batch
-- normalización corregida
-- tests verdes en esa parte
-- flujo completo pendiente
+### ⚠️ Problema crítico actual
+
+Hay una desalineación entre:
+
+- `ExecutionResult` (salida del execution engine)
+- `ValidationService`
+- `TaskExecutionService`
+
+Síntomas:
+
+- ejecuciones `completed/partial` degradan a `failed`
+- artifacts de validación no se persisten
+- promoción de workspace no ocurre
+- tests de invariantes fallan masivamente
+
+👉 Esto indica que:
+**la validación no está respetando el contrato esperado por el execution flow**
 
 ---
 
@@ -155,140 +192,161 @@ Estado: en reconstrucción
 
 ### Ejecución
 - no estados inválidos
-- no repetir subagente
-- primer paso = context
-- finish requiere evidencia
-- invalid consume budget
+- primer paso → context selection
+- `finish` requiere evidencia
+- `invalid` consume budget, no rompe flujo
+
+---
 
 ### Workspace
 - run siempre efímero
 - source único
-- sin legacy partitions
-
-### Validación
-- coherencia decisión/estado
-- no ejecuta comandos
-
-### Persistencia
-- 1 run → 1 artifact
-- task terminal ⇔ artifact
-
-### Degradación
-- fallo limpio
-- sin residuos
-
-### Plan
-- stage_closure correcto
-- consistencia batch
+- sin contaminación entre ejecuciones
 
 ---
 
-## 🧪 Tests
+### Validación
+- decide estado final
+- no ejecuta comandos
+- debe ser determinista respecto a evidencia
 
-Cubren:
+---
 
-- flujo vertical
-- invariantes
-- workspace
-- orchestrator
-- plan mutation
+### Persistencia
+- 1 run → 1 validation artifact
+- task terminal ⇔ artifact existente
 
-Estado: core en verde
+---
+
+### Degradación
+- fallo → estado consistente
+- sin residuos intermedios
 
 ---
 
 ## 🚀 Últimos avances
 
-- Nuevo modelo de orquestador
-- Eliminación de actions legacy
-- Introducción:
-  - CALL
-  - FINISH
-  - REJECT
-  - INVALID
-- Eliminación de `kind`
-- Rediseño workspace:
-  - source / workspace / run
-- run_command con árbol efímero
-- limpieza automática
-- normalización de plan
-- separación clara de errores vs decisiones
+- Rediseño completo del orchestrator
+- Eliminación de `kind` y acciones legacy
+- Introducción formal de:
+  - `call_subagent`
+  - `finish`
+  - `reject`
+  - `invalid`
+- Rediseño del workspace runtime
+- Implementación de `command_runner_agent`
+- Endurecimiento de `run_command`
+- Evidencia estructurada por tipo:
+  - files_read
+  - changed_files
+  - commands
+- Separación clara entre:
+  - ejecución
+  - validación
+  - persistencia
+
+---
+
+## 🧹 Limpieza realizada
+
+- eliminación de lógica heurística inválida (`relevant_files` artificial)
+- eliminación de legacy en tests inconsistentes
+- simplificación del flujo del orchestrator
+- reducción de coupling entre componentes
 
 ---
 
 ## 🧹 Limpieza pendiente
 
-- eliminar workers
-- eliminar restos legacy
-- consolidar tests
-- simplificar evidencia
+- eliminar carpeta `workers`
+- eliminar restos legacy en services/tests
+- simplificar serialización de evidencia
+- unificar contratos de contexto
 
 ---
 
 ## 🔭 Próximos pasos
 
-### Alta prioridad
+### 🔴 Alta prioridad
 
-1. run_command end-to-end
-- comando + cwd correctos
-- evidencia persistida
-- validación consume evidencia
-
-2. Mejorar evidencia
-- estructura clara
-- trazabilidad por agente
-
-3. post_batch_service
-- recovery → evaluation → mutation
-- coherencia total
-
-4. manual review
-- separar:
-  - user clarification
-  - gap interno
-  - constraint externo
+### 1. Arreglar Validation Service (CRÍTICO)
+- alinear con `ExecutionResult`
+- respetar evidencia generada
+- evitar degradación incorrecta a `failed`
+- asegurar:
+  - persistencia de artifact
+  - coherencia decisión → estado
 
 ---
 
-### Media prioridad
-
-5. auditoría de validación  
-6. tests end-to-end reales  
-7. simplificación artifacts  
+### 2. End-to-end execution flow
+- execution → validation → artifact → closure
+- sin fallback implícito a failure
+- invariantes cumplidos
 
 ---
 
-### Baja prioridad
+### 3. Evidencia
+- revisar formato final:
+  - strings vs estructuras
+- coherencia entre:
+  - runtime
+  - persistencia
+  - validación
 
-8. refactor estructural  
-9. configuración y portabilidad  
+---
+
+### 4. run_command + validación
+- asegurar que:
+  - comandos generan evidencia usable
+  - validación la consume correctamente
+
+---
+
+### 🟠 Media prioridad
+
+5. Post-batch completo  
+6. Tests end-to-end reales  
+7. Auditoría de validación  
+
+---
+
+### 🟡 Baja prioridad
+
+8. Refactor estructural  
+9. Configuración y portabilidad  
 
 ---
 
 ## 🧠 Filosofía
 
-- La verdad es el resultado validado
-- Validación no re-ejecuta
-- Usuario no tapa fallos del sistema
-- Sin estados implícitos
-- Sin efectos parciales
-- Evidencia acumulativa y auditable
-- Orquestador coordina agentes reales
+- La verdad es el resultado validado  
+- Validación no re-ejecuta  
+- Usuario no corrige errores del sistema  
+- Sin estados implícitos  
+- Sin efectos parciales  
+- Evidencia acumulativa y auditable  
+- Orquestador coordina, no ejecuta  
 
 ---
 
 ## 📌 Estado final
 
-Core:
-- estable
-- coherente
-- alineado con subagentes
-- sin legacy crítico
+### Core
+- arquitectura sólida  
+- subagentes funcionando  
+- orquestador estable  
+- workspace correcto  
 
-Post-batch:
-- bien definido
-- pendiente de cierre
+### Problema actual
+- validación rompe el cierre de ejecución  
 
-Siguiente foco:
+### Siguiente foco real
 
-cerrar run_command + mejorar evidencia + completar recovery y planificación dinámica
+👉 **Arreglar validation para desbloquear el sistema completo**
+
+Después:
+
+- consolidar invariantes  
+- cerrar post-batch  
+- avanzar a sistema autónomo completo  
