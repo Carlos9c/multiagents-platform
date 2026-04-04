@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import types
 
@@ -14,6 +16,7 @@ from app.execution_engine.contracts import (
     ExecutionEvidence,
     ExecutionRequest,
     ExecutionResult,
+    NoteEvidence,
     ProjectExecutionContext,
 )
 from app.models.artifact import Artifact
@@ -106,15 +109,22 @@ def _patch_execution_request(
             task_id=task.id,
             project_id=task.project_id,
             execution_run_id=execution_run_id,
-            executor_type=resolved_executor_type,
             task_title=task.title,
             task_description=task.description,
             task_summary=task.summary,
             objective=task.objective,
+            proposed_solution=task.proposed_solution,
+            implementation_notes=task.implementation_notes,
+            implementation_steps=task.implementation_steps,
             acceptance_criteria=task.acceptance_criteria,
+            tests_required=task.tests_required,
             technical_constraints=task.technical_constraints,
             out_of_scope=task.out_of_scope,
+            executor_type=resolved_executor_type,
+            success_criteria=[],
+            constraints=[],
             allowed_paths=list(allowed_paths or []),
+            blocked_paths=[],
             context=ProjectExecutionContext(
                 project_id=task.project_id,
                 workspace_path=workspace_path,
@@ -123,6 +133,7 @@ def _patch_execution_request(
                 key_decisions=["Keep the public interface stable."],
                 related_tasks=[],
             ),
+            historical_context=None,
         )
 
     monkeypatch.setattr(
@@ -229,17 +240,31 @@ def _build_engine_result(
                 ChangedFile(
                     path="app_service.py",
                     change_type=CHANGE_TYPE_MODIFIED,
+                    producer="code_change_agent",
                 )
             ],
             commands=[
                 CommandExecution(
                     command="pytest -q",
+                    producer="command_runner_agent",
+                    cwd=".",
                     exit_code=0,
                     stdout="1 passed",
                     stderr="",
+                    timed_out=False,
+                    verification_goal="Verify the execution output still satisfies the task.",
+                    rationale="Run the narrowest repository-local verification command.",
+                    validation_claims=["tests_passed"],
+                    expected_exit_codes=[0],
+                    observed_outcome_summary="Command finished with exit_code=0.",
                 )
             ],
-            notes=["Observed repository changes."],
+            notes=[
+                NoteEvidence(
+                    message="Observed repository changes.",
+                    producer="code_change_agent",
+                )
+            ],
             artifacts_created=[],
         ),
     )

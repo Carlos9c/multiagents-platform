@@ -21,10 +21,6 @@ class BaseSubagent(ABC):
     name: str
 
     @abstractmethod
-    def supports_step_kind(self, step_kind: str) -> bool:
-        raise NotImplementedError
-
-    @abstractmethod
     def execute_step(
         self,
         *,

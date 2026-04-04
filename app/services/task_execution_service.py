@@ -190,14 +190,16 @@ def _store_task_execution_agent_sequence(
 
 
 def _serialize_files_read_from_engine_result(result) -> str | None:
-    files_read = list(result.evidence.files_read or [])
+    files_read = [item.model_dump(mode="json") for item in (result.evidence.files_read or [])]
     if not files_read:
         return None
     return json.dumps(files_read, ensure_ascii=False)
 
 
 def _serialize_change_dependencies_from_engine_result(result) -> str | None:
-    change_dependencies = dict(result.evidence.change_dependencies or {})
+    change_dependencies = [
+        item.model_dump(mode="json") for item in (result.evidence.change_dependencies or [])
+    ]
     if not change_dependencies:
         return None
     return json.dumps(change_dependencies, ensure_ascii=False)
@@ -211,10 +213,12 @@ def _serialize_changed_files_from_engine_result(result) -> str | None:
 
 
 def _extract_artifacts_created_from_engine_result(result) -> str | None:
-    artifact_refs = list(result.evidence.artifacts_created or [])
-    if not artifact_refs:
+    artifacts_created = [
+        item.artifact_key for item in (result.evidence.artifacts_created or []) if item.artifact_key
+    ]
+    if not artifacts_created:
         return None
-    return " | ".join(artifact_refs)
+    return " | ".join(artifacts_created)
 
 
 def _prepare_execution_workspace(

@@ -61,13 +61,23 @@ def test_run_command_rejects_unknown_executable(tmp_path: Path):
         )
 
 
-def test_run_command_rejects_path_argument_outside_workspace(tmp_path: Path):
+def test_run_command_rejects_nonexistent_working_directory(tmp_path: Path):
+    missing_dir = tmp_path / "missing-dir"
+
+    with pytest.raises(FileNotFoundError, match="Working directory does not exist"):
+        run_command(
+            command=f'{sys.executable} -c "print(1)"',
+            cwd=str(missing_dir),
+        )
+
+
+def test_run_command_rejects_path_argument_outside_execution_tree(tmp_path: Path):
     outside_file = tmp_path.parent / "outside.txt"
     outside_file.write_text("hello", encoding="utf-8")
 
-    with pytest.raises(CommandToolError, match="outside the workspace"):
+    with pytest.raises(CommandToolError, match="outside the execution tree"):
         run_command(
-            command=f'"{sys.executable}" "{outside_file}"',
+            command=f'"{sys.executable}" "../outside.txt"',
             cwd=str(tmp_path),
         )
 

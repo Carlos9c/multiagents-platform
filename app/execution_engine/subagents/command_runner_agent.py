@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy.orm import Session
 
 from app.execution_engine.agent_runtime import BaseAgentRuntime
@@ -47,9 +47,65 @@ class CommandVerificationPlan(BaseModel):
     validation_claims: list[str] = Field(default_factory=list)
     expected_exit_codes: list[int] = Field(default_factory=lambda: [0])
 
+    @model_validator(mode="after")
+    def validate_shape(self) -> "CommandVerificationPlan":
+        self.command = self.command.strip()
+        self.cwd_relative_path = (self.cwd_relative_path or ".").strip() or "."
+        self.verification_goal = self.verification_goal.strip()
+        self.rationale = self.rationale.strip()
+
+        if not self.command:
+            raise ValueError("command must not be empty.")
+
+        if not self.verification_goal:
+            raise ValueError("verification_goal must not be empty.")
+
+        if not self.rationale:
+            raise ValueError("rationale must not be empty.")
+
+        if not self.expected_exit_codes:
+            raise ValueError("expected_exit_codes must not be empty.")
+
+        normalized_codes: list[int] = []
+        seen_codes: set[int] = set()
+        for code in self.expected_exit_codes:
+            if not isinstance(code, int):
+                raise ValueError("expected_exit_codes must contain integers only.")
+            if code < 0:
+                raise ValueError("expected_exit_codes must contain non-negative integers only.")
+            if code not in seen_codes:
+                seen_codes.add(code)
+                normalized_codes.append(code)
+
+        self.expected_exit_codes = normalized_codes
+        self.validation_claims = [
+            claim.strip()
+            for claim in self.validation_claims
+            if isinstance(claim, str) and claim.strip()
+        ]
+
+        return self
+
 
 def _build_run_tree_inventory(run_dir: Path, *, max_files: int = 500) -> list[str]:
     return list_workspace_files(str(run_dir), max_files=max_files)
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _contains_disallowed_shell_constructs(command: str) -> bool:
+    disallowed_tokens = [
+        "&&",
+        "||",
+        "|",
+        ">",
+        ">>",
+        "<",
+        ";",
+    ]
+    return any(token in command for token in disallowed_tokens)
 
 
 def _build_command_planning_prompt(
@@ -62,9 +118,10 @@ def _build_command_planning_prompt(
     inventory = _build_run_tree_inventory(run_dir)
     inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
 
-    changed_files = [item.model_dump() for item in state.evidence.changed_files]
-    files_read = [item.model_dump() for item in state.evidence.files_read]
-    commands = [item.model_dump() for item in state.evidence.commands]
+    changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
+    files_read = [item.model_dump(mode="json") for item in state.evidence.files_read]
+    commands = [item.model_dump(mode="json") for item in state.evidence.commands]
+    notes = [item.message for item in state.evidence.notes if item.message]
 
     return f"""
 Task:
@@ -90,6 +147,7 @@ Accumulated execution evidence so far:
 - changed_files: {changed_files}
 - files_read: {files_read}
 - prior_commands: {commands}
+- notes: {notes}
 - risk_flags: {state.risk_flags}
 - step_notes: {state.step_notes}
 
@@ -125,6 +183,13 @@ def _resolve_command_cwd(run_dir: Path, cwd_relative_path: str) -> Path:
     return candidate
 
 
+def _validate_planned_command(plan: CommandVerificationPlan) -> None:
+    if _contains_disallowed_shell_constructs(plan.command):
+        raise SubagentRejectedStepError(
+            "Planned command contains disallowed shell constructs such as chaining, pipes, or redirection."
+        )
+
+
 class CommandRunnerAgent(BaseSubagent):
     name = "command_runner_agent"
 
@@ -154,11 +219,14 @@ class CommandRunnerAgent(BaseSubagent):
         )
 
         try:
-            return CommandVerificationPlan.model_validate(raw)
+            plan = CommandVerificationPlan.model_validate(raw)
         except ValidationError as exc:
             raise SubagentRejectedStepError(
                 f"Invalid command verification plan output: {str(exc)}"
             ) from exc
+
+        _validate_planned_command(plan)
+        return plan
 
     def execute_step(
         self,
@@ -173,8 +241,16 @@ class CommandRunnerAgent(BaseSubagent):
                 f"{self.name} received a step for subagent '{step.subagent_name}'."
             )
 
-        overlay_paths = [item.path for item in state.evidence.changed_files] or None
+        overlay_paths = (
+            _dedupe_preserve_order(
+                [item.path for item in state.evidence.changed_files if item.path]
+            )
+            or None
+        )
+
         run_dir: Path | None = None
+        command_cwd: Path | None = None
+        plan: CommandVerificationPlan | None = None
 
         try:
             run_dir = self.workspace_runtime.materialize_run_tree(
@@ -189,11 +265,6 @@ class CommandRunnerAgent(BaseSubagent):
                 state=state,
                 run_dir=run_dir,
             )
-
-            if not plan.command or not plan.command.strip():
-                raise SubagentRejectedStepError(
-                    "Command verification plan returned an empty command."
-                )
 
             command_cwd = _resolve_command_cwd(run_dir, plan.cwd_relative_path)
 
@@ -219,20 +290,31 @@ class CommandRunnerAgent(BaseSubagent):
             except Exception:
                 pass
 
+        timed_out = result.exit_code == 124
+        exit_code_matched_expectation = result.exit_code in plan.expected_exit_codes
+
         observed_outcome_summary = (
-            f"Command finished with exit_code={result.exit_code}."
-            if result.exit_code != 124
-            else "Command timed out."
+            "Command timed out."
+            if timed_out
+            else (
+                f"Command finished with exit_code={result.exit_code}, "
+                f"which matched expected_exit_codes={plan.expected_exit_codes}."
+                if exit_code_matched_expectation
+                else (
+                    f"Command finished with exit_code={result.exit_code}, "
+                    f"which did not match expected_exit_codes={plan.expected_exit_codes}."
+                )
+            )
         )
 
         state.evidence.add_command_execution(
             command=result.command,
             producer=self.name,
-            cwd=str(command_cwd),
+            cwd=plan.cwd_relative_path,
             exit_code=result.exit_code,
             stdout=result.stdout,
             stderr=result.stderr,
-            timed_out=(result.exit_code == 124),
+            timed_out=timed_out,
             verification_goal=plan.verification_goal,
             rationale=plan.rationale,
             validation_claims=plan.validation_claims,
@@ -247,5 +329,15 @@ class CommandRunnerAgent(BaseSubagent):
             ),
             producer=self.name,
         )
+
+        if not exit_code_matched_expectation:
+            state.add_risk_flags([f"command_exit_code_unexpected:{result.exit_code}"])
+            state.evidence.add_note(
+                message=(
+                    f"Observed exit_code={result.exit_code} did not match "
+                    f"expected_exit_codes={plan.expected_exit_codes} for command '{plan.command}'."
+                ),
+                producer=self.name,
+            )
 
         return state

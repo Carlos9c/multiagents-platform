@@ -24,7 +24,6 @@ from app.execution_engine.tools.context_builder_tool import (
 )
 from app.models.project import Project
 from app.models.task import Task
-from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT = """
@@ -115,7 +114,7 @@ def _catalog_entry_to_prompt_payload(
     }
 
 
-def _build_historical_task_selection_user_prompt(
+def _build_historical_task_selection_base_prompt(
     *,
     current_task: Task,
     catalog: list[HistoricalTaskCatalogEntry],
@@ -189,22 +188,55 @@ Important:
 """.strip()
 
 
+def _build_historical_task_selection_user_prompt(
+    *,
+    current_task: Task,
+    catalog: list[HistoricalTaskCatalogEntry],
+    project_name: str,
+    project_description: str,
+    project_context_excerpt: str | None = None,
+) -> str:
+    return _build_historical_task_selection_base_prompt(
+        current_task=current_task,
+        catalog=catalog,
+        project_name=project_name,
+        project_description=project_description,
+        project_context_excerpt=project_context_excerpt,
+    )
+
+
 def _build_historical_task_selection_retry_prompt(
     *,
+    current_task: Task,
+    catalog: list[HistoricalTaskCatalogEntry],
     project_name: str,
-    current_task_title: str,
     validation_error: str,
 ) -> str:
     return f"""
 Project name: {project_name}
-Current atomic task title: {current_task_title}
+
+Current atomic task:
+{json.dumps(_task_to_prompt_payload(current_task), ensure_ascii=False, indent=2)}
+
+Completed historical task catalog:
+{json.dumps([_catalog_entry_to_prompt_payload(entry) for entry in catalog], ensure_ascii=False, indent=2)}
 
 Your previous output was invalid.
 
 Validation error:
 {validation_error}
 
-You must correct the output and return valid JSON matching the schema.
+Return ONLY JSON with this exact shape:
+{{
+  "selected_task_runs": [
+    {{
+      "task_id": 123,
+      "execution_run_id": 456,
+      "selection_rule": "same_functional_surface",
+      "selection_reason": "Concrete operational reason"
+    }}
+  ]
+}}
 
 Important corrections:
 - selection is binary: a task/run pair enters or does not enter
@@ -220,6 +252,7 @@ Important corrections:
   - direct_historical_dependency
   - required_operational_context
 - do not invent task ids or execution run ids
+- select only from the provided catalog
 - do not include extra keys
 - return only JSON matching the schema
 """.strip()
@@ -247,62 +280,72 @@ def _validate_historical_task_selection(
     return result
 
 
-def call_context_selection_model(
-    *,
-    current_task: Task,
-    project: Project,
-    context_input: ContextBuilderResult,
-) -> HistoricalTaskSelectionResult:
-    provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(HistoricalTaskSelectionResult.model_json_schema())
-
-    first_user_prompt = _build_historical_task_selection_user_prompt(
-        current_task=current_task,
-        catalog=context_input.completed_task_catalog,
-        project_name=project.name,
-        project_description=project.description or project.name,
-        project_context_excerpt=context_input.project_context_excerpt,
-    )
-
-    raw = provider.generate_structured(
-        system_prompt=HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT,
-        user_prompt=first_user_prompt,
-        schema_name="historical_task_selection_result",
-        json_schema=strict_schema,
-    )
-
-    try:
-        result = HistoricalTaskSelectionResult.model_validate(raw)
-        return _validate_historical_task_selection(
-            result,
-            catalog=context_input.completed_task_catalog,
-        )
-    except (ValidationError, SubagentRejectedStepError) as exc:
-        retry_user_prompt = _build_historical_task_selection_retry_prompt(
-            project_name=project.name,
-            current_task_title=current_task.title,
-            validation_error=str(exc),
-        )
-
-        raw_retry = provider.generate_structured(
-            system_prompt=HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT,
-            user_prompt=retry_user_prompt,
-            schema_name="historical_task_selection_result",
-            json_schema=strict_schema,
-        )
-
-        result_retry = HistoricalTaskSelectionResult.model_validate(raw_retry)
-        return _validate_historical_task_selection(
-            result_retry,
-            catalog=context_input.completed_task_catalog,
-        )
-
-
 class ContextSelectionAgent(BaseSubagent):
     name = "context_selection_agent"
 
     def __init__(self, runtime: BaseAgentRuntime) -> None:
         self.runtime = runtime
+
+    def _call_context_selection_model(
+        self,
+        *,
+        current_task: Task,
+        project: Project,
+        context_input: ContextBuilderResult,
+    ) -> HistoricalTaskSelectionResult:
+        strict_schema = to_openai_strict_json_schema(
+            HistoricalTaskSelectionResult.model_json_schema()
+        )
+
+        first_user_prompt = _build_historical_task_selection_user_prompt(
+            current_task=current_task,
+            catalog=context_input.completed_task_catalog,
+            project_name=project.name,
+            project_description=project.description or project.name,
+            project_context_excerpt=context_input.project_context_excerpt,
+        )
+
+        raw = self.runtime.generate_structured(
+            system_prompt=HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT,
+            user_prompt=first_user_prompt,
+            schema_name="historical_task_selection_result",
+            json_schema=strict_schema,
+        )
+
+        try:
+            result = HistoricalTaskSelectionResult.model_validate(raw)
+            return _validate_historical_task_selection(
+                result,
+                catalog=context_input.completed_task_catalog,
+            )
+        except (ValidationError, SubagentRejectedStepError) as exc:
+            retry_user_prompt = _build_historical_task_selection_retry_prompt(
+                current_task=current_task,
+                catalog=context_input.completed_task_catalog,
+                project_name=project.name,
+                project_description=project.description or project.name,
+                project_context_excerpt=context_input.project_context_excerpt,
+                validation_error=str(exc),
+            )
+
+            raw_retry = self.runtime.generate_structured(
+                system_prompt=HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT,
+                user_prompt=retry_user_prompt,
+                schema_name="historical_task_selection_result",
+                json_schema=strict_schema,
+            )
+
+            try:
+                result_retry = HistoricalTaskSelectionResult.model_validate(raw_retry)
+            except ValidationError as retry_exc:
+                raise SubagentRejectedStepError(
+                    f"Invalid historical task selection output after retry: {str(retry_exc)}"
+                ) from retry_exc
+
+            return _validate_historical_task_selection(
+                result_retry,
+                catalog=context_input.completed_task_catalog,
+            )
 
     def execute_step(
         self,
@@ -311,17 +354,24 @@ class ContextSelectionAgent(BaseSubagent):
         request: ExecutionRequest,
         step: ExecutionStep,
         state: ResolutionState,
-    ):
-        current_task: Task | None = db.get(Task, request.task_id)
-        if current_task is None:
+    ) -> ResolutionState:
+        if step.subagent_name != self.name:
             raise SubagentRejectedStepError(
-                f"Task {request.task_id} not found during context selection."
+                f"{self.name} received a step for subagent '{step.subagent_name}'."
             )
 
-        project: Project | None = db.get(Project, request.project_id)
+        current_request = state.execution_request
+
+        current_task: Task | None = db.get(Task, current_request.task_id)
+        if current_task is None:
+            raise SubagentRejectedStepError(
+                f"Task {current_request.task_id} not found during context selection."
+            )
+
+        project: Project | None = db.get(Project, current_request.project_id)
         if project is None:
             raise SubagentRejectedStepError(
-                f"Project {request.project_id} not found during context selection."
+                f"Project {current_request.project_id} not found during context selection."
             )
 
         context_input = build_context_selection_input(
@@ -330,14 +380,13 @@ class ContextSelectionAgent(BaseSubagent):
         )
 
         if not context_input.should_invoke_context_selection_agent:
-            state.set_historical_task_selection(
-                HistoricalTaskSelectionResult(selected_task_runs=[])
-            )
+            empty_selection = HistoricalTaskSelectionResult(selected_task_runs=[])
+            state.set_historical_task_selection(empty_selection)
 
             enriched_request = adapt_execution_request(
                 db=db,
-                request=state.execution_request,
-                context_selection_result=state.historical_task_selection,
+                request=current_request,
+                context_selection_result=empty_selection,
             )
             state.replace_execution_request(enriched_request)
 
@@ -349,7 +398,7 @@ class ContextSelectionAgent(BaseSubagent):
             state.mark_context_selected()
             return state
 
-        selection_result = call_context_selection_model(
+        selection_result = self._call_context_selection_model(
             current_task=current_task,
             project=project,
             context_input=context_input,
@@ -358,7 +407,7 @@ class ContextSelectionAgent(BaseSubagent):
 
         enriched_request = adapt_execution_request(
             db=db,
-            request=state.execution_request,
+            request=current_request,
             context_selection_result=selection_result,
         )
         state.replace_execution_request(enriched_request)

@@ -11,9 +11,7 @@ from app.execution_engine.contracts import (
     CHANGE_TYPE_MODIFIED,
     ExecutionRequest,
 )
-from app.execution_engine.execution_plan import (
-    ExecutionStep,
-)
+from app.execution_engine.execution_plan import ExecutionStep
 from app.execution_engine.file_operations import (
     FileMaterializationResult,
     MaterializedFile,
@@ -61,12 +59,6 @@ Operation integrity rules:
 - Use create only for files that do not exist in either the run overlay workspace or the persisted source baseline.
 - Do not return duplicate paths.
 """.strip()
-
-
-def _append_files_read(state: ResolutionState, paths: list[str]) -> None:
-    for path in paths:
-        if path not in state.evidence.files_read:
-            state.evidence.files_read.append(path)
 
 
 def _get_source_root_from_request(request: ExecutionRequest) -> str | None:
@@ -131,6 +123,17 @@ def _candidate_file_exists(
         )
         is not None
     )
+
+
+def _format_evidence_notes_for_prompt(state: ResolutionState) -> list[str]:
+    messages: list[str] = []
+
+    for note in state.evidence.notes:
+        message = getattr(note, "message", None)
+        if isinstance(message, str) and message.strip():
+            messages.append(message.strip())
+
+    return messages
 
 
 def _build_historical_context_summary(request: ExecutionRequest) -> str:
@@ -223,7 +226,7 @@ def _build_related_file_context(
     source_root: str | None,
     request: ExecutionRequest,
     max_files: int = 12,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[tuple[str, str | None]]]:
     candidates: list[str] = []
 
     candidates.extend(request.context.relevant_files)
@@ -248,7 +251,7 @@ def _build_related_file_context(
         return "[no related file content loaded]", []
 
     parts: list[str] = []
-    files_read: list[str] = []
+    files_read: list[tuple[str, str | None]] = []
 
     for rel_path in selected:
         parts.append(f"- path: {rel_path}")
@@ -266,12 +269,14 @@ def _build_related_file_context(
 
         try:
             content = read_text_file(str(resolved))
-            files_read.append(rel_path)
+
             source_label = "workspace_overlay"
             if source_root:
                 source_candidate = (Path(source_root).resolve() / rel_path).resolve()
                 if resolved == source_candidate:
                     source_label = "source_baseline"
+
+            files_read.append((rel_path, source_label))
             parts.append(f"  source: {source_label}")
             parts.append("  content:")
             parts.append(content)
@@ -284,7 +289,7 @@ def _build_related_file_context(
 def _build_user_prompt(
     request: ExecutionRequest,
     state: ResolutionState,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[tuple[str, str | None]]]:
     source_root = _get_source_root_from_request(request)
 
     workspace_inventory = _build_workspace_inventory_context(
@@ -299,6 +304,7 @@ def _build_user_prompt(
 
     project_context_summary = _build_project_context_summary(request)
     historical_context_summary = _build_historical_context_summary(request)
+    evidence_notes = _format_evidence_notes_for_prompt(state)
 
     prompt = f"""
 Task:
@@ -333,7 +339,7 @@ Current orchestration state:
 - materialization_attempt_count: {state.materialization_attempt_count}
 - risk_flags: {state.risk_flags}
 - step_notes: {state.step_notes}
-- evidence_notes: {state.evidence.notes}
+- evidence_notes: {evidence_notes}
 
 Important:
 - The workspace is an editable overlay for this execution run.
@@ -373,10 +379,12 @@ def _validate_generated_files(
         seen_paths.add(rel_path)
 
         destination = (root / rel_path).resolve()
-        if not str(destination).startswith(str(root)):
+        try:
+            destination.relative_to(root)
+        except ValueError as exc:
             raise SubagentRejectedStepError(
                 f"Refusing to materialize file outside workspace root: {rel_path}"
-            )
+            ) from exc
 
         exists_in_candidate_baseline = _candidate_file_exists(
             workspace_root=workspace_root,
@@ -421,22 +429,7 @@ class CodeChangeAgent(BaseSubagent):
         source_root = _get_source_root_from_request(request)
 
         user_prompt, files_read = _build_user_prompt(request, state)
-        for path in files_read:
-            resolved = _resolve_candidate_file_for_read(
-                workspace_root=request.context.workspace_path,
-                source_root=source_root,
-                relative_path=path,
-            )
-            source_label = None
-            if resolved is not None:
-                workspace_candidate = (
-                    Path(request.context.workspace_path).resolve() / path
-                ).resolve()
-                if resolved == workspace_candidate:
-                    source_label = "workspace_overlay"
-                else:
-                    source_label = "source_baseline"
-
+        for path, source_label in files_read:
             state.evidence.add_file_read(
                 path=path,
                 producer=self.name,

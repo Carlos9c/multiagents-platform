@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from app.execution_engine.contracts import CommandExecution
+from pydantic import BaseModel
 
 MAX_COMMAND_OUTPUT_CHARS = 32_000
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -28,6 +28,15 @@ FORBIDDEN_EXECUTABLES = {
 
 class CommandToolError(ValueError):
     """Raised when a command is invalid or unsafe for the execution engine."""
+
+
+class CommandRunResult(BaseModel):
+    command: str
+    cwd: str
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
 
 
 def _truncate_output(value: str | None, *, label: str) -> str:
@@ -140,7 +149,7 @@ def _validate_path_arguments_within_execution_tree(argv: list[str], working_dir:
             resolved_candidate.relative_to(working_dir)
         except ValueError as exc:
             raise CommandToolError(
-                "Command contains a path argument outside the execution tree: " f"{argument}"
+                f"Command contains a path argument outside the execution tree: {argument}"
             ) from exc
 
 
@@ -149,7 +158,7 @@ def run_command(
     command: str,
     cwd: str,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
-) -> CommandExecution:
+) -> CommandRunResult:
     validated_timeout = _validate_timeout(timeout_seconds)
     working_dir = _validate_working_directory(cwd)
     argv = _validate_and_parse_command(command)
@@ -179,18 +188,22 @@ def run_command(
         else:
             combined_stderr = timeout_message
 
-        return CommandExecution(
+        return CommandRunResult(
             command=command,
+            cwd=str(working_dir),
             exit_code=124,
             stdout=_truncate_output(stdout, label="stdout"),
             stderr=_truncate_output(combined_stderr, label="stderr"),
+            timed_out=True,
         )
     except FileNotFoundError as exc:
         raise CommandToolError(f"Command executable could not be started: {str(exc)}") from exc
 
-    return CommandExecution(
+    return CommandRunResult(
         command=command,
+        cwd=str(working_dir),
         exit_code=completed.returncode,
         stdout=_truncate_output(completed.stdout, label="stdout"),
         stderr=_truncate_output(completed.stderr, label="stderr"),
+        timed_out=False,
     )

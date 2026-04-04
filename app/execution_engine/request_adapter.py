@@ -41,6 +41,10 @@ def _safe_json_loads(raw: str | None) -> list | dict | None:
         return None
 
 
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
 def _deserialize_changed_files(raw: str | None) -> list[str]:
     payload = _safe_json_loads(raw)
     if not isinstance(payload, list):
@@ -48,47 +52,98 @@ def _deserialize_changed_files(raw: str | None) -> list[str]:
 
     paths: list[str] = []
     for item in payload:
-        if isinstance(item, dict):
-            path = item.get("path")
-            if isinstance(path, str) and path.strip():
-                paths.append(path.strip())
+        if not isinstance(item, dict):
+            continue
 
-    return list(dict.fromkeys(paths))
+        path = item.get("path")
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+
+    return _dedupe_preserve_order(paths)
 
 
-def _deserialize_string_list(raw: str | None) -> list[str]:
+def _deserialize_files_read(raw: str | None) -> list[str]:
+    """
+    Deserialize persisted FileReadEvidence payloads into the simplified historical
+    shape expected by HistoricalTaskRunContext.files_read: list[str].
+
+    Current persisted shape:
+    [
+        {
+            "path": "app/foo.py",
+            "producer": "context_selection_agent",
+            "source": "workspace"
+        },
+        ...
+    ]
+
+    Historical context intentionally keeps only paths.
+    """
     payload = _safe_json_loads(raw)
     if not isinstance(payload, list):
         return []
 
-    values: list[str] = []
+    paths: list[str] = []
     for item in payload:
-        if isinstance(item, str) and item.strip():
-            values.append(item.strip())
+        if not isinstance(item, dict):
+            continue
 
-    return list(dict.fromkeys(values))
+        path = item.get("path")
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+
+    return _dedupe_preserve_order(paths)
 
 
 def _deserialize_change_dependencies(raw: str | None) -> dict[str, list[str]]:
+    """
+    Deserialize persisted ChangeDependencyEvidence payloads into the simplified
+    historical shape expected by HistoricalTaskRunContext.change_dependencies:
+    dict[path, list[depends_on_path]].
+
+    Current persisted shape:
+    [
+        {
+            "path": "app/foo.py",
+            "depends_on": ["app/bar.py"],
+            "producer": "code_change_agent"
+        },
+        ...
+    ]
+
+    If multiple producers reported dependencies for the same path, they are merged.
+    """
     payload = _safe_json_loads(raw)
-    if not isinstance(payload, dict):
+    if not isinstance(payload, list):
         return {}
 
-    result: dict[str, list[str]] = {}
-    for key, value in payload.items():
-        if not isinstance(key, str) or not key.strip():
+    merged: dict[str, list[str]] = {}
+
+    for item in payload:
+        if not isinstance(item, dict):
             continue
-        if not isinstance(value, list):
+
+        path = item.get("path")
+        depends_on = item.get("depends_on")
+
+        if not isinstance(path, str) or not path.strip():
+            continue
+        if not isinstance(depends_on, list):
             continue
 
-        deps: list[str] = []
-        for item in value:
-            if isinstance(item, str) and item.strip():
-                deps.append(item.strip())
+        normalized_path = path.strip()
+        normalized_deps = [
+            dep.strip() for dep in depends_on if isinstance(dep, str) and dep.strip()
+        ]
 
-        result[key.strip()] = list(dict.fromkeys(deps))
+        if not normalized_deps:
+            merged.setdefault(normalized_path, [])
+            continue
 
-    return result
+        existing = merged.setdefault(normalized_path, [])
+        merged[normalized_path] = _dedupe_preserve_order(existing + normalized_deps)
+
+    return merged
 
 
 def _build_key_decisions(project_context) -> list[str]:
@@ -140,7 +195,7 @@ def _build_historical_execution_context(
             continue
 
         changed_files = _deserialize_changed_files(selected_run.changed_files)
-        files_read = _deserialize_string_list(selected_run.files_read)
+        files_read = _deserialize_files_read(selected_run.files_read)
         change_dependencies = _deserialize_change_dependencies(selected_run.change_dependencies)
 
         selected_task_runs.append(
@@ -263,8 +318,6 @@ def adapt_execution_request(
 
     return request.model_copy(
         update={
-            "success_criteria": _split_multiline_text(request.acceptance_criteria),
-            "constraints": _split_multiline_text(request.technical_constraints),
             "context": adapted_context,
             "historical_context": historical_context,
         }

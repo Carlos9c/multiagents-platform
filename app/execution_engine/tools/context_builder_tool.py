@@ -22,6 +22,10 @@ def _safe_json_loads(raw: str | None) -> list | dict | None:
         return None
 
 
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
 def _deserialize_changed_files(raw: str | None) -> list[str]:
     payload = _safe_json_loads(raw)
     if not isinstance(payload, list):
@@ -29,25 +33,35 @@ def _deserialize_changed_files(raw: str | None) -> list[str]:
 
     paths: list[str] = []
     for item in payload:
-        if isinstance(item, dict):
-            path = item.get("path")
-            if isinstance(path, str) and path.strip():
-                paths.append(path.strip())
+        if not isinstance(item, dict):
+            continue
 
-    return list(dict.fromkeys(paths))
+        path = item.get("path")
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+
+    return _dedupe_preserve_order(paths)
 
 
-def _deserialize_string_list(raw: str | None) -> list[str]:
+def _deserialize_files_read(raw: str | None) -> list[str]:
+    """
+    Deserialize persisted FileReadEvidence payloads into the simplified catalog
+    shape expected by HistoricalTaskCatalogEntry.files_read: list[str].
+    """
     payload = _safe_json_loads(raw)
     if not isinstance(payload, list):
         return []
 
-    values: list[str] = []
+    paths: list[str] = []
     for item in payload:
-        if isinstance(item, str) and item.strip():
-            values.append(item.strip())
+        if not isinstance(item, dict):
+            continue
 
-    return list(dict.fromkeys(values))
+        path = item.get("path")
+        if isinstance(path, str) and path.strip():
+            paths.append(path.strip())
+
+    return _dedupe_preserve_order(paths)
 
 
 def _build_project_context_excerpt(project_context) -> str | None:
@@ -129,7 +143,7 @@ def _build_completed_task_catalog(
                 completed_scope=completion_run.completed_scope,
                 validation_notes=completion_run.validation_notes,
                 changed_files=_deserialize_changed_files(completion_run.changed_files),
-                files_read=_deserialize_string_list(completion_run.files_read),
+                files_read=_deserialize_files_read(completion_run.files_read),
             )
         )
 

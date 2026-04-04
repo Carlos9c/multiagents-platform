@@ -7,12 +7,9 @@ from pydantic import BaseModel, Field, model_validator
 DECISION_CALL_SUBAGENT = "call_subagent"
 DECISION_FINISH = "finish"
 DECISION_REJECT = "reject"
+DECISION_INVALID = "invalid"
 
-VALID_DECISION_TYPES = {
-    DECISION_CALL_SUBAGENT,
-    DECISION_FINISH,
-    DECISION_REJECT,
-}
+VALID_DECISION_TYPES = {DECISION_CALL_SUBAGENT, DECISION_FINISH, DECISION_REJECT, DECISION_INVALID}
 
 VALID_SUBAGENT_NAMES = {
     "context_selection_agent",
@@ -23,6 +20,7 @@ VALID_SUBAGENT_NAMES = {
 
 class NextActionDecision(BaseModel):
     decision_type: Literal[
+        "invalid",
         "call_subagent",
         "finish",
         "reject",

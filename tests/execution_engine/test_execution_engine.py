@@ -8,19 +8,18 @@ from app.execution_engine.agent_runtime.base import BaseAgentRuntime
 from app.execution_engine.budget import LoopBudget
 from app.execution_engine.context_selection import HistoricalTaskSelectionResult
 from app.execution_engine.contracts import (
-    ChangedFile,
     ExecutionRequest,
     ProjectExecutionContext,
 )
+from app.execution_engine.execution_plan import ExecutionStep
 from app.execution_engine.file_operations import (
     FileMaterializationResult,
     MaterializedFile,
 )
 from app.execution_engine.monitoring import OrchestratorTrace
 from app.execution_engine.next_action import (
-    ACTION_APPLY_FILE_OPERATIONS,
-    ACTION_FINISH,
-    ACTION_INSPECT_CONTEXT,
+    DECISION_CALL_SUBAGENT,
+    DECISION_FINISH,
     NextActionDecision,
 )
 from app.execution_engine.orchestrator import ExecutionOrchestrator
@@ -60,10 +59,14 @@ class StubContextSelectionAgent(BaseSubagent):
     name = "context_selection_agent"
 
     def supports_step_kind(self, step_kind: str) -> bool:
-        return step_kind == "inspect_context"
+        return True
 
-    def execute_step(self, *, db, request, step, state):
+    def execute_step(self, *, db, request, step, state) -> ResolutionState:
         state.set_historical_task_selection(HistoricalTaskSelectionResult(selected_task_runs=[]))
+        state.evidence.add_note(
+            message="stub context selection executed",
+            producer=self.name,
+        )
         state.add_note("stub context selection executed")
         state.mark_context_selected()
         return state
@@ -73,17 +76,19 @@ class StubCodeChangeAgent(BaseSubagent):
     name = "code_change_agent"
 
     def supports_step_kind(self, step_kind: str) -> bool:
-        return step_kind == "apply_file_operations"
+        return True
 
-    def execute_step(self, *, db, request, step, state):
-        state.evidence.changed_files.append(
-            ChangedFile(
-                path="docs/notes-api-contract.md",
-                change_type="created",
-            )
+    def execute_step(self, *, db, request, step, state) -> ResolutionState:
+        state.evidence.add_changed_file(
+            path="docs/notes-api-contract.md",
+            change_type="created",
+            producer=self.name,
         )
-        state.evidence.notes.append("stub code change executed")
-        state.phase = "completion"
+        state.evidence.add_note(
+            message="stub code change executed",
+            producer=self.name,
+        )
+        state.add_note("stub code change executed")
         return state
 
 
@@ -118,6 +123,21 @@ def _make_request(workspace_path: Path) -> ExecutionRequest:
         ),
         historical_context=None,
     )
+
+
+def _make_step(*, subagent_name: str, instructions: str = "Execute the step") -> ExecutionStep:
+    return ExecutionStep(
+        id=f"test_{subagent_name}",
+        subagent_name=subagent_name,
+        title=subagent_name,
+        instructions=instructions,
+        target_paths=[],
+        metadata={},
+    )
+
+
+def _note_messages(state_or_result) -> list[str]:
+    return [item.message for item in state_or_result.evidence.notes]
 
 
 def test_code_change_agent_creates_and_modifies_files_without_prior_plan(tmp_path):
@@ -173,13 +193,7 @@ def test_code_change_agent_creates_and_modifies_files_without_prior_plan(tmp_pat
     next_state = agent.execute_step(
         db=None,
         request=request,
-        step=type(
-            "Step",
-            (),
-            {
-                "kind": "apply_file_operations",
-            },
-        )(),
+        step=_make_step(subagent_name="code_change_agent"),
         state=state,
     )
 
@@ -187,13 +201,17 @@ def test_code_change_agent_creates_and_modifies_files_without_prior_plan(tmp_pat
     assert "APIRouter" in (workspace / "app" / "api" / "notes.py").read_text(encoding="utf-8")
     assert "include_router" in (workspace / "app" / "main.py").read_text(encoding="utf-8")
 
-    assert next_state.phase == "completion"
+    assert next_state.phase == "execution"
     assert sorted(item.path for item in next_state.evidence.changed_files) == [
         "app/api/notes.py",
         "app/main.py",
     ]
     assert next_state.evidence.files_read == []
-    assert "materialization completed" in next_state.evidence.notes
+
+    note_messages = _note_messages(next_state)
+    assert any("materialization completed" in message for message in note_messages)
+    assert any("Wrote file app/api/notes.py" in message for message in note_messages)
+    assert any("Wrote file app/main.py" in message for message in note_messages)
 
 
 def test_code_change_agent_rejects_modify_for_missing_file(tmp_path):
@@ -235,13 +253,7 @@ def test_code_change_agent_rejects_modify_for_missing_file(tmp_path):
         agent.execute_step(
             db=None,
             request=request,
-            step=type(
-                "Step",
-                (),
-                {
-                    "kind": "apply_file_operations",
-                },
-            )(),
+            step=_make_step(subagent_name="code_change_agent"),
             state=state,
         )
 
@@ -315,13 +327,7 @@ def test_code_change_agent_rolls_back_if_write_fails(tmp_path, monkeypatch):
         agent.execute_step(
             db=None,
             request=request,
-            step=type(
-                "Step",
-                (),
-                {
-                    "kind": "apply_file_operations",
-                },
-            )(),
+            step=_make_step(subagent_name="code_change_agent"),
             state=state,
         )
 
@@ -338,26 +344,25 @@ def test_orchestrator_records_trace_and_finishes(tmp_path):
     runtime = FakeRuntime(
         responses=[
             NextActionDecision(
-                action=ACTION_INSPECT_CONTEXT,
+                decision_type=DECISION_CALL_SUBAGENT,
+                subagent_name="context_selection_agent",
                 rationale="Need context first.",
                 target_paths=[],
-                command=None,
                 expected_outcome="Execution request enriched.",
                 risk_flags=[],
             ).model_dump(),
             NextActionDecision(
-                action=ACTION_APPLY_FILE_OPERATIONS,
+                decision_type=DECISION_CALL_SUBAGENT,
+                subagent_name="code_change_agent",
                 rationale="Implementation can begin now.",
                 target_paths=[],
-                command=None,
                 expected_outcome="Artifacts materialized in workspace.",
                 risk_flags=[],
             ).model_dump(),
             NextActionDecision(
-                action=ACTION_FINISH,
+                decision_type=DECISION_FINISH,
                 rationale="Current operational pass is sufficient.",
                 target_paths=[],
-                command=None,
                 expected_outcome="Return for external validation.",
                 risk_flags=["low_confidence_on_context_coverage"],
             ).model_dump(),
@@ -381,8 +386,9 @@ def test_orchestrator_records_trace_and_finishes(tmp_path):
 
     assert result.decision == "partial"
     assert "Current operational pass is sufficient." in (result.details or "")
-    assert result.evidence.changed_files
-    joined_notes = "\n".join(result.evidence.notes)
+    assert [item.path for item in result.evidence.changed_files] == ["docs/notes-api-contract.md"]
+
+    joined_notes = "\n".join(_note_messages(result))
     assert "orchestrator_started" in joined_notes
     assert "next_action_decided" in joined_notes
     assert "subagent_selected" in joined_notes
@@ -390,9 +396,7 @@ def test_orchestrator_records_trace_and_finishes(tmp_path):
     assert "orchestrator_finished" in joined_notes
 
 
-def test_orchestrator_phase_policy_prevents_return_to_context_after_execution_started(
-    tmp_path,
-):
+def test_orchestrator_invalidates_same_subagent_twice_in_a_row(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -401,26 +405,25 @@ def test_orchestrator_phase_policy_prevents_return_to_context_after_execution_st
     runtime = FakeRuntime(
         responses=[
             NextActionDecision(
-                action=ACTION_INSPECT_CONTEXT,
+                decision_type=DECISION_CALL_SUBAGENT,
+                subagent_name="context_selection_agent",
                 rationale="Need context first.",
                 target_paths=[],
-                command=None,
                 expected_outcome="Context ready.",
                 risk_flags=[],
             ).model_dump(),
             NextActionDecision(
-                action=ACTION_INSPECT_CONTEXT,
-                rationale="Let's inspect again even though execution should begin.",
+                decision_type=DECISION_CALL_SUBAGENT,
+                subagent_name="context_selection_agent",
+                rationale="Let's inspect again immediately.",
                 target_paths=[],
-                command=None,
                 expected_outcome="More context.",
                 risk_flags=[],
             ).model_dump(),
             NextActionDecision(
-                action=ACTION_FINISH,
+                decision_type=DECISION_FINISH,
                 rationale="Now finish.",
                 target_paths=[],
-                command=None,
                 expected_outcome="Done.",
                 risk_flags=[],
             ).model_dump(),
@@ -443,5 +446,8 @@ def test_orchestrator_phase_policy_prevents_return_to_context_after_execution_st
     result = orchestrator.run(db=None, request=request)
 
     assert result.decision == "partial"
-    joined_notes = "\n".join(result.evidence.notes)
-    assert "action_overridden_by_phase_policy" in joined_notes
+    assert "same_subagent_twice_in_a_row" in result.blockers_found
+
+    joined_notes = "\n".join(_note_messages(result))
+    assert "decision_normalized_by_guardrail" in joined_notes
+    assert "orchestrator_decision_invalidated" in joined_notes
