@@ -37,33 +37,13 @@ from app.services.task_execution_service import (
     TaskExecutionServiceError,
     execute_task_sync,
 )
+from app.services.validation.aggregation import ValidationAggregationResult
 from app.services.validation.contracts import ValidationResult
-from app.services.validation.router.schemas import ValidationRoutingDecision
-from app.services.validation.service import ValidationServiceError
-
-
-def _make_code_routing_decision() -> ValidationRoutingDecision:
-    return ValidationRoutingDecision(
-        validator_key="code_task_validator",
-        discipline="code",
-        validation_mode="post_execution",
-        requires_workspace=True,
-        requires_file_reading=True,
-        requires_changed_files=True,
-        requires_command_results=True,
-        requires_artifacts=True,
-        requires_output_snapshot=True,
-        requires_execution_agent_sequence=True,
-        require_manual_review_if_evidence_missing=True,
-        validation_focus=[
-            "acceptance_criteria_alignment",
-            "scope_completion",
-            "repository_changes",
-            "constraint_compliance",
-        ],
-        routing_rationale="Route code execution results to the code task validator.",
-        open_questions=[],
-    )
+from app.services.validation.selection import SelectedValidator, ValidationSelectionResult
+from app.services.validation.service import (
+    ValidationServiceError,
+    ValidationServiceResult,
+)
 
 
 def _patch_workspace_runtime(
@@ -144,7 +124,7 @@ def _patch_execution_request(
 
 def _patch_engine(monkeypatch, engine_result: ExecutionResult):
     def _fake_execute(db, request):
-        return engine_result
+        return engine_result, request
 
     monkeypatch.setattr(
         "app.services.task_execution_service.get_execution_engine",
@@ -155,6 +135,35 @@ def _patch_engine(monkeypatch, engine_result: ExecutionResult):
     )
 
 
+def _build_validation_result(
+    *,
+    validation_decision: str,
+    final_task_status: str,
+    followup_validation_required: bool = False,
+) -> ValidationResult:
+    return ValidationResult(
+        validator_key="code_task_validator",
+        discipline="code",
+        decision=validation_decision,
+        summary="Validation summary.",
+        findings=[],
+        validated_scope="Validated scope." if validation_decision == "completed" else None,
+        missing_scope="Missing scope." if validation_decision != "completed" else None,
+        blockers=[],
+        manual_review_required=(validation_decision == "manual_review"),
+        final_task_status=final_task_status,
+        artifacts_created=[],
+        validated_evidence_ids=["produced_file:app_service.py", "command:0"],
+        unconsumed_evidence_ids=[],
+        followup_validation_required=followup_validation_required,
+        recommended_next_validator_keys=[],
+        partial_validation_summary=(
+            "Additional validation follow-up required." if followup_validation_required else None
+        ),
+        metadata={"confidence": "high"},
+    )
+
+
 def _patch_validation_service(
     monkeypatch,
     *,
@@ -162,41 +171,48 @@ def _patch_validation_service(
     final_task_status: str,
     followup_validation_required: bool = False,
 ):
-    def _fake_resolve_validation_route(*, routing_input):
-        return _make_code_routing_decision()
+    validation_result = _build_validation_result(
+        validation_decision=validation_decision,
+        final_task_status=final_task_status,
+        followup_validation_required=followup_validation_required,
+    )
 
-    def _fake_dispatch_validation(*, intent, validation_input):
-        return ValidationResult(
-            validator_key="code_task_validator",
-            discipline="code",
-            decision=validation_decision,
-            summary="Validation summary.",
-            findings=[],
-            validated_scope="Validated scope." if validation_decision == "completed" else None,
-            missing_scope="Missing scope." if validation_decision != "completed" else None,
-            blockers=[],
-            manual_review_required=(validation_decision == "manual_review"),
-            final_task_status=final_task_status,
-            artifacts_created=[],
-            validated_evidence_ids=["produced_file:app_service.py", "command:0"],
-            unconsumed_evidence_ids=[],
-            followup_validation_required=followup_validation_required,
-            recommended_next_validator_keys=[],
-            partial_validation_summary=(
-                "Additional validation follow-up required."
-                if followup_validation_required
-                else None
+    selection_result = ValidationSelectionResult(
+        selected_validators=[
+            SelectedValidator(
+                producer_key="code_change_agent",
+                validator_key="code_task_validator",
+                selection_reason="Selected for invariant test.",
             ),
-            metadata={"confidence": "high"},
+            SelectedValidator(
+                producer_key="command_runner_agent",
+                validator_key="code_task_validator",
+                selection_reason="Selected for invariant test.",
+            ),
+        ],
+        skipped_producers=[],
+        notes=[],
+    )
+
+    aggregation_result = ValidationAggregationResult(
+        final_result=validation_result,
+        validator_results=[validation_result],
+        winning_decision=validation_decision,
+        notes=[f"Winning validation decision: {validation_decision}"],
+    )
+
+    def _fake_validate_execution_result(**kwargs):
+        return ValidationServiceResult(
+            validator_input=types.SimpleNamespace(),
+            selection_result=selection_result,
+            validator_results=[validation_result],
+            aggregation_result=aggregation_result,
+            validation_result=validation_result,
         )
 
     monkeypatch.setattr(
-        "app.services.validation.service.resolve_validation_route",
-        _fake_resolve_validation_route,
-    )
-    monkeypatch.setattr(
-        "app.services.validation.service.dispatch_validation",
-        _fake_dispatch_validation,
+        "app.services.task_execution_service.validate_execution_result",
+        _fake_validate_execution_result,
     )
 
 
@@ -243,6 +259,8 @@ def _build_engine_result(
                     producer="code_change_agent",
                 )
             ],
+            files_read=[],
+            change_dependencies=[],
             commands=[
                 CommandExecution(
                     command="pytest -q",

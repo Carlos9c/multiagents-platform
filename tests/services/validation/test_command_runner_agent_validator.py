@@ -142,7 +142,9 @@ def _successful_llm_payload(*, decision: str = "completed") -> dict:
         "decision": decision,
         "summary": f"Validation concluded with decision={decision}.",
         "validated_scope": "The verification contribution was evaluated against the task objective.",
-        "missing_scope": None if decision == "completed" else "Verification confidence remains partial.",
+        "missing_scope": (
+            None if decision == "completed" else "Verification confidence remains partial."
+        ),
         "blockers": [] if decision == "completed" else ["verification gap"],
         "findings": [
             {
@@ -224,13 +226,18 @@ def test_command_runner_agent_validator_builds_prompt_with_command_evidence_and_
 
     assert "Subagent being validated:" in user_prompt
     assert "command_runner_agent" in user_prompt
-    assert "Performs one repository-local operational verification step" in user_prompt
+    assert "repository-local operational verification" in user_prompt
+    assert "at most one narrow" in user_prompt
 
     assert "Primary evidence to evaluate (producer = command_runner_agent):" in user_prompt
     assert "pytest tests/test_settings.py -q" in user_prompt
     assert "Verify settings workflow behavior." in user_prompt
     assert "1 passed" in user_prompt
     assert "expected_exit_codes" in user_prompt
+
+    assert "Command history summary:" in user_prompt
+    assert "latest_command" in user_prompt
+    assert "terminal_verification_clean: True" in user_prompt
 
     assert "Context files to read and use:" in user_prompt
     assert "README.md" in user_prompt
@@ -295,18 +302,26 @@ def test_command_runner_agent_validator_validated_evidence_ids_include_only_comm
 
 
 @pytest.mark.parametrize(
-    ("decision", "expected_task_status", "expected_manual_review"),
+    (
+        "decision",
+        "command_exit_code",
+        "expected_result_decision",
+        "expected_task_status",
+        "expected_manual_review",
+    ),
     [
-        ("completed", "completed", False),
-        ("partial", "partial", False),
-        ("failed", "failed", False),
-        ("manual_review", "failed", True),
+        ("completed", 0, "completed", "completed", False),
+        ("partial", 1, "partial", "partial", False),
+        ("failed", 1, "failed", "failed", False),
+        ("manual_review", 0, "manual_review", "failed", True),
     ],
 )
 def test_command_runner_agent_validator_maps_llm_decision_to_canonical_result(
     tmp_path,
     monkeypatch,
     decision,
+    command_exit_code,
+    expected_result_decision,
     expected_task_status,
     expected_manual_review,
 ):
@@ -324,9 +339,11 @@ def test_command_runner_agent_validator_maps_llm_decision_to_canonical_result(
             CommandExecution(
                 command="pytest tests/test_settings.py -q",
                 producer="command_runner_agent",
-                exit_code=0 if decision != "failed" else 1,
-                stdout="1 passed" if decision != "failed" else "",
-                stderr="" if decision != "failed" else "1 failed",
+                exit_code=command_exit_code,
+                stdout="1 passed" if command_exit_code == 0 else "",
+                stderr="" if command_exit_code == 0 else "1 failed",
+                expected_exit_codes=[0],
+                timed_out=False,
             ),
         ],
     )
@@ -339,9 +356,68 @@ def test_command_runner_agent_validator_maps_llm_decision_to_canonical_result(
 
     result = CommandRunnerAgentValidator().validate(validation_input)
 
-    assert result.decision == decision
+    assert result.decision == expected_result_decision
     assert result.final_task_status == expected_task_status
     assert result.manual_review_required is expected_manual_review
+
+
+def test_command_runner_agent_validator_promotes_partial_to_completed_when_terminal_verification_is_clean(
+    tmp_path,
+    monkeypatch,
+):
+    workspace_dir = tmp_path / "workspace"
+    source_dir = tmp_path / "source"
+    workspace_dir.mkdir()
+    source_dir.mkdir()
+
+    validation_input = _make_validation_input(
+        workspace_path=str(workspace_dir),
+        source_path=str(source_dir),
+        relevant_files=[],
+        changed_files=[],
+        commands=[
+            CommandExecution(
+                command="python -m unittest -v",
+                producer="command_runner_agent",
+                exit_code=5,
+                stdout="",
+                stderr="NO TESTS RAN",
+                expected_exit_codes=[0],
+                timed_out=False,
+                verification_goal="Verify the workflow end to end.",
+                rationale="Initial verification attempt.",
+                validation_claims=["tests_discovered"],
+                observed_outcome_summary="No tests were discovered.",
+            ),
+            CommandExecution(
+                command='python -m unittest discover -s tests -p "test_*.py" -v',
+                producer="command_runner_agent",
+                exit_code=0,
+                stdout="5 passed",
+                stderr="",
+                expected_exit_codes=[0],
+                timed_out=False,
+                verification_goal="Verify the workflow end to end.",
+                rationale="Explicit discovery over the test suite.",
+                validation_claims=["tests_passed"],
+                observed_outcome_summary="The explicit discovery run succeeded.",
+            ),
+        ],
+    )
+
+    provider = _CapturingProvider(_successful_llm_payload(decision="partial"))
+    monkeypatch.setattr(
+        "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
+        lambda: provider,
+    )
+
+    result = CommandRunnerAgentValidator().validate(validation_input)
+
+    assert result.decision == "completed"
+    assert result.final_task_status == "completed"
+    assert result.manual_review_required is False
+    assert result.metadata["terminal_verification_clean"] is True
+    assert result.metadata["resolved_intermediate_failure"] is True
 
 
 def test_command_runner_agent_validator_includes_missing_files_in_prompt_without_crashing(

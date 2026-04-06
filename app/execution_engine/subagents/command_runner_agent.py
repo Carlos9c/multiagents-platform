@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy.orm import Session
@@ -11,24 +12,58 @@ from app.execution_engine.execution_plan import ExecutionStep
 from app.execution_engine.resolution_state import ResolutionState
 from app.execution_engine.subagents.base import BaseSubagent, SubagentRejectedStepError
 from app.execution_engine.tools.command_tool import CommandToolError, run_command
+from app.execution_engine.tools.file_reader_tool import read_text_file
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_storage import ProjectStorageService
 from app.services.workspace_runtime import WorkspaceRuntimeError
 
-COMMAND_RUNNER_AGENT_SYSTEM_PROMPT = """
-You are a repository-local verification command planner.
+COMMAND_FILE_SELECTION_SYSTEM_PROMPT = """
+You are a repository-local verification context selector.
 
-Your job is to inspect the candidate run tree for ONE already-atomic task and decide:
-- which single concrete command should be executed
-- from which working directory inside the candidate run tree it should be executed
-- what that command is meant to verify for later external validation
+Your job is to inspect the candidate run-tree inventory for ONE already-atomic task and select
+the smallest set of repository-relative files that should be read before deciding whether an
+executable repository-local verification command is appropriate.
 
 Return ONLY JSON matching the provided schema.
 
 Hard rules:
-- Choose exactly one concrete command.
+- Select only files that appear in the provided candidate run-tree inventory.
+- Select only repository-relative file paths.
+- Do not select directories.
+- Do not select duplicate paths.
+- Select the smallest useful file set.
+- Do not guess hidden files or tools that are not present in the inventory.
+- Prefer files that clarify:
+  - test layout
+  - executable entrypoints
+  - repository-local verification conventions
+  - build/test configuration
+  - changed implementation files relevant to the task
+- If very little file inspection is needed, return only a few files.
+- If executable verification is likely not applicable, you may still select zero or very few files.
+""".strip()
+
+COMMAND_RUNNER_AGENT_SYSTEM_PROMPT = """
+You are a repository-local verification planner.
+
+Your job is to inspect the candidate run tree for ONE already-atomic task and decide between exactly one of these two outcomes:
+1. run_command
+   - choose the single concrete command that should be executed
+   - choose the working directory inside the candidate run tree
+   - explain what that command is meant to verify for later external validation
+
+2. verification_not_applicable
+   - choose this when no meaningful repository-local executable verification would materially improve the evidence for the current task
+
+Return ONLY JSON matching the provided schema.
+
+Hard rules:
+- Do not force a command when no meaningful repository-local verification exists.
+- Repository-local verification is not automatically required just because files changed.
+- Documentation, requirements, specification, README, and design-note tasks often do not need executable verification unless the task explicitly asks for it.
+- If you choose run_command, choose exactly one concrete command.
 - The command must be repo-local and narrow in purpose.
 - Do not use shell chaining, pipes, redirection, or multiple commands.
 - Prefer project-standard commands already supported by the repository layout.
@@ -36,11 +71,54 @@ Hard rules:
 - The working directory must be "." or a relative path inside the candidate run tree.
 - Do not invent tools, executables, frameworks, entrypoints, or files that are not grounded in the provided inventory/context.
 - The goal is to produce operational evidence for external validation, not to perform open-ended exploration.
+
+Planning policy:
+- Base your command decision on the actual candidate run-tree inventory and the inspected file contents.
+- Prefer commands supported by the files and configuration actually present in the run tree.
+- If the executable verification path is ambiguous, choose verification_not_applicable rather than guessing.
 """.strip()
 
 
+class CommandInspectionPlan(BaseModel):
+    selected_paths: list[str] = Field(default_factory=list)
+    selection_rationale: str
+    verification_hypothesis: str
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "CommandInspectionPlan":
+        normalized_paths: list[str] = []
+        seen: set[str] = set()
+
+        for path in self.selected_paths:
+            if not isinstance(path, str):
+                raise ValueError("selected_paths must contain strings only.")
+            normalized = path.strip()
+            if not normalized:
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_paths.append(normalized)
+
+        self.selected_paths = normalized_paths
+        self.selection_rationale = self.selection_rationale.strip()
+        self.verification_hypothesis = self.verification_hypothesis.strip()
+
+        if not self.selection_rationale:
+            raise ValueError("selection_rationale must not be empty.")
+
+        if not self.verification_hypothesis:
+            raise ValueError("verification_hypothesis must not be empty.")
+
+        if len(self.selected_paths) > 12:
+            raise ValueError("selected_paths cannot contain more than 12 files.")
+
+        return self
+
+
 class CommandVerificationPlan(BaseModel):
-    command: str
+    decision: Literal["run_command", "verification_not_applicable"]
+    command: str = ""
     cwd_relative_path: str = "."
     verification_goal: str
     rationale: str
@@ -49,13 +127,10 @@ class CommandVerificationPlan(BaseModel):
 
     @model_validator(mode="after")
     def validate_shape(self) -> "CommandVerificationPlan":
-        self.command = self.command.strip()
+        self.command = (self.command or "").strip()
         self.cwd_relative_path = (self.cwd_relative_path or ".").strip() or "."
         self.verification_goal = self.verification_goal.strip()
         self.rationale = self.rationale.strip()
-
-        if not self.command:
-            raise ValueError("command must not be empty.")
 
         if not self.verification_goal:
             raise ValueError("verification_goal must not be empty.")
@@ -63,21 +138,31 @@ class CommandVerificationPlan(BaseModel):
         if not self.rationale:
             raise ValueError("rationale must not be empty.")
 
-        if not self.expected_exit_codes:
-            raise ValueError("expected_exit_codes must not be empty.")
+        if self.decision == "run_command":
+            if not self.command:
+                raise ValueError("command must not be empty when decision=run_command.")
 
-        normalized_codes: list[int] = []
-        seen_codes: set[int] = set()
-        for code in self.expected_exit_codes:
-            if not isinstance(code, int):
-                raise ValueError("expected_exit_codes must contain integers only.")
-            if code < 0:
-                raise ValueError("expected_exit_codes must contain non-negative integers only.")
-            if code not in seen_codes:
-                seen_codes.add(code)
-                normalized_codes.append(code)
+            if not self.expected_exit_codes:
+                raise ValueError("expected_exit_codes must not be empty when decision=run_command.")
 
-        self.expected_exit_codes = normalized_codes
+            normalized_codes: list[int] = []
+            seen_codes: set[int] = set()
+            for code in self.expected_exit_codes:
+                if not isinstance(code, int):
+                    raise ValueError("expected_exit_codes must contain integers only.")
+                if code < 0:
+                    raise ValueError("expected_exit_codes must contain non-negative integers only.")
+                if code not in seen_codes:
+                    seen_codes.add(code)
+                    normalized_codes.append(code)
+
+            self.expected_exit_codes = normalized_codes
+        else:
+            self.command = ""
+            self.cwd_relative_path = "."
+            self.expected_exit_codes = []
+            self.validation_claims = []
+
         self.validation_claims = [
             claim.strip()
             for claim in self.validation_claims
@@ -108,14 +193,147 @@ def _contains_disallowed_shell_constructs(command: str) -> bool:
     return any(token in command for token in disallowed_tokens)
 
 
+def _build_file_selection_prompt(
+    *,
+    request: ExecutionRequest,
+    step: ExecutionStep,
+    state: ResolutionState,
+    run_dir: Path,
+    inventory: list[str],
+) -> str:
+    inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
+
+    changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
+    commands = [item.model_dump(mode="json") for item in state.evidence.commands]
+    notes = [item.message for item in state.evidence.notes if item.message]
+
+    return f"""
+Task:
+- task_id: {request.task_id}
+- title: {request.task_title}
+- description: {request.task_description}
+- objective: {request.objective}
+- acceptance_criteria: {request.acceptance_criteria}
+- technical_constraints: {request.technical_constraints}
+- out_of_scope: {request.out_of_scope}
+- tests_required: {request.tests_required}
+- executor_type: {request.executor_type}
+
+Command-step context:
+- step_id: {step.id}
+- orchestrator_rationale: {step.instructions}
+- target_paths: {step.target_paths}
+
+Candidate run tree root:
+- absolute_path: {str(run_dir)}
+
+Candidate run tree inventory:
+{inventory_text}
+
+Accumulated execution evidence so far:
+- changed_files: {changed_files}
+- prior_commands: {commands}
+- notes: {notes}
+- risk_flags: {state.risk_flags}
+- step_notes: {state.step_notes}
+- relevant_files: {request.context.relevant_files}
+
+Selection instructions:
+- Select the smallest set of files that should be read before deciding whether executable repository-local verification is applicable.
+- Prefer files that clarify how verification should work in this repository.
+- Prefer changed implementation files, test files, entrypoints, and build/test configuration files when relevant.
+- Do not select files just because they exist.
+- If executable verification likely does not apply, you may select zero files or only a minimal set.
+""".strip()
+
+
+def _validate_selected_paths(
+    *,
+    selected_paths: list[str],
+    inventory: list[str],
+) -> list[str]:
+    inventory_set = set(inventory)
+    validated: list[str] = []
+
+    for path in selected_paths:
+        if path not in inventory_set:
+            raise SubagentRejectedStepError(
+                f"Selected inspection file is not present in candidate run-tree inventory: {path}"
+            )
+        validated.append(path)
+
+    return validated
+
+
+def _read_selected_files(
+    *,
+    run_dir: Path,
+    selected_paths: list[str],
+) -> list[dict]:
+    run_root = run_dir.resolve()
+    results: list[dict] = []
+
+    for relative_path in selected_paths:
+        candidate = (run_root / relative_path).resolve()
+
+        try:
+            candidate.relative_to(run_root)
+        except ValueError as exc:
+            raise SubagentRejectedStepError(
+                f"Selected inspection file escapes the candidate run tree: {relative_path}"
+            ) from exc
+
+        if not candidate.exists():
+            results.append(
+                {
+                    "path": relative_path,
+                    "status": "missing",
+                    "content": None,
+                }
+            )
+            continue
+
+        if not candidate.is_file():
+            results.append(
+                {
+                    "path": relative_path,
+                    "status": "not_a_file",
+                    "content": None,
+                }
+            )
+            continue
+
+        try:
+            content = read_text_file(str(candidate))
+            results.append(
+                {
+                    "path": relative_path,
+                    "status": "ok",
+                    "content": content,
+                }
+            )
+        except Exception as exc:
+            results.append(
+                {
+                    "path": relative_path,
+                    "status": f"read_error:{str(exc)}",
+                    "content": None,
+                }
+            )
+
+    return results
+
+
 def _build_command_planning_prompt(
     *,
     request: ExecutionRequest,
     step: ExecutionStep,
     state: ResolutionState,
     run_dir: Path,
+    inventory: list[str],
+    inspection_plan: CommandInspectionPlan,
+    inspected_files: list[dict],
 ) -> str:
-    inventory = _build_run_tree_inventory(run_dir)
     inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
 
     changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
@@ -133,15 +351,26 @@ Task:
 - technical_constraints: {request.technical_constraints}
 - out_of_scope: {request.out_of_scope}
 - tests_required: {request.tests_required}
+- executor_type: {request.executor_type}
 
 Command-step context:
+- step_id: {step.id}
 - orchestrator_rationale: {step.instructions}
+- target_paths: {step.target_paths}
 
 Candidate run tree root:
 - absolute_path: {str(run_dir)}
 
 Candidate run tree inventory:
 {inventory_text}
+
+Inspection plan used before command planning:
+- selected_paths: {inspection_plan.selected_paths}
+- selection_rationale: {inspection_plan.selection_rationale}
+- verification_hypothesis: {inspection_plan.verification_hypothesis}
+
+Inspected file contents:
+{inspected_files}
 
 Accumulated execution evidence so far:
 - changed_files: {changed_files}
@@ -152,11 +381,15 @@ Accumulated execution evidence so far:
 - step_notes: {state.step_notes}
 
 Planning instructions:
-- Decide the single most useful repository-local verification command to run now.
-- The command must help external validation verify the task without re-running commands later.
+- First decide whether repository-local executable verification is meaningfully applicable now.
+- If yes, return decision=run_command and choose the single most useful repository-local verification command to run now.
+- If no, return decision=verification_not_applicable and explain why executable verification would not materially improve the evidence.
+- Do not force a command for documentation/specification/requirements work unless the task explicitly calls for executable repository-local verification.
+- If you choose a command, it must help external validation verify the task without re-running commands later.
 - Choose the working directory relative to the candidate run tree.
-- Ground the command strictly in the provided run-tree inventory, task context, and accumulated evidence.
+- Ground the decision strictly in the provided run-tree inventory, inspected file contents, task context, and accumulated evidence.
 - Prefer the smallest useful verification command.
+- Prefer repository-supported executable paths over generic guesses.
 """.strip()
 
 
@@ -184,6 +417,9 @@ def _resolve_command_cwd(run_dir: Path, cwd_relative_path: str) -> Path:
 
 
 def _validate_planned_command(plan: CommandVerificationPlan) -> None:
+    if plan.decision != "run_command":
+        return
+
     if _contains_disallowed_shell_constructs(plan.command):
         raise SubagentRejectedStepError(
             "Planned command contains disallowed shell constructs such as chaining, pipes, or redirection."
@@ -197,6 +433,42 @@ class CommandRunnerAgent(BaseSubagent):
         self.runtime = runtime
         self.workspace_runtime = LocalWorkspaceRuntime(storage_service=ProjectStorageService())
 
+    def _select_files_for_inspection(
+        self,
+        *,
+        request: ExecutionRequest,
+        step: ExecutionStep,
+        state: ResolutionState,
+        run_dir: Path,
+        inventory: list[str],
+    ) -> CommandInspectionPlan:
+        schema = to_openai_strict_json_schema(CommandInspectionPlan.model_json_schema())
+        raw = self.runtime.generate_structured(
+            system_prompt=COMMAND_FILE_SELECTION_SYSTEM_PROMPT,
+            user_prompt=_build_file_selection_prompt(
+                request=request,
+                step=step,
+                state=state,
+                run_dir=run_dir,
+                inventory=inventory,
+            ),
+            schema_name="execution_engine_command_file_selection",
+            json_schema=schema,
+        )
+
+        try:
+            plan = CommandInspectionPlan.model_validate(raw)
+        except ValidationError as exc:
+            raise SubagentRejectedStepError(
+                f"Invalid command file-selection output: {str(exc)}"
+            ) from exc
+
+        plan.selected_paths = _validate_selected_paths(
+            selected_paths=plan.selected_paths,
+            inventory=inventory,
+        )
+        return plan
+
     def _plan_command(
         self,
         *,
@@ -204,6 +476,9 @@ class CommandRunnerAgent(BaseSubagent):
         step: ExecutionStep,
         state: ResolutionState,
         run_dir: Path,
+        inventory: list[str],
+        inspection_plan: CommandInspectionPlan,
+        inspected_files: list[dict],
     ) -> CommandVerificationPlan:
         schema = to_openai_strict_json_schema(CommandVerificationPlan.model_json_schema())
         raw = self.runtime.generate_structured(
@@ -213,6 +488,9 @@ class CommandRunnerAgent(BaseSubagent):
                 step=step,
                 state=state,
                 run_dir=run_dir,
+                inventory=inventory,
+                inspection_plan=inspection_plan,
+                inspected_files=inspected_files,
             ),
             schema_name="execution_engine_command_verification_plan",
             json_schema=schema,
@@ -236,6 +514,8 @@ class CommandRunnerAgent(BaseSubagent):
         step: ExecutionStep,
         state: ResolutionState,
     ) -> ResolutionState:
+        del db
+
         if step.subagent_name != self.name:
             raise SubagentRejectedStepError(
                 f"{self.name} received a step for subagent '{step.subagent_name}'."
@@ -249,7 +529,9 @@ class CommandRunnerAgent(BaseSubagent):
         )
 
         run_dir: Path | None = None
-        command_cwd: Path | None = None
+        inventory: list[str] = []
+        inspection_plan: CommandInspectionPlan | None = None
+        inspected_files: list[dict] = []
         plan: CommandVerificationPlan | None = None
 
         try:
@@ -259,12 +541,52 @@ class CommandRunnerAgent(BaseSubagent):
                 overlay_paths=overlay_paths,
             )
 
+            inventory = _build_run_tree_inventory(run_dir)
+
+            inspection_plan = self._select_files_for_inspection(
+                request=request,
+                step=step,
+                state=state,
+                run_dir=run_dir,
+                inventory=inventory,
+            )
+
+            inspected_files = _read_selected_files(
+                run_dir=run_dir,
+                selected_paths=inspection_plan.selected_paths,
+            )
+
+            for item in inspected_files:
+                if item["status"] == "ok":
+                    state.evidence.add_file_read(
+                        path=item["path"],
+                        producer=self.name,
+                        source="run_tree_inspection",
+                    )
+
             plan = self._plan_command(
                 request=request,
                 step=step,
                 state=state,
                 run_dir=run_dir,
+                inventory=inventory,
+                inspection_plan=inspection_plan,
+                inspected_files=inspected_files,
             )
+
+            if plan.decision == "verification_not_applicable":
+                state.evidence.add_note(
+                    message=(
+                        "Command verification was evaluated and deemed not materially applicable "
+                        f"for this task: {plan.rationale}"
+                    ),
+                    producer=self.name,
+                )
+                state.evidence.add_note(
+                    message=f"Verification goal assessment: {plan.verification_goal}",
+                    producer=self.name,
+                )
+                return state
 
             command_cwd = _resolve_command_cwd(run_dir, plan.cwd_relative_path)
 
@@ -329,6 +651,15 @@ class CommandRunnerAgent(BaseSubagent):
             ),
             producer=self.name,
         )
+
+        if inspection_plan is not None:
+            state.evidence.add_note(
+                message=(
+                    f"Selected {len(inspection_plan.selected_paths)} run-tree files for command "
+                    f"planning before choosing verification: {inspection_plan.selected_paths}"
+                ),
+                producer=self.name,
+            )
 
         if not exit_code_matched_expectation:
             state.add_risk_flags([f"command_exit_code_unexpected:{result.exit_code}"])

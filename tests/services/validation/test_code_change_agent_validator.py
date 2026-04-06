@@ -221,7 +221,9 @@ def test_code_change_agent_validator_builds_prompt_with_context_and_evidence_fil
 
     assert "Subagent being validated:" in user_prompt
     assert "code_change_agent" in user_prompt
-    assert "Implements the task by deciding which repository files to create or modify" in user_prompt
+    assert (
+        "Implements the task by deciding which repository files to create or modify" in user_prompt
+    )
 
     assert "Context files to read and use:" in user_prompt
     assert "README.md" in user_prompt

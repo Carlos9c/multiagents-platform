@@ -4,12 +4,13 @@
 
 Este proyecto implementa un sistema de ejecución autónoma de tareas basado en agentes, con un foco fuerte en:
 
-* Ejecución controlada de tareas atómicas
-* Validación estructurada multi-agente
-* Persistencia consistente de artefactos
-* Trazabilidad completa del flujo de trabajo
-* Recuperación determinista ante fallos
-* Verificación repo-local explícita mediante evidencia operacional
+- Ejecución controlada de tareas atómicas  
+- Validación estructurada multi-agente  
+- Persistencia consistente de artefactos  
+- Trazabilidad completa del flujo de trabajo  
+- Recuperación determinista ante fallos  
+- Verificación repo-local explícita mediante evidencia operacional  
+- Separación estricta entre coordinación, ejecución y validación  
 
 Flujo principal:
 
@@ -21,165 +22,128 @@ Flujo principal:
 
 ### 1. Execution Engine
 
-* Ejecuta tareas mediante orquestador + subagentes
-* Produce `ExecutionResult` con evidencia acumulada
+- Ejecuta tareas mediante orquestador + subagentes  
+- Produce `ExecutionResult` con evidencia acumulada  
 
 Subagentes actuales:
 
-* `context_selection_agent`
-* `code_change_agent`
-* `command_runner_agent`
+- context_selection_agent  
+- code_change_agent  
+- command_runner_agent  
 
 ---
 
 ### 2. Orchestrator
 
-* Decide:
+Decide:
 
-  * `call_subagent`
-  * `finish`
-  * `reject`
-  * `invalid` (guardrail, no decisión operativa real)
+- call_subagent  
+- finish  
+- reject  
+- invalid (guardrail, no decisión operativa real)  
 
-* Fases:
+Fases:
 
-  * `discovery`
-  * `execution`
+- discovery  
+- execution  
 
-* Loop controlado por budget
+Notas clave:
 
-* Notas clave:
+- reject → salida válida  
+- invalid → error del LLM, consume budget  
+- coordina, no evalúa calidad  
+- no abre loops de “pulido”  
 
-  * `reject` → salida válida (no ejecutable)
-  * `invalid` → error del LLM, consume budget y continúa
+Refinamientos recientes:
+
+- cierre automático cuando:
+  - contexto listo  
+  - implementación suficiente  
+  - verificación material ya cubierta  
+- un fallo de comando solo abre loop si es **reparable**
+- warnings ≠ gap operativo  
 
 ---
 
 ### 3. Task Execution Service
 
-* Orquesta:
+Orquesta:
 
-  * creación de run
-  * ejecución
-  * validación
-  * persistencia
-  * promoción de workspace
-  * reconciliación jerárquica
+- ejecución  
+- validación  
+- persistencia  
+- promoción  
+- reconciliación  
 
-* Responsabilidad crítica:
+Garantiza:
 
-  * **garantizar atomicidad real del cierre**
-  * degradar correctamente en caso de fallo
+- atomicidad real  
+- consistencia run → artifact → task  
 
 ---
 
 ### 4. Validation Service (RE-DISEÑADO)
 
-Nuevo enfoque:
+Sistema multi-validador basado en evidencia.
 
-* Sistema **multi-validador basado en evidencia**
-* Sin routing legacy
-* Sin builders intermedios
-* Sin duplicación de contratos
-
-Entrada única canónica:
+Entrada:
 
 ```python
-class TaskValidationInput(BaseModel):
-    execution_request: ExecutionRequest
-    execution_result: ExecutionResult
-    intent: ResolvedValidationIntent | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+TaskValidationInput
 ```
 
-Salida única:
+Salida:
 
 ```python
 ValidationResult
 ```
 
----
+Principios:
 
-#### 🔹 Principios clave
+- cada validador consume todo el input  
+- sin inputs especializados  
+- basado en evidencia real  
 
-* Cada validador:
+NO:
 
-  * consume TODO el input
-  * decide qué usar
-  * no recibe inputs especializados
+- no ejecuta comandos  
+- no propone mejoras  
+- no replanifica  
 
-* Validación basada en:
+Validadores:
 
-  * evidencia (`ExecutionEvidence`)
-  * contexto real
-  * ficheros del workspace
-
-* NO:
-
-  * no ejecuta comandos
-  * no propone mejoras
-  * no replanifica
-
----
-
-#### 🔹 Validadores actuales
-
-* `code_change_agent_validator`
-* `command_runner_agent_validator`
+- code_change_agent_validator  
+- command_runner_agent_validator  
 
 Regla:
 
-👉 **1 validador ↔ 1 subagente ejecutor**
+**1 validador ↔ 1 subagente**
 
----
+Flujo:
 
-#### 🔹 Flujo interno
+1. selección  
+2. ejecución  
+3. agregación  
+4. resultado final  
 
-1. Selección de validadores basada en:
+Orden de prioridad:
 
-   * `execution_agent_sequence`
-   * (ignorando `context_selection_agent`)
-
-2. Ejecución secuencial de validadores
-
-3. Agregación:
-
-```text
+```
 failed > manual_review > partial > completed
 ```
-
-4. Resultado final único
-
----
-
-#### 🔹 Aggregation
-
-* Consolida:
-
-  * findings
-  * blockers
-  * artifacts
-  * evidence_ids
-
-* Genera:
-
-  * decisión final
-  * summary agregado
-  * metadata de trazabilidad
 
 ---
 
 ### 5. Artifact System
 
-* Fuente de verdad del sistema
-* Persistencia del resultado de validación agregado
-* Base de auditoría completa
+Fuente de verdad del sistema.
 
-Incluye ahora:
+Incluye:
 
-* validadores ejecutados
-* resultados individuales
-* decisión agregada
+- resultados individuales  
+- resultado agregado  
+- evidencia  
+- trazabilidad  
 
 ---
 
@@ -189,94 +153,128 @@ Estructura:
 
 ```
 project/
-├── domain_data/source
+├── source
 ├── executions/<run_id>/
 │   ├── workspace
 │   ├── run
-│   ├── logs
-│   └── outputs
 ```
 
 Semántica:
 
-* `source` → estado persistido del proyecto
-* `workspace` → overlay editable por ejecución
-* `run` → entorno efímero para verificación
-* `run` siempre se elimina
-* promoción = overlay → source
+- source → estado persistido  
+- workspace → overlay  
+- run → entorno efímero  
+- run siempre se elimina  
 
 ---
 
-### 7. Task Hierarchy
+### 7. Command Runner Agent (REFORZADO)
 
-* Propagación determinista
-* Sin efectos parciales
-* Consistencia post-ejecución obligatoria
+Rol:
+
+- decidir si verificar  
+- ejecutar comando si aplica  
+- registrar evidencia  
+
+Mejoras:
+
+- soporte de:
+  - run_command  
+  - verification_not_applicable  
+
+Nuevo flujo en 2 pasos:
+
+1. selección de archivos relevantes  
+2. planificación del comando  
+
+Ahora usa:
+
+- inventario del repo  
+- evidencia acumulada  
+- archivos leídos explícitamente  
+
+Evidencia generada:
+
+- command_execution  
+- notas de decisión  
+- outcome summary  
 
 ---
 
-### 8. Post-Batch (WIP)
+### 8. Code Change Agent (REFINADO)
 
-* Recovery
-* Evaluation
-* Plan mutation
+Rol:
 
-Estado: **pendiente de reconstrucción sobre nueva validación**
+- materializar cambios completos  
+
+Mejoras:
+
+- enfoque cross-language  
+- coherencia estructural  
+- cambios mínimos  
+- evitar refactors innecesarios  
+
+---
+
+### 9. Task Hierarchy
+
+- propagación determinista  
+- sin efectos parciales  
+
+---
+
+### 10. Post-Batch (WIP)
+
+- recovery  
+- evaluación  
+- mutation  
+
+Refuerzo reciente:
+
+- invariantes terminales del plan  
+- stage_closure obligatorio  
 
 ---
 
 ## ✅ Estado actual
 
-### 🧩 Arquitectura
+### Arquitectura
 
-* Orchestrator estable
-* Subagentes alineados
-* Execution → Validation desacoplado correctamente
-* Eliminación completa de:
+- orquestador estable  
+- subagentes alineados  
+- validación desacoplada  
+- sin legacy crítico  
 
-  * routing legacy
-  * package_builder
-  * context duplication
+Boundary claro:
 
----
-
-### ⚙️ Ejecución
-
-* Flujo completo:
-
-  * execution → validation → aggregation → persistencia
-
-* Evidencia acumulativa:
-
-  * multi-agente
-  * estructurada
+- orquestador coordina  
+- subagentes ejecutan  
+- validadores juzgan  
 
 ---
 
-### 🧠 Validación
+### Ejecución
 
-* Sistema multi-validator implementado
-
-* Basado en:
-
-  * evidencia real
-  * lectura de ficheros
-  * contexto completo
-
-* Sin sobreingeniería:
-
-  * input único
-  * sin builders
-  * sin contratos redundantes
+- flujo completo funcional  
+- evidencia acumulativa estructurada  
+- command_runner_agent más inteligente  
 
 ---
 
-### 🧪 Tests
+### Validación
 
-* Validators → ✅ cubiertos
-* Aggregation → ✅ cubierta
-* Validation service → ✅ cubierto
-* Orchestrator → ✅ estable
+- multi-validator funcional  
+- basado en evidencia  
+- sin sobreingeniería  
+
+---
+
+### Tests
+
+- validators ✔  
+- aggregation ✔  
+- orchestrator ✔  
+- command_runner_agent ✔  
 
 ---
 
@@ -284,152 +282,112 @@ Estado: **pendiente de reconstrucción sobre nueva validación**
 
 ### Ejecución
 
-* `finish` requiere evidencia
-* `invalid` no rompe flujo
-* ejecución siempre determinista
+- finish requiere evidencia  
+- invalid no rompe flujo  
+- cierre cuando checklist completo  
 
 ---
 
 ### Validación
 
-* 1 input canónico
-* múltiples validadores independientes
-* agregación determinista
-* no ejecución de comandos
+- input único  
+- validadores independientes  
+- agregación determinista  
 
 ---
 
 ### Persistencia
 
-* 1 run → 1 validation artifact
-* artifact contiene:
-
-  * resultado agregado
-  * resultados individuales
-* task terminal ⇔ artifact existente
+- 1 run → 1 artifact  
+- artifact contiene verdad final  
 
 ---
 
 ### Workspace
 
-* aislamiento total entre runs
-* run efímero
-* promotion controlada
+- aislamiento total  
+- run efímero  
+- promoción controlada  
 
 ---
 
 ## 🚀 Últimos avances
 
-* Eliminación completa de validation legacy
-* Eliminación de `package_builder`
-* Simplificación radical de contratos
-* Introducción de:
-
-  * validadores por subagente
-  * aggregation determinista
-* Validación basada en evidencia real
-* Integración completa con execution_service
-* Tests robustos para:
-
-  * validators
-  * aggregation
-  * service
+- eliminación de validation legacy  
+- eliminación de package_builder  
+- simplificación de contratos  
+- multi-validator real  
+- mejora del cierre del orquestador  
+- command_runner_agent en 2 fases  
+- soporte de no verificación  
+- mejora prompts code_change_agent  
+- refuerzo invariantes de execution_plan  
+- corrección de tests complejos  
 
 ---
 
 ## 🧹 Limpieza realizada
 
-* eliminación de:
-
-  * routing legacy
-  * múltiples contextos de validación
-  * builders innecesarios
-* simplificación de evidence handling
-* unificación de contratos
+- eliminación de routing legacy  
+- eliminación de builders  
+- unificación de contratos  
+- reducción de heurísticas débiles  
 
 ---
 
 ## 🔭 Próximos pasos
 
-### 🔴 Alta prioridad
+### Alta prioridad
 
-1. Refinar validadores
-
-* asegurar cobertura de casos edge
-* robustez frente a evidencia incompleta
-
----
-
-2. End-to-end real
-
-* escenarios complejos
-* múltiples agentes
-* evidencia cruzada
+1. End-to-end complejos  
+2. Robustecer command_runner_agent  
+3. Refinar orquestador  
+4. Mejorar code_change_agent  
 
 ---
 
-3. Evidencia
+### Media
 
-* consolidar formato definitivo
-* garantizar trazabilidad total
-
----
-
-4. command_runner_agent + validación
-
-* mejorar interpretabilidad de outputs
-* validar casos reales (tests, builds, etc.)
+5. Post-batch  
+6. Auditoría  
+7. Métricas  
 
 ---
 
-### 🟠 Media prioridad
+### Baja
 
-5. Post-batch
-6. Auditoría avanzada
-7. Métricas de validación
-
----
-
-### 🟡 Baja prioridad
-
-8. Refactor estructural menor
-9. Configuración avanzada
+8. Refactors menores  
+9. Configuración avanzada  
 
 ---
 
 ## 🧠 Filosofía
 
-* La verdad es el resultado validado
-* Validación no re-ejecuta
-* Sin heurísticas mágicas
-* Sin contratos duplicados
-* Sin sobreingeniería
-* Evidencia como fuente única de verdad
-* Agregación explícita, no implícita
-* Orquestador coordina, no decide verdad
+- la verdad es el resultado validado  
+- validación no re-ejecuta  
+- evidencia = fuente única  
+- sin sobreingeniería  
+- orquestador no decide verdad  
 
 ---
 
 ## 📌 Estado final
 
-### Core
+Core:
 
-* ejecución sólida
-* validación rediseñada
-* agregación consistente
-* persistencia coherente
+- ejecución sólida  
+- validación robusta  
+- agregación consistente  
 
-### Sistema
+Sistema:
 
-* coherente end-to-end
-* sin legacy crítico
-* preparado para escalar validadores
+- coherente end-to-end  
+- preparado para escalar  
 
-### Siguiente foco real
+Foco actual:
 
-👉 **Refinar validadores y casos reales complejos**
+👉 mejorar decisiones operativas reales (verificar vs no verificar vs cerrar)
 
-Después:
+Siguiente paso:
 
-* post-batch
-* autonomía completa
+👉 robustez en escenarios reales complejos

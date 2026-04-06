@@ -10,6 +10,7 @@ from app.execution_engine.contracts import (
     ExecutionEvidence,
     ExecutionRequest,
     ExecutionResult,
+    NoteEvidence,
     ProjectExecutionContext,
 )
 from app.models.execution_run import ExecutionRun
@@ -19,32 +20,10 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
 )
 from app.services.task_execution_service import execute_task_sync
+from app.services.validation.aggregation import ValidationAggregationResult
 from app.services.validation.contracts import ValidationResult
-from app.services.validation.router.schemas import ValidationRoutingDecision
-
-
-def _make_code_routing_decision() -> ValidationRoutingDecision:
-    return ValidationRoutingDecision(
-        validator_key="code_task_validator",
-        discipline="code",
-        validation_mode="post_execution",
-        requires_workspace=True,
-        requires_file_reading=True,
-        requires_changed_files=True,
-        requires_command_results=True,
-        requires_artifacts=True,
-        requires_output_snapshot=True,
-        requires_execution_agent_sequence=True,
-        require_manual_review_if_evidence_missing=True,
-        validation_focus=[
-            "acceptance_criteria_alignment",
-            "scope_completion",
-            "repository_changes",
-            "constraint_compliance",
-        ],
-        routing_rationale="Route code execution results to the code task validator.",
-        open_questions=[],
-    )
+from app.services.validation.selection import SelectedValidator, ValidationSelectionResult
+from app.services.validation.service import ValidationServiceResult
 
 
 def _patch_workspace_runtime(monkeypatch, *, promoted_state: dict | None = None):
@@ -61,11 +40,6 @@ def _patch_workspace_runtime(monkeypatch, *, promoted_state: dict | None = None)
                 promoted_state.__setitem__("called", True) if promoted_state is not None else None
             ),
         )
-
-    monkeypatch.setattr(
-        "app.services.task_execution_service.LocalWorkspaceRuntime",
-        _factory,
-    )
 
     monkeypatch.setattr(
         "app.services.task_execution_service.LocalWorkspaceRuntime",
@@ -91,18 +65,26 @@ def _patch_execution_request(
             task_description=task.description,
             task_summary=task.summary,
             objective=task.objective,
+            proposed_solution=task.proposed_solution,
+            implementation_notes=task.implementation_notes,
+            implementation_steps=task.implementation_steps,
             acceptance_criteria=task.acceptance_criteria,
+            tests_required=task.tests_required,
             technical_constraints=task.technical_constraints,
             out_of_scope=task.out_of_scope,
-            allowed_paths=allowed_paths,
+            success_criteria=[],
+            constraints=[],
+            allowed_paths=list(allowed_paths),
+            blocked_paths=[],
             context=ProjectExecutionContext(
                 project_id=task.project_id,
                 workspace_path=workspace_path,
                 source_path=source_path,
-                relevant_files=relevant_files,
+                relevant_files=list(relevant_files),
                 key_decisions=["Preserve current public interface."],
                 related_tasks=[],
             ),
+            historical_context=None,
         )
 
     monkeypatch.setattr(
@@ -113,7 +95,7 @@ def _patch_execution_request(
 
 def _patch_engine(monkeypatch, engine_result: ExecutionResult):
     def _fake_execute(db, request):
-        return engine_result
+        return engine_result, request
 
     monkeypatch.setattr(
         "app.services.task_execution_service.get_execution_engine",
@@ -121,6 +103,35 @@ def _patch_engine(monkeypatch, engine_result: ExecutionResult):
             backend_name="test_engine",
             execute=_fake_execute,
         ),
+    )
+
+
+def _build_validation_result(
+    *,
+    validation_decision: str,
+    final_task_status: str,
+    followup_validation_required: bool = False,
+) -> ValidationResult:
+    return ValidationResult(
+        validator_key="code_task_validator",
+        discipline="code",
+        decision=validation_decision,
+        summary="Validation summary.",
+        findings=[],
+        validated_scope="Validated scope." if validation_decision == "completed" else None,
+        missing_scope="Missing scope." if validation_decision != "completed" else None,
+        blockers=[],
+        manual_review_required=(validation_decision == "manual_review"),
+        final_task_status=final_task_status,
+        artifacts_created=[],
+        validated_evidence_ids=["produced_file:app_service.py", "command:0"],
+        unconsumed_evidence_ids=[],
+        followup_validation_required=followup_validation_required,
+        recommended_next_validator_keys=[],
+        partial_validation_summary=(
+            "Additional validation follow-up required." if followup_validation_required else None
+        ),
+        metadata={"confidence": "high"},
     )
 
 
@@ -132,46 +143,51 @@ def _patch_validation_service_flow(
     followup_validation_required: bool = False,
     capture: dict | None = None,
 ):
-    def _fake_resolve_validation_route(*, routing_input):
-        if capture is not None:
-            capture["routing_input"] = routing_input
-        return _make_code_routing_decision()
+    validation_result = _build_validation_result(
+        validation_decision=validation_decision,
+        final_task_status=final_task_status,
+        followup_validation_required=followup_validation_required,
+    )
 
-    def _fake_dispatch_validation(*, intent, validation_input):
-        if capture is not None:
-            capture["intent"] = intent
-            capture["validation_input"] = validation_input
-        return ValidationResult(
-            validator_key="code_task_validator",
-            discipline="code",
-            decision=validation_decision,
-            summary="Validation summary.",
-            findings=[],
-            validated_scope="Validated scope." if validation_decision == "completed" else None,
-            missing_scope="Missing scope." if validation_decision != "completed" else None,
-            blockers=[],
-            manual_review_required=(validation_decision == "manual_review"),
-            final_task_status=final_task_status,
-            artifacts_created=[],
-            validated_evidence_ids=["produced_file:app_service.py", "command:0"],
-            unconsumed_evidence_ids=[],
-            followup_validation_required=followup_validation_required,
-            recommended_next_validator_keys=[],
-            partial_validation_summary=(
-                "Additional validation follow-up required."
-                if followup_validation_required
-                else None
+    selection_result = ValidationSelectionResult(
+        selected_validators=[
+            SelectedValidator(
+                producer_key="code_change_agent",
+                validator_key="code_task_validator",
+                selection_reason="Selected for vertical flow test.",
             ),
-            metadata={"confidence": "high"},
+            SelectedValidator(
+                producer_key="command_runner_agent",
+                validator_key="code_task_validator",
+                selection_reason="Selected for vertical flow test.",
+            ),
+        ],
+        skipped_producers=[],
+        notes=[],
+    )
+
+    aggregation_result = ValidationAggregationResult(
+        final_result=validation_result,
+        validator_results=[validation_result],
+        winning_decision=validation_decision,
+        notes=[f"Winning validation decision: {validation_decision}"],
+    )
+
+    def _fake_validate_execution_result(**kwargs):
+        if capture is not None:
+            capture["kwargs"] = kwargs
+
+        return ValidationServiceResult(
+            validator_input=types.SimpleNamespace(),
+            selection_result=selection_result,
+            validator_results=[validation_result],
+            aggregation_result=aggregation_result,
+            validation_result=validation_result,
         )
 
     monkeypatch.setattr(
-        "app.services.validation.service.resolve_validation_route",
-        _fake_resolve_validation_route,
-    )
-    monkeypatch.setattr(
-        "app.services.validation.service.dispatch_validation",
-        _fake_dispatch_validation,
+        "app.services.task_execution_service.validate_execution_result",
+        _fake_validate_execution_result,
     )
 
 
@@ -225,7 +241,6 @@ def test_execute_task_sync_vertical_flow_completed_validation_completes_task(
     captured = {}
 
     _patch_workspace_runtime(monkeypatch, promoted_state=promoted)
-
     _patch_execution_request(
         monkeypatch,
         workspace_path=str(workspace_dir),
@@ -250,17 +265,33 @@ def test_execute_task_sync_vertical_flow_completed_validation_completes_task(
                 ChangedFile(
                     path="app_service.py",
                     change_type=CHANGE_TYPE_MODIFIED,
+                    producer="code_change_agent",
                 )
             ],
+            files_read=[],
+            change_dependencies=[],
             commands=[
                 CommandExecution(
                     command="pytest -q",
+                    producer="command_runner_agent",
+                    cwd=".",
                     exit_code=0,
                     stdout="1 passed",
                     stderr="",
+                    timed_out=False,
+                    verification_goal="Verify the service behavior remains valid.",
+                    rationale="Run the narrowest repository-local verification command.",
+                    validation_claims=["tests_passed"],
+                    expected_exit_codes=[0],
+                    observed_outcome_summary="Command finished with exit_code=0.",
                 )
             ],
-            notes=["Observed repository changes."],
+            notes=[
+                NoteEvidence(
+                    message="Observed repository changes.",
+                    producer="code_change_agent",
+                )
+            ],
             artifacts_created=[],
         ),
     )
@@ -286,10 +317,15 @@ def test_execute_task_sync_vertical_flow_completed_validation_completes_task(
     assert json.loads(task.last_execution_agent_sequence) == expected_sequence
     assert json.loads(latest_run.execution_agent_sequence) == expected_sequence
 
-    assert captured["routing_input"].task.task_id == task.id
-    assert captured["validation_input"].task.task_id == task.id
-    assert captured["validation_input"].evidence_package.evidence_items
-    assert captured["validation_input"].request_context.allowed_paths == ["app_service.py"]
+    validation_kwargs = captured["kwargs"]
+    assert validation_kwargs["task"].id == task.id
+    assert validation_kwargs["execution_result"].task_id == task.id
+    assert validation_kwargs["execution_result"].decision == EXECUTION_DECISION_COMPLETED
+    assert validation_kwargs["execution_result"].evidence.changed_files
+    assert validation_kwargs["execution_result"].evidence.commands
+    assert validation_kwargs["execution_request"].task_id == task.id
+    assert validation_kwargs["execution_request"].allowed_paths == ["app_service.py"]
+    assert validation_kwargs["execution_request"].context.relevant_files == ["app_service.py"]
 
 
 def test_execute_task_sync_vertical_flow_partial_validation_marks_task_partial(
@@ -327,7 +363,6 @@ def test_execute_task_sync_vertical_flow_partial_validation_marks_task_partial(
     captured = {}
 
     _patch_workspace_runtime(monkeypatch, promoted_state=promoted)
-
     _patch_execution_request(
         monkeypatch,
         workspace_path=str(workspace_dir),
@@ -352,17 +387,33 @@ def test_execute_task_sync_vertical_flow_partial_validation_marks_task_partial(
                 ChangedFile(
                     path="app_service.py",
                     change_type=CHANGE_TYPE_MODIFIED,
+                    producer="code_change_agent",
                 )
             ],
+            files_read=[],
+            change_dependencies=[],
             commands=[
                 CommandExecution(
                     command="pytest -q",
+                    producer="command_runner_agent",
+                    cwd=".",
                     exit_code=0,
                     stdout="1 passed",
                     stderr="",
+                    timed_out=False,
+                    verification_goal="Verify the partial implementation still passes tests.",
+                    rationale="Run the narrowest repository-local verification command.",
+                    validation_claims=["tests_passed"],
+                    expected_exit_codes=[0],
+                    observed_outcome_summary="Command finished with exit_code=0.",
                 )
             ],
-            notes=["Observed repository changes."],
+            notes=[
+                NoteEvidence(
+                    message="Observed repository changes.",
+                    producer="code_change_agent",
+                )
+            ],
             artifacts_created=[],
         ),
     )
@@ -372,6 +423,7 @@ def test_execute_task_sync_vertical_flow_partial_validation_marks_task_partial(
         monkeypatch,
         validation_decision="partial",
         final_task_status=TASK_STATUS_PARTIAL,
+        followup_validation_required=True,
         capture=captured,
     )
 
@@ -388,7 +440,15 @@ def test_execute_task_sync_vertical_flow_partial_validation_marks_task_partial(
     assert json.loads(task.last_execution_agent_sequence) == expected_sequence
     assert json.loads(latest_run.execution_agent_sequence) == expected_sequence
 
-    assert captured["routing_input"].task.task_id == task.id
-    assert captured["validation_input"].task.task_id == task.id
-    assert captured["validation_input"].evidence_package.evidence_items
-    assert captured["validation_input"].request_context.allowed_paths == ["app_service.py"]
+    validation_kwargs = captured["kwargs"]
+    assert validation_kwargs["task"].id == task.id
+    assert validation_kwargs["execution_result"].task_id == task.id
+    assert validation_kwargs["execution_result"].decision == EXECUTION_DECISION_PARTIAL
+    assert validation_kwargs["execution_result"].remaining_scope == (
+        "Finish the remaining branch and supporting checks."
+    )
+    assert validation_kwargs["execution_result"].evidence.changed_files
+    assert validation_kwargs["execution_result"].evidence.commands
+    assert validation_kwargs["execution_request"].task_id == task.id
+    assert validation_kwargs["execution_request"].allowed_paths == ["app_service.py"]
+    assert validation_kwargs["execution_request"].context.relevant_files == ["app_service.py"]

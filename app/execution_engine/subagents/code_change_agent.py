@@ -28,12 +28,19 @@ from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 CODE_CHANGE_AGENT_SYSTEM_PROMPT = """
-You are a senior artifact implementation agent.
+You are a senior repository implementation agent.
 
 Your job is to implement ONE already-atomic task by deciding which repository-relative
 artifacts must be created or modified and by returning their full final contents.
 
 Return ONLY JSON matching the provided schema.
+
+Core responsibility:
+- Materialize the smallest coherent repository change that correctly completes the task.
+- Produce final file contents that are internally consistent with each other.
+- Preserve and extend the existing repository structure when it is the natural fit.
+- Add new files only when they are truly needed.
+- Avoid unrelated refactors, speculative cleanup, or architectural expansion.
 
 Hard rules:
 - Do not change the task.
@@ -58,6 +65,32 @@ Operation integrity rules:
   (either already present in the run overlay workspace or present in the persisted source baseline).
 - Use create only for files that do not exist in either the run overlay workspace or the persisted source baseline.
 - Do not return duplicate paths.
+
+Repository coherence rules:
+- Prefer extending the repository's current conventions over introducing new ones.
+- Do not introduce new frameworks, build systems, package managers, runtime layers, or configuration files unless the task clearly requires them.
+- Do not add scaffolding, boilerplate, or infrastructure "just in case".
+- Do not invent new entrypoints, exports, module boundaries, or config layers unless they are needed for the task.
+- If you touch multiple files, ensure cross-file references are consistent:
+  - referenced symbols should exist,
+  - imports/includes/references should match actual file contents,
+  - public entrypoints should not expose missing or contradictory definitions.
+- Prefer stable, explicit, low-surprise structure over cleverness.
+- Keep the change easy to understand and easy to verify repo-locally.
+
+Implementation quality expectations:
+- Match the dominant style and structure already present in the repository whenever possible.
+- Prefer the least invasive design that fully satisfies the task.
+- Avoid fragile coupling to incidental file names, hidden side effects, or unnecessary indirection.
+- If a task can be completed inside an existing module or structure cleanly, prefer that over creating extra layers.
+- Only introduce configuration when it is required for the implementation to work inside the repository.
+- When a test or executable artifact is required, make the implementation compatible with straightforward repository-local execution.
+- Avoid partial structural moves that force follow-up cleanups.
+
+Decision policy:
+- First decide what minimal coherent artifact slice is needed.
+- Then ensure the returned files form one consistent repository state.
+- Optimize for correctness, coherence, and fit with the repo, not for novelty.
 """.strip()
 
 
@@ -288,6 +321,7 @@ def _build_related_file_context(
 
 def _build_user_prompt(
     request: ExecutionRequest,
+    step: ExecutionStep,
     state: ResolutionState,
 ) -> tuple[str, list[tuple[str, str | None]]]:
     source_root = _get_source_root_from_request(request)
@@ -322,6 +356,12 @@ Task:
 - out_of_scope: {request.out_of_scope}
 - executor_type: {request.executor_type}
 
+Current subagent step:
+- step_id: {step.id}
+- step_title: {step.title}
+- step_instructions: {step.instructions}
+- target_paths: {step.target_paths}
+
 Project context:
 {project_context_summary}
 
@@ -340,6 +380,16 @@ Current orchestration state:
 - risk_flags: {state.risk_flags}
 - step_notes: {state.step_notes}
 - evidence_notes: {evidence_notes}
+
+Quality expectations:
+- Prefer the smallest coherent repository change that fully satisfies the task.
+- Fit the implementation into the repository's existing structure and conventions when possible.
+- Avoid unnecessary new config, packaging files, runtime layers, wrappers, or scaffolding.
+- Ensure cross-file consistency: references, exports, includes, and public symbols must match the files you return.
+- Do not introduce placeholder architecture or speculative extensibility.
+- Keep the result straightforward to understand and straightforward to verify.
+- When the task requires executable behavior or tests, make the change compatible with ordinary repository-local execution using the repo's natural structure.
+- When the task is documentation-oriented, avoid inventing code or operational machinery not required by the task.
 
 Important:
 - The workspace is an editable overlay for this execution run.
@@ -428,7 +478,7 @@ class CodeChangeAgent(BaseSubagent):
 
         source_root = _get_source_root_from_request(request)
 
-        user_prompt, files_read = _build_user_prompt(request, state)
+        user_prompt, files_read = _build_user_prompt(request, step, state)
         for path, source_label in files_read:
             state.evidence.add_file_read(
                 path=path,

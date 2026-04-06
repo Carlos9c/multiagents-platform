@@ -19,12 +19,15 @@ from app.models.task import (
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
-    Task,
 )
 from app.services.task_execution_service import (
     TaskExecutionServiceError,
     execute_task_sync,
 )
+from app.services.validation.aggregation import ValidationAggregationResult
+from app.services.validation.contracts import ValidationResult
+from app.services.validation.selection import SelectedValidator, ValidationSelectionResult
+from app.services.validation.service import ValidationServiceResult
 
 
 def _build_engine_result(
@@ -47,6 +50,8 @@ def _build_engine_result(
         execution_agent_sequence=execution_agent_sequence or [],
         evidence=ExecutionEvidence(
             changed_files=[],
+            files_read=[],
+            change_dependencies=[],
             commands=[],
             notes=[],
             artifacts_created=[],
@@ -54,17 +59,11 @@ def _build_engine_result(
     )
 
 
-def _set_task_status(db, task_id: int, status: str) -> str:
-    task = db.get(Task, task_id)
-    task.status = status
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-    return task.status
-
-
 def _patch_engine(
-    monkeypatch, engine_result: ExecutionResult, *, captured_request: dict | None = None
+    monkeypatch,
+    engine_result: ExecutionResult,
+    *,
+    captured_request: dict | None = None,
 ):
     def _fake_build_execution_request(db, task, execution_run_id, resolved_executor_type):
         request = types.SimpleNamespace(
@@ -86,6 +85,7 @@ def _patch_engine(
                 key_decisions=[],
                 related_tasks=[],
             ),
+            historical_context=None,
             allowed_paths=[],
             blocked_paths=[],
         )
@@ -102,7 +102,7 @@ def _patch_engine(
         if captured_request is not None:
             captured_request["engine_db"] = db
             captured_request["engine_request"] = request
-        return engine_result
+        return engine_result, request
 
     monkeypatch.setattr(
         "app.services.task_execution_service.get_execution_engine",
@@ -145,45 +145,74 @@ def _get_latest_run_for_task(db, task_id: int) -> ExecutionRun:
     return run
 
 
-def _patch_new_validation_service(
+def _build_validation_result(
+    *,
+    decision: str,
+    final_task_status: str,
+    followup_validation_required: bool = False,
+) -> ValidationResult:
+    return ValidationResult(
+        validator_key="standard_task_validator",
+        discipline="standard",
+        decision=decision,
+        summary="Validation summary.",
+        findings=[],
+        validated_scope="Validated scope." if decision == "completed" else None,
+        missing_scope="Missing scope." if decision != "completed" else None,
+        blockers=[],
+        manual_review_required=(decision == "manual_review"),
+        final_task_status=final_task_status,
+        artifacts_created=[],
+        validated_evidence_ids=[],
+        unconsumed_evidence_ids=[],
+        followup_validation_required=followup_validation_required,
+        recommended_next_validator_keys=[],
+        partial_validation_summary=(
+            "Additional follow-up validation required." if followup_validation_required else None
+        ),
+        metadata={},
+    )
+
+
+def _patch_validation_service(
     monkeypatch,
     *,
     decision: str,
     final_task_status: str,
     followup_validation_required: bool = False,
 ):
+    validation_result = _build_validation_result(
+        decision=decision,
+        final_task_status=final_task_status,
+        followup_validation_required=followup_validation_required,
+    )
+
+    selection_result = ValidationSelectionResult(
+        selected_validators=[
+            SelectedValidator(
+                producer_key="code_change_agent",
+                validator_key="standard_task_validator",
+                selection_reason="Selected for test.",
+            )
+        ],
+        skipped_producers=[],
+        notes=[],
+    )
+
+    aggregation_result = ValidationAggregationResult(
+        final_result=validation_result,
+        validator_results=[validation_result],
+        winning_decision=decision,
+        notes=[f"Winning validation decision: {decision}"],
+    )
+
     def _fake_validate_execution_result(**kwargs):
-        return types.SimpleNamespace(
-            routing_input=types.SimpleNamespace(),
-            routing_decision=types.SimpleNamespace(
-                validator_key="standard_task_validator",
-                discipline="standard",
-                validation_mode="post_execution",
-            ),
+        return ValidationServiceResult(
             validator_input=types.SimpleNamespace(),
-            validation_result=types.SimpleNamespace(
-                validator_key="standard_task_validator",
-                discipline="standard",
-                decision=decision,
-                summary="Validation summary.",
-                findings=[],
-                validated_scope="Validated scope." if decision == "completed" else None,
-                missing_scope="Missing scope." if decision != "completed" else None,
-                blockers=[],
-                manual_review_required=(decision == "manual_review"),
-                final_task_status=final_task_status,
-                artifacts_created=[],
-                validated_evidence_ids=[],
-                unconsumed_evidence_ids=[],
-                followup_validation_required=followup_validation_required,
-                recommended_next_validator_keys=[],
-                partial_validation_summary=(
-                    "Additional follow-up validation required."
-                    if followup_validation_required
-                    else None
-                ),
-                metadata={},
-            ),
+            selection_result=selection_result,
+            validator_results=[validation_result],
+            aggregation_result=aggregation_result,
+            validation_result=validation_result,
         )
 
     monkeypatch.setattr(
@@ -238,7 +267,7 @@ def test_execute_task_sync_resolves_pending_executor_at_runtime(
         captured_request=captured,
     )
     _patch_workspace_runtime(monkeypatch)
-    _patch_new_validation_service(
+    _patch_validation_service(
         monkeypatch,
         decision="completed",
         final_task_status=TASK_STATUS_COMPLETED,
@@ -247,6 +276,7 @@ def test_execute_task_sync_resolves_pending_executor_at_runtime(
     result = execute_task_sync(db_session, atomic_task.id)
 
     assert captured["request"].executor_type == EXECUTION_ENGINE
+    assert captured["engine_request"] is captured["request"]
     assert result.executor_type == EXECUTION_ENGINE
 
     db_session.refresh(atomic_task)
@@ -285,7 +315,7 @@ def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
         captured_request=captured,
     )
     _patch_workspace_runtime(monkeypatch)
-    _patch_new_validation_service(
+    _patch_validation_service(
         monkeypatch,
         decision="completed",
         final_task_status=TASK_STATUS_COMPLETED,
@@ -294,6 +324,7 @@ def test_execute_task_sync_accepts_legacy_resolved_executor_for_compatibility(
     result = execute_task_sync(db_session, atomic_task.id)
 
     assert captured["request"].executor_type == EXECUTION_ENGINE
+    assert captured["engine_request"] is captured["request"]
     assert result.executor_type == EXECUTION_ENGINE
 
     db_session.refresh(atomic_task)
@@ -343,7 +374,7 @@ def test_execute_task_sync_completed_reconciles_parent_and_promotes_workspace(
         ),
     )
     _patch_workspace_runtime(monkeypatch, promoted_state=promoted)
-    _patch_new_validation_service(
+    _patch_validation_service(
         monkeypatch,
         decision="completed",
         final_task_status=TASK_STATUS_COMPLETED,
@@ -401,7 +432,7 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
         ),
     )
     _patch_workspace_runtime(monkeypatch)
-    _patch_new_validation_service(
+    _patch_validation_service(
         monkeypatch,
         decision="partial",
         final_task_status=TASK_STATUS_PARTIAL,

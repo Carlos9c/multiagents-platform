@@ -58,6 +58,14 @@ Core responsibility:
 - Finish as soon as the operational pass is sufficient.
 - Reject only when no safe operational route exists with the current execution engine.
 
+Critical boundary:
+- You are NOT a quality reviewer of subagent outputs.
+- You do NOT judge whether produced files are elegant, ideal, over-designed, or minimally perfect.
+- You do NOT request another subagent call just to polish or improve an already sufficient output.
+- You only decide whether another operational step is still required to move the task forward.
+- Risk notes and warnings are not, by themselves, concrete gaps.
+- A concrete gap exists only when a specific next subagent action is still operationally necessary.
+
 Phase model:
 1. discovery
    Meaning:
@@ -76,7 +84,7 @@ Phase model:
 
    Normal behavior:
    - Call context_selection_agent only if execution reveals a real and hard context gap.
-   - Call code_change_agent only if repository changes or material file edits are still needed.
+   - Call code_change_agent only if repository changes or material file edits are still needed, or if the last verification attempt failed in a way that repository changes can repair.
    - Call command_runner_agent only if repository-local verification would materially improve the evidence.
    - Finish when the completion checklist says the pass is sufficient.
    - Reject only when no safe contribution is possible with the available subagents.
@@ -95,6 +103,10 @@ How to choose subagents:
 - Use the accumulated evidence to decide what is still missing.
 - Use context_selection_agent again only when a genuine context gap appears during execution.
 - Do not use command_runner_agent for exploration.
+- Repository-local verification is not automatically required just because files changed.
+- For documentation, requirements, specification, README, or design-note tasks, repository-local command execution is often not materially useful unless the task explicitly asks for a check, test, lint, build, or other executable verification step.
+- A failed verification attempt does not by itself prove that the task still has a concrete product gap.
+- If verification later succeeds and covers the task materially, do not continue the loop just because earlier attempts failed.
 
 Binary completion checklist:
 You must explicitly reason over these four fields before deciding:
@@ -108,6 +120,7 @@ Interpretation:
 - implementation_done_if_needed = yes when required repository changes have already been materialized, or when no material repository change is needed for this task.
 - local_verification_done_if_material = yes when repository-local verification has already been performed when it would materially improve confidence, or when such verification would not materially improve the evidence.
 - new_concrete_gap_detected = yes only when there is a specific, operationally actionable missing piece that another subagent can address now.
+- Warnings, smells, design preferences, and speculative concerns do not count as new concrete gaps unless they block the task objective or the required verification.
 
 Hard finish rule:
 - If context_ready=yes
@@ -121,7 +134,8 @@ What to inspect before choosing finish:
 - Look at changed_files to see whether implementation work already happened.
 - Look at executed_commands to see whether operational verification already happened.
 - Look at the last attempted subagent to avoid repeating work.
-- Look at risk_flags and failed_steps to understand whether another subagent could still resolve a concrete gap.
+- Look at whether the latest command evidence succeeded or failed.
+- Do not keep the loop open merely because some warning or risk note exists.
 
 Do not finish just because some work exists.
 Finish because the checklist says the current operational pass is sufficient.
@@ -260,6 +274,90 @@ def _task_text(request: ExecutionRequest) -> str:
     return " \n".join(part for part in parts if part).lower()
 
 
+def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _is_documentation_like_task(request: ExecutionRequest) -> bool:
+    text = _task_text(request)
+    doc_markers = (
+        "documentation",
+        "document",
+        "docs",
+        "readme",
+        "specification",
+        "spec",
+        "requirements",
+        "requirement",
+        "contract",
+        "design note",
+        "design notes",
+        "arquitectura",
+        "architecture",
+        "especificación",
+        "requisitos",
+        "documentación",
+        "contrato funcional",
+    )
+    return _contains_any(text, doc_markers)
+
+
+def _is_executable_implementation_like_task(request: ExecutionRequest) -> bool:
+    text = _task_text(request)
+    implementation_markers = (
+        "implement",
+        "implementation",
+        "fix",
+        "bug",
+        "change behavior",
+        "modify behavior",
+        "endpoint",
+        "api",
+        "function",
+        "service",
+        "handler",
+        "controller",
+        "repository",
+        "schema",
+        "model",
+        "migration",
+        "test",
+        "refactor",
+        "script",
+        "cli",
+        "command",
+        "python",
+        "create",
+        "list",
+    )
+    return _contains_any(text, implementation_markers)
+
+
+def _task_explicitly_requests_repo_local_verification(request: ExecutionRequest) -> bool:
+    text = _task_text(request)
+    verification_markers = (
+        "test",
+        "tests",
+        "verify",
+        "verification",
+        "validated",
+        "validation",
+        "check",
+        "assert",
+        "run",
+        "lint",
+        "build",
+        "compile",
+        "smoke",
+        "prove",
+        "pytest",
+        "unit test",
+        "integration test",
+        "repository-local verification",
+    )
+    return _contains_any(text, verification_markers)
+
+
 def _task_requires_material_changes(request: ExecutionRequest) -> bool:
     text = _task_text(request)
 
@@ -285,35 +383,163 @@ def _task_requires_material_changes(request: ExecutionRequest) -> bool:
         "endpoint",
         "schema",
         "model",
+        "specification",
+        "requirements",
+        "document",
+        "especificación",
+        "requisitos",
+        "documentación",
     )
-    return any(marker in text for marker in change_markers)
+    return _contains_any(text, change_markers)
+
+
+def _changed_files_look_documentation_only(resolution_state: ResolutionState) -> bool:
+    changed_files = resolution_state.evidence.changed_files
+    if not changed_files:
+        return False
+
+    documentation_suffixes = (
+        ".md",
+        ".rst",
+        ".txt",
+        ".adoc",
+    )
+    documentation_path_markers = (
+        "/docs/",
+        "docs/",
+        "readme",
+        "spec",
+        "requirements",
+        "design",
+    )
+
+    for item in changed_files:
+        path = item.path.lower()
+        if path.endswith(documentation_suffixes):
+            continue
+        if any(marker in path for marker in documentation_path_markers):
+            continue
+        return False
+
+    return True
+
+
+def _latest_command_execution(resolution_state: ResolutionState):
+    commands = resolution_state.evidence.commands
+    if not commands:
+        return None
+    return commands[-1]
+
+
+def _command_succeeded(command) -> bool:
+    if command is None:
+        return False
+
+    if bool(getattr(command, "timed_out", False)):
+        return False
+
+    exit_code = getattr(command, "exit_code", None)
+    expected_exit_codes = list(getattr(command, "expected_exit_codes", []) or [])
+    if expected_exit_codes:
+        return exit_code in expected_exit_codes
+
+    return exit_code == 0
 
 
 def _verification_would_materially_improve(
     request: ExecutionRequest,
     resolution_state: ResolutionState,
 ) -> bool:
-    if resolution_state.evidence.commands:
+    latest_command = _latest_command_execution(resolution_state)
+    if latest_command is not None and _command_succeeded(latest_command):
         return False
 
-    if resolution_state.evidence.changed_files:
+    if _is_documentation_like_task(request):
+        if _task_explicitly_requests_repo_local_verification(request):
+            return latest_command is None
+
+        if _changed_files_look_documentation_only(resolution_state):
+            return False
+
+        if resolution_state.evidence.changed_files:
+            return False
+
+    if _task_explicitly_requests_repo_local_verification(request):
+        return latest_command is None
+
+    if resolution_state.evidence.changed_files and _is_executable_implementation_like_task(request):
+        return latest_command is None
+
+    return False
+
+
+def _failed_verification_is_repairable_by_repo_changes(
+    *,
+    request: ExecutionRequest,
+    resolution_state: ResolutionState,
+    command,
+) -> bool:
+    if command is None:
+        return False
+
+    if _command_succeeded(command):
+        return False
+
+    stdout = (getattr(command, "stdout", "") or "").lower()
+    stderr = (getattr(command, "stderr", "") or "").lower()
+    summary = (getattr(command, "observed_outcome_summary", "") or "").lower()
+    combined = "\n".join([stdout, stderr, summary])
+
+    repairable_markers = (
+        "modulenotfounderror",
+        "importerror",
+        "no module named",
+        "cannot import",
+        "ran 0 tests",
+        "no tests ran",
+        "collected 0 items",
+        "error collecting",
+        "failed to import",
+    )
+
+    if any(marker in combined for marker in repairable_markers):
+        return bool(resolution_state.evidence.changed_files)
+
+    return False
+
+
+def _latest_step_failure_indicates_repairable_gap(
+    request: ExecutionRequest,
+    resolution_state: ResolutionState,
+    runtime_state: ExecutionState,
+) -> bool:
+    if not resolution_state.failed_steps:
+        return False
+
+    last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
+
+    if last_attempted_subagent == "context_selection_agent":
         return True
 
-    text = _task_text(request)
-    verification_markers = (
-        "test",
-        "verify",
-        "validation",
-        "validated",
-        "check",
-        "run",
-        "lint",
-        "build",
-        "compile",
-        "smoke",
-        "prove",
-    )
-    return any(marker in text for marker in verification_markers)
+    if last_attempted_subagent == "code_change_agent":
+        return True
+
+    if last_attempted_subagent == "command_runner_agent":
+        latest_command = _latest_command_execution(resolution_state)
+
+        if latest_command is None:
+            return False
+
+        if _command_succeeded(latest_command):
+            return False
+
+        return _failed_verification_is_repairable_by_repo_changes(
+            request=request,
+            resolution_state=resolution_state,
+            command=latest_command,
+        )
+
+    return False
 
 
 def _build_completion_checklist(
@@ -321,8 +547,6 @@ def _build_completion_checklist(
     resolution_state: ResolutionState,
     runtime_state: ExecutionState,
 ) -> dict[str, bool]:
-    del runtime_state
-
     context_ready = resolution_state.phase != "discovery" or bool(resolution_state.completed_steps)
 
     implementation_needed = _task_requires_material_changes(request)
@@ -333,11 +557,16 @@ def _build_completion_checklist(
     )
 
     verification_needed = _verification_would_materially_improve(request, resolution_state)
-    local_verification_done_if_material = not verification_needed or bool(
-        resolution_state.evidence.commands
+    latest_command = _latest_command_execution(resolution_state)
+    local_verification_done_if_material = not verification_needed or (
+        latest_command is not None and _command_succeeded(latest_command)
     )
 
-    new_concrete_gap_detected = bool(resolution_state.risk_flags or resolution_state.failed_steps)
+    new_concrete_gap_detected = _latest_step_failure_indicates_repairable_gap(
+        request,
+        resolution_state,
+        runtime_state,
+    )
 
     return {
         "context_ready": context_ready,
@@ -364,6 +593,7 @@ def _build_operational_state_summary(
     last_completed_subagent = _last_completed_subagent_name(resolution_state)
     last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
     checklist = _build_completion_checklist(request, resolution_state, runtime_state)
+    latest_command = _latest_command_execution(resolution_state)
 
     return {
         "phase": resolution_state.phase,
@@ -381,6 +611,15 @@ def _build_operational_state_summary(
         "risk_flag_count": len(resolution_state.risk_flags),
         "has_completed_any_step": bool(resolution_state.completed_steps),
         "has_failed_any_step": bool(resolution_state.failed_steps),
+        "task_is_documentation_like": _is_documentation_like_task(request),
+        "task_is_executable_implementation_like": _is_executable_implementation_like_task(request),
+        "verification_explicitly_requested": _task_explicitly_requests_repo_local_verification(
+            request
+        ),
+        "changed_files_look_documentation_only": _changed_files_look_documentation_only(
+            resolution_state
+        ),
+        "latest_command_succeeded": _command_succeeded(latest_command) if latest_command else None,
         "completion_checklist": checklist,
         "checklist_requires_finish": _checklist_requires_finish(checklist),
     }
@@ -464,6 +703,11 @@ Decision reminders:
 - You must not call the same subagent as the last attempted subagent.
 - In discovery, the task is still preparing context.
 - In execution, decide which subagent can still provide the best next operational progress.
+- Do not require repository-local verification merely because files changed.
+- Documentation/specification/requirements tasks usually finish after the material document is produced unless the task explicitly asks for executable repo-local verification.
+- Do not continue the loop just to improve or polish an already sufficient output.
+- A warning or risk note is not a concrete gap by itself.
+- If the latest verification succeeded and materially covers the task, that usually supports finish.
 - Finish as soon as the checklist says the pass is sufficient.
 - Reject only if no safe operational contribution is possible.
 """.strip()
@@ -603,6 +847,7 @@ def _maybe_build_forced_terminal_decision(
 ) -> NextActionDecision | None:
     checklist = _build_completion_checklist(request, resolution_state, runtime_state)
     last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
+    latest_command = _latest_command_execution(resolution_state)
 
     if _checklist_requires_finish(checklist) and resolution_state.completed_steps:
         return NextActionDecision(
@@ -616,8 +861,62 @@ def _maybe_build_forced_terminal_decision(
 
     if (
         last_attempted_subagent == "code_change_agent"
+        and bool(resolution_state.evidence.changed_files)
+        and _verification_would_materially_improve(request, resolution_state) is False
+        and not _latest_step_failure_indicates_repairable_gap(
+            request, resolution_state, runtime_state
+        )
+        and resolution_state.completed_steps
+    ):
+        return NextActionDecision(
+            decision_type=DECISION_FINISH,
+            rationale=(
+                "A material repository output already exists and no further operational step is required."
+            ),
+            expected_outcome="Stop orchestration because the current operational pass is sufficient.",
+            risk_flags=[],
+        )
+
+    if (
+        last_attempted_subagent == "command_runner_agent"
+        and latest_command is not None
+        and _command_succeeded(latest_command)
+        and bool(resolution_state.evidence.changed_files)
+        and resolution_state.completed_steps
+    ):
+        return NextActionDecision(
+            decision_type=DECISION_FINISH,
+            rationale=(
+                "A material repository output exists and the latest repository-local verification succeeded, "
+                "so the operational pass should finish."
+            ),
+            expected_outcome="Stop orchestration because the current operational pass is sufficient.",
+            risk_flags=[],
+        )
+
+    if (
+        last_attempted_subagent == "command_runner_agent"
+        and latest_command is None
+        and bool(resolution_state.evidence.changed_files)
+        and _verification_would_materially_improve(request, resolution_state) is False
+        and not _latest_step_failure_indicates_repairable_gap(
+            request, resolution_state, runtime_state
+        )
+        and resolution_state.completed_steps
+    ):
+        return NextActionDecision(
+            decision_type=DECISION_FINISH,
+            rationale=(
+                "A verification step was attempted, but repository-local verification is not materially "
+                "required for the current task and a material repository output already exists."
+            ),
+            expected_outcome="Stop orchestration because another verification loop would be redundant.",
+            risk_flags=[],
+        )
+
+    if (
+        last_attempted_subagent == "code_change_agent"
         and not resolution_state.evidence.changed_files
-        and not resolution_state.risk_flags
         and not resolution_state.failed_steps
         and resolution_state.completed_steps
     ):

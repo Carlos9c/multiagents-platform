@@ -26,7 +26,11 @@ class ProducerEvidenceView:
             depends_on = payload.get("depends_on")
             if isinstance(depends_on, list):
                 for dependency in depends_on:
-                    if isinstance(dependency, str) and dependency and dependency not in ordered_paths:
+                    if (
+                        isinstance(dependency, str)
+                        and dependency
+                        and dependency not in ordered_paths
+                    ):
                         ordered_paths.append(dependency)
 
         return ordered_paths

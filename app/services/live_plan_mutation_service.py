@@ -276,6 +276,10 @@ def mutate_live_plan(
                 ),
             )
 
+            patched_execution_plan = normalize_execution_plan_terminal_invariants(
+                plan=patched_execution_plan
+            )
+
             persist_patched_execution_plan(
                 db=db,
                 project_id=project.id,

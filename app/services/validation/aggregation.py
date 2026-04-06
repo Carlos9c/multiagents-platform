@@ -139,9 +139,7 @@ def _build_aggregate_validated_scope(results: list[ValidationResult]) -> str | N
 
 
 def _build_aggregate_missing_scope(results: list[ValidationResult]) -> str | None:
-    scopes = _unique_strings(
-        [result.missing_scope for result in results if result.missing_scope]
-    )
+    scopes = _unique_strings([result.missing_scope for result in results if result.missing_scope])
     if not scopes:
         return None
     return "\n".join(scopes)
@@ -196,9 +194,7 @@ def aggregate_validation_results(
         validated_evidence_ids=_merge_validated_evidence_ids(validator_results),
         unconsumed_evidence_ids=_merge_unconsumed_evidence_ids(validator_results),
         followup_validation_required=followup_validation_required,
-        recommended_next_validator_keys=_merge_recommended_next_validator_keys(
-            validator_results
-        ),
+        recommended_next_validator_keys=_merge_recommended_next_validator_keys(validator_results),
         partial_validation_summary=_build_partial_validation_summary(validator_results),
         metadata={
             "aggregated_validator_count": len(validator_results),

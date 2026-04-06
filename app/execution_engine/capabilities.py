@@ -41,18 +41,22 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
         requires_workspace=True,
         design_guidance=[
             "Prefer atomic tasks that end in a concrete repository or file deliverable.",
-            "Prefer tasks whose completion can be assessed from changed files, repository-local verification evidence, and accumulated workspace evidence.",
+            "Prefer tasks whose completion can be assessed from changed files, repository-local verification evidence when it truly adds value, and accumulated workspace evidence.",
             "Keep manual investigation, external research, and human-only validation out of the core operational task deliverable.",
             "It is acceptable to create or modify multiple related files when they belong to one coherent implementation slice.",
             "Bootstrap from an effectively empty workspace is allowed when the task objective clearly implies a minimal initial structure.",
             "Execution context may include historical task/run context and project memory to preserve consistency.",
             "The execution engine should coordinate subagents in the smallest useful sequence needed to complete the operational pass.",
+            "Repository-local verification is not required merely because files changed.",
+            "Documentation, requirements, specification, README, and design-note tasks often complete once the material document is produced, unless the task explicitly requires an executable repository-local check.",
         ],
         hard_limits=[
             "The orchestrator executes one next decision at a time and should prefer the minimum useful progress.",
             "Validation happens outside the execution engine, so the engine must not treat itself as the final validator.",
             "The current orchestrator routing guarantees only the subagents listed here.",
             "Subagents must operate only within the project execution environment and its controlled runtime abstractions.",
+            "Command execution must never be used as open-ended exploration.",
+            "A failed verification attempt does not by itself prove that the task still has a concrete product gap.",
         ],
         subagents=[
             SubagentCapability(
@@ -99,7 +103,8 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                     "Uses current project structure, historical context, and related files to decide coherent output paths.",
                     "Writes full final file content for create/modify operations.",
                     "Uses snapshots to support rollback on failure.",
-                    "Produces repository-local candidate changes that later verification can inspect.",
+                    "Produces repository-local candidate changes that later verification can inspect when verification is materially useful.",
+                    "Handles code, tests, documentation, specifications, and other file-based deliverables.",
                 ],
                 limits=[
                     "Does not validate task completion.",
@@ -109,14 +114,15 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                 ],
                 usage_guidance=[
                     "Use when the next useful progress is to create or modify repository files.",
-                    "Use when the task still needs implementation, tests, documentation, or other file-based deliverables.",
+                    "Use when the task still needs implementation, tests, documentation, specifications, or other file-based deliverables.",
                     "Do not use when the current best next step is context recovery or operational verification.",
                 ],
             ),
             SubagentCapability(
                 name="command_runner_agent",
                 role=(
-                    "Performs one repository-local operational verification step over the candidate run tree. "
+                    "Performs at most one narrow repository-local operational verification step over the candidate run tree "
+                    "when executable verification would materially improve confidence in an already-materialized candidate output. "
                     "It decides the concrete verification command and working directory from the accumulated task state "
                     "and the materialized run tree, executes that command, and records structured verification evidence."
                 ),
@@ -125,13 +131,15 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                     "run_command",
                     "materialize_run_tree",
                     "cleanup_run_tree",
+                    "read_text_file",
                 ],
                 strengths=[
                     "Builds an ephemeral candidate run tree from persisted source plus current workspace overlay.",
                     "Chooses a narrow repository-local verification command grounded in the real run-tree inventory.",
                     "Chooses the working directory inside the candidate run tree.",
                     "Captures stdout, stderr, exit code, timeout state, and verification rationale as evidence.",
-                    "Improves external validation by producing operational proof without requiring validators to execute commands.",
+                    "Improves downstream validation by producing operational proof without requiring validators to execute commands.",
+                    "Is most useful for executable code, tests, scripts, endpoints, migrations, and other behavior that can be meaningfully checked from the repository itself.",
                 ],
                 limits=[
                     "Does not perform open-ended exploration.",
@@ -139,11 +147,19 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                     "Does not replace implementation work when repository changes are still needed.",
                     "Does not validate final task completion by itself.",
                     "Must operate only on the ephemeral candidate run tree and clean it up afterwards.",
+                    "Must not be treated as mandatory after every file change.",
+                    "Is usually not the right next step for documentation-only, requirements-only, specification-only, README-only, or design-note-only tasks unless the task explicitly asks for repository-local executable verification.",
+                    "If no meaningful repository-local verification exists, it should not be selected.",
                 ],
                 usage_guidance=[
                     "Use when repository-local operational verification would materially improve confidence in the task outcome.",
                     "Use only when there is already a meaningful candidate implementation or artifact to verify.",
+                    "Prefer executable checks whose result would help downstream validation in a concrete way.",
+                    "Use for things like targeted tests, linters, builds, type checks, or narrow runtime checks when those are grounded in the repository and task scope.",
                     "Do not use as a substitute for missing context or missing file changes.",
+                    "Do not use for exploration or to compensate for uncertainty about whether the task is complete.",
+                    "Do not use just because files changed.",
+                    "Usually skip this subagent for documentation, requirements, and specification work unless the task explicitly asks for a repository-local executable check.",
                     "Prefer one narrow verification step with clear value for downstream validation.",
                 ],
             ),
@@ -193,6 +209,7 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                 notes=[
                     "Used by command_runner_agent before repository-local verification.",
                     "The run tree is disposable and must not become the persisted source tree directly.",
+                    "Materializing a run tree does not by itself justify running a command; command execution still requires a meaningful repository-local verification purpose.",
                 ],
             ),
             ToolCapability(
@@ -210,6 +227,8 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                     "It is not for shell scripting, chaining, pipes, or redirection.",
                     "The concrete command should be grounded in the repository candidate tree.",
                     "Its main purpose is to generate operational evidence for external validation.",
+                    "It should be used only when an executable repository-local check would materially improve confidence.",
+                    "It is usually not appropriate for documentation-only or specification-only tasks unless the task explicitly requests such a check.",
                 ],
             ),
         ],
