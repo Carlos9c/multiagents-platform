@@ -339,7 +339,8 @@ def _serialize_validation_result_artifact(
     workspace_promoted_to_source: bool,
 ) -> dict[str, Any]:
     validation_result = validation_service_result.validation_result
-    routing_decision = validation_service_result.routing_decision
+    selection_result = validation_service_result.selection_result
+    aggregation_result = validation_service_result.aggregation_result
 
     return {
         "project_id": task.project_id,
@@ -348,7 +349,7 @@ def _serialize_validation_result_artifact(
         "artifact_type": VALIDATION_RESULT_ARTIFACT_TYPE,
         "validator_key": validation_result.validator_key,
         "discipline": validation_result.discipline,
-        "validation_mode": routing_decision.validation_mode,
+        "validation_flow": "multi_validator_post_execution",
         "decision": validation_result.decision,
         "summary": validation_result.summary,
         "validated_scope": validation_result.validated_scope,
@@ -366,6 +367,18 @@ def _serialize_validation_result_artifact(
         "unconsumed_evidence_ids": list(validation_result.unconsumed_evidence_ids or []),
         "findings": [finding.model_dump(mode="json") for finding in validation_result.findings],
         "metadata": dict(validation_result.metadata or {}),
+        "selected_validators": [
+            item.model_dump(mode="json") for item in selection_result.selected_validators
+        ],
+        "skipped_producers": list(selection_result.skipped_producers or []),
+        "selection_notes": list(selection_result.notes or []),
+        "validator_results": [
+            result.model_dump(mode="json") for result in validation_service_result.validator_results
+        ],
+        "aggregation": {
+            "winning_decision": aggregation_result.winning_decision,
+            "notes": list(aggregation_result.notes or []),
+        },
     }
 
 
@@ -609,7 +622,7 @@ def _validate_after_execution(
         if validation_result.followup_validation_required:
             message = (
                 "Execution finished and validation is partial. Additional validation "
-                "follow-up is required for evidence not consumed by this validator."
+                "follow-up is required for evidence not fully resolved by the validation flow."
             )
         else:
             message = "Execution finished and validation concluded the task is partial."
@@ -869,7 +882,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             getattr(execution_engine, "backend_name", execution_engine.__class__.__name__),
         )
 
-        engine_result = execution_engine.execute(db, execution_request)
+        engine_result, execution_request = execution_engine.execute(db, execution_request)
 
         logger.info(
             "execution_engine_completed task_id=%s run_id=%s decision=%s summary=%s",

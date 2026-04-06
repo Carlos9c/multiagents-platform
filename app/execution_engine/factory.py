@@ -12,8 +12,6 @@ def build_default_loop_budget() -> LoopBudget:
     return LoopBudget(
         max_steps=settings.execution_engine_max_steps,
         max_agent_calls=settings.execution_engine_max_agent_calls,
-        max_tool_calls=settings.execution_engine_max_tool_calls,
-        max_command_runs=settings.execution_engine_max_command_runs,
         max_repair_attempts=settings.execution_engine_max_repair_attempts,
     )
 

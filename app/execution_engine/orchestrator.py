@@ -41,7 +41,7 @@ You are the execution orchestrator for one already-atomic task.
 
 Your job is to decide exactly one of these three things:
 1. call_subagent -> because there is a clear and safe next subagent contribution
-2. finish -> because there is no clearly better next contribution remaining
+2. finish -> because the operational pass is sufficient and no clearly better next contribution remains
 3. reject -> because there is no safe operational contribution possible with the available subagents and tools
 
 You do not perform the work yourself.
@@ -54,8 +54,8 @@ Core responsibility:
 - Look at the task, the current phase, the accumulated evidence, and the last executed subagent.
 - Decide the single next best orchestration decision.
 - Keep the execution ordered, purposeful, and coherent.
-- Continue while a subagent can still provide meaningful operational progress.
-- Finish when no better next contribution remains.
+- Prefer the minimum next useful progress.
+- Finish as soon as the operational pass is sufficient.
 - Reject only when no safe operational route exists with the current execution engine.
 
 Phase model:
@@ -75,10 +75,10 @@ Phase model:
    - From here you may call subagents, finish, or reject.
 
    Normal behavior:
-   - Call context_selection_agent if execution reveals a real context gap.
-   - Call code_change_agent if repository changes are needed.
-   - Call command_runner_agent if repository-local verification would materially improve the evidence.
-   - Finish only when no subagent has a clearly better next contribution.
+   - Call context_selection_agent only if execution reveals a real and hard context gap.
+   - Call code_change_agent only if repository changes or material file edits are still needed.
+   - Call command_runner_agent only if repository-local verification would materially improve the evidence.
+   - Finish when the completion checklist says the pass is sufficient.
    - Reject only when no safe contribution is possible with the available subagents.
 
 Subagent sequencing rule:
@@ -94,27 +94,37 @@ How to choose subagents:
 - Do not call a subagent just because it exists.
 - Use the accumulated evidence to decide what is still missing.
 - Use context_selection_agent again only when a genuine context gap appears during execution.
-- Use command_runner_agent only when there is already a meaningful candidate to verify.
 - Do not use command_runner_agent for exploration.
 
-How to judge whether the operational pass is sufficient:
-- Your goal is not to prove the task is perfect.
-- Your goal is to coordinate subagents until no clearly better next operational step remains.
-- Treat the current process as sufficient when:
-  - the execution context is already adequate,
-  - the needed repository changes have already been materialized if the task required them,
-  - repository-local verification has already been performed if it would materially improve confidence,
-  - and calling another subagent would likely be redundant, speculative, or lower-value than finishing now.
+Binary completion checklist:
+You must explicitly reason over these four fields before deciding:
+- context_ready: yes/no
+- implementation_done_if_needed: yes/no
+- local_verification_done_if_material: yes/no
+- new_concrete_gap_detected: yes/no
+
+Interpretation:
+- context_ready = yes when the execution context is already sufficient for the current task.
+- implementation_done_if_needed = yes when required repository changes have already been materialized, or when no material repository change is needed for this task.
+- local_verification_done_if_material = yes when repository-local verification has already been performed when it would materially improve confidence, or when such verification would not materially improve the evidence.
+- new_concrete_gap_detected = yes only when there is a specific, operationally actionable missing piece that another subagent can address now.
+
+Hard finish rule:
+- If context_ready=yes
+- and implementation_done_if_needed=yes
+- and local_verification_done_if_material=yes
+- and new_concrete_gap_detected=no
+- then you must choose finish.
 
 What to inspect before choosing finish:
 - Look at accumulated evidence_items.
 - Look at changed_files to see whether implementation work already happened.
 - Look at executed_commands to see whether operational verification already happened.
-- Look at the last completed subagent to avoid repeating work.
+- Look at the last attempted subagent to avoid repeating work.
 - Look at risk_flags and failed_steps to understand whether another subagent could still resolve a concrete gap.
 
 Do not finish just because some work exists.
-Finish because there is no clearly better next subagent contribution.
+Finish because the checklist says the current operational pass is sufficient.
 
 How to use reject:
 - Reject is a last-resort orchestration decision.
@@ -177,14 +187,37 @@ def _render_evidence_items_for_prompt(resolution_state: ResolutionState) -> list
     return [item.model_dump() for item in resolution_state.evidence.to_evidence_items()]
 
 
+def _extract_subagent_name_from_step_id(step_id: str) -> str | None:
+    prefix = "dynamic_call_"
+    if not step_id.startswith(prefix):
+        return None
+
+    suffix = step_id[len(prefix) :]
+    if not suffix:
+        return None
+
+    parts = suffix.split("_", 1)
+    if len(parts) == 2 and parts[0].isdigit():
+        return parts[1]
+
+    return suffix
+
+
 def _last_completed_subagent_name(resolution_state: ResolutionState) -> str | None:
     if not resolution_state.completed_steps:
         return None
 
-    last_step_id = resolution_state.completed_steps[-1]
-    prefix = "dynamic_call_"
-    if last_step_id.startswith(prefix):
-        return last_step_id[len(prefix) :]
+    return _extract_subagent_name_from_step_id(resolution_state.completed_steps[-1])
+
+
+def _last_attempted_subagent_name(runtime_state: ExecutionState) -> str | None:
+    for agent_name in reversed(runtime_state.visited_agents):
+        if agent_name in {
+            "context_selection_agent",
+            "code_change_agent",
+            "command_runner_agent",
+        }:
+            return agent_name
     return None
 
 
@@ -215,8 +248,122 @@ def _advance_phase_after_step(
         resolution_state.phase = "execution"
 
 
-def _build_operational_state_summary(resolution_state: ResolutionState) -> dict:
-    last_subagent = _last_completed_subagent_name(resolution_state)
+def _task_text(request: ExecutionRequest) -> str:
+    parts = [
+        request.task_title or "",
+        request.task_description or "",
+        request.objective or "",
+        request.acceptance_criteria or "",
+        request.technical_constraints or "",
+        request.out_of_scope or "",
+    ]
+    return " \n".join(part for part in parts if part).lower()
+
+
+def _task_requires_material_changes(request: ExecutionRequest) -> bool:
+    text = _task_text(request)
+
+    change_markers = (
+        "implement",
+        "implementation",
+        "fix",
+        "bug",
+        "change",
+        "modify",
+        "update",
+        "edit",
+        "refactor",
+        "create",
+        "add",
+        "remove",
+        "write",
+        "documentation",
+        "docs",
+        "readme",
+        "test",
+        "migration",
+        "endpoint",
+        "schema",
+        "model",
+    )
+    return any(marker in text for marker in change_markers)
+
+
+def _verification_would_materially_improve(
+    request: ExecutionRequest,
+    resolution_state: ResolutionState,
+) -> bool:
+    if resolution_state.evidence.commands:
+        return False
+
+    if resolution_state.evidence.changed_files:
+        return True
+
+    text = _task_text(request)
+    verification_markers = (
+        "test",
+        "verify",
+        "validation",
+        "validated",
+        "check",
+        "run",
+        "lint",
+        "build",
+        "compile",
+        "smoke",
+        "prove",
+    )
+    return any(marker in text for marker in verification_markers)
+
+
+def _build_completion_checklist(
+    request: ExecutionRequest,
+    resolution_state: ResolutionState,
+    runtime_state: ExecutionState,
+) -> dict[str, bool]:
+    del runtime_state
+
+    context_ready = resolution_state.phase != "discovery" or bool(resolution_state.completed_steps)
+
+    implementation_needed = _task_requires_material_changes(request)
+    implementation_done_if_needed = (
+        not implementation_needed
+        or bool(resolution_state.evidence.changed_files)
+        or bool(resolution_state.evidence.artifacts_created)
+    )
+
+    verification_needed = _verification_would_materially_improve(request, resolution_state)
+    local_verification_done_if_material = not verification_needed or bool(
+        resolution_state.evidence.commands
+    )
+
+    new_concrete_gap_detected = bool(resolution_state.risk_flags or resolution_state.failed_steps)
+
+    return {
+        "context_ready": context_ready,
+        "implementation_done_if_needed": implementation_done_if_needed,
+        "local_verification_done_if_material": local_verification_done_if_material,
+        "new_concrete_gap_detected": new_concrete_gap_detected,
+    }
+
+
+def _checklist_requires_finish(checklist: dict[str, bool]) -> bool:
+    return (
+        checklist["context_ready"]
+        and checklist["implementation_done_if_needed"]
+        and checklist["local_verification_done_if_material"]
+        and not checklist["new_concrete_gap_detected"]
+    )
+
+
+def _build_operational_state_summary(
+    request: ExecutionRequest,
+    resolution_state: ResolutionState,
+    runtime_state: ExecutionState,
+) -> dict:
+    last_completed_subagent = _last_completed_subagent_name(resolution_state)
+    last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
+    checklist = _build_completion_checklist(request, resolution_state, runtime_state)
 
     return {
         "phase": resolution_state.phase,
@@ -224,7 +371,8 @@ def _build_operational_state_summary(resolution_state: ResolutionState) -> dict:
         "has_changed_files": bool(resolution_state.evidence.changed_files),
         "has_command_evidence": bool(resolution_state.evidence.commands),
         "has_any_outputs": resolution_state.has_outputs(),
-        "last_completed_subagent_name": last_subagent,
+        "last_attempted_subagent_name": last_attempted_subagent,
+        "last_completed_subagent_name": last_completed_subagent,
         "completed_step_count": len(resolution_state.completed_steps),
         "failed_step_count": len(resolution_state.failed_steps),
         "changed_file_count": len(resolution_state.evidence.changed_files),
@@ -233,6 +381,8 @@ def _build_operational_state_summary(resolution_state: ResolutionState) -> dict:
         "risk_flag_count": len(resolution_state.risk_flags),
         "has_completed_any_step": bool(resolution_state.completed_steps),
         "has_failed_any_step": bool(resolution_state.failed_steps),
+        "completion_checklist": checklist,
+        "checklist_requires_finish": _checklist_requires_finish(checklist),
     }
 
 
@@ -249,7 +399,9 @@ def _build_orchestrator_prompt(
         if request.historical_context is not None
         else 0
     )
-    last_subagent = _last_completed_subagent_name(resolution_state)
+    last_completed_subagent = _last_completed_subagent_name(resolution_state)
+    last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
+    checklist = _build_completion_checklist(request, resolution_state, runtime_state)
 
     return f"""
 Task:
@@ -268,8 +420,6 @@ Execution engine capability catalog:
 Runtime counters:
 - step_count: {runtime_state.step_count}
 - agent_call_count: {runtime_state.agent_call_count}
-- tool_call_count: {runtime_state.tool_call_count}
-- command_run_count: {runtime_state.command_run_count}
 - repair_attempt_count: {runtime_state.repair_attempt_count}
 
 Current request state:
@@ -285,10 +435,20 @@ Current orchestration state:
 - materialization_attempt_count: {resolution_state.materialization_attempt_count}
 - completed_steps: {resolution_state.completed_steps}
 - failed_steps: {resolution_state.failed_steps}
-- last_completed_subagent_name: {last_subagent}
+- last_attempted_subagent_name: {last_attempted_subagent}
+- last_completed_subagent_name: {last_completed_subagent}
 - risk_flags: {resolution_state.risk_flags}
 - step_notes: {resolution_state.step_notes}
-- operational_state_summary: {_build_operational_state_summary(resolution_state)}
+- operational_state_summary: {_build_operational_state_summary(request, resolution_state, runtime_state)}
+
+Binary completion checklist for this decision:
+- context_ready: {"yes" if checklist["context_ready"] else "no"}
+- implementation_done_if_needed: {"yes" if checklist["implementation_done_if_needed"] else "no"}
+- local_verification_done_if_material: {"yes" if checklist["local_verification_done_if_material"] else "no"}
+- new_concrete_gap_detected: {"yes" if checklist["new_concrete_gap_detected"] else "no"}
+
+Hard finish reminder:
+- If the first three checklist fields are yes and the last one is no, you must return finish.
 
 Accumulated execution evidence:
 - changed_files: {[item.model_dump() for item in resolution_state.evidence.changed_files]}
@@ -301,10 +461,10 @@ Accumulated execution evidence:
 
 Decision reminders:
 - If no subagent has acted yet, call context_selection_agent.
-- You must not call the same subagent as the last completed subagent.
+- You must not call the same subagent as the last attempted subagent.
 - In discovery, the task is still preparing context.
 - In execution, decide which subagent can still provide the best next operational progress.
-- Finish if no better clear contribution remains.
+- Finish as soon as the checklist says the pass is sufficient.
 - Reject only if no safe operational contribution is possible.
 """.strip()
 
@@ -332,12 +492,10 @@ def _normalize_decision(
     runtime_state: ExecutionState,
     decision: NextActionDecision,
 ) -> NextActionDecision:
-    del request, runtime_state
-
-    last_subagent = _last_completed_subagent_name(state)
+    last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
     allowed_subagents = _allowed_subagents_for_phase(state.phase)
 
-    if not state.completed_steps:
+    if not runtime_state.agent_call_count:
         if not (
             decision.decision_type == DECISION_CALL_SUBAGENT
             and decision.subagent_name == "context_selection_agent"
@@ -364,6 +522,18 @@ def _normalize_decision(
                 extra_risk_flag="invalid_decision_for_discovery_phase",
             )
 
+    checklist = _build_completion_checklist(request, state, runtime_state)
+    if decision.decision_type != DECISION_FINISH and _checklist_requires_finish(checklist):
+        return _invalidate_decision(
+            decision,
+            rationale=(
+                "The completion checklist already requires finish. "
+                "A further subagent call or reject decision is not valid."
+            ),
+            expected_outcome="Retry orchestration with a finish decision.",
+            extra_risk_flag="finish_required_by_completion_checklist",
+        )
+
     if decision.decision_type == DECISION_CALL_SUBAGENT:
         if decision.subagent_name not in allowed_subagents:
             return _invalidate_decision(
@@ -375,7 +545,10 @@ def _normalize_decision(
                 extra_risk_flag="invalid_subagent_for_phase",
             )
 
-        if last_subagent is not None and decision.subagent_name == last_subagent:
+        if (
+            last_attempted_subagent is not None
+            and decision.subagent_name == last_attempted_subagent
+        ):
             return _invalidate_decision(
                 decision,
                 rationale=(f"Subagent '{decision.subagent_name}' cannot be called twice in a row."),
@@ -396,6 +569,96 @@ def _normalize_decision(
     return decision
 
 
+def _build_terminal_decision(
+    *,
+    rationale: str,
+    request: ExecutionRequest,
+    resolution_state: ResolutionState,
+    runtime_state: ExecutionState,
+) -> NextActionDecision:
+    checklist = _build_completion_checklist(request, resolution_state, runtime_state)
+    if _checklist_requires_finish(checklist) and resolution_state.completed_steps:
+        return NextActionDecision(
+            decision_type=DECISION_FINISH,
+            rationale=rationale,
+            expected_outcome="Stop orchestration because the current operational pass is sufficient.",
+            risk_flags=[],
+        )
+
+    return NextActionDecision(
+        decision_type=DECISION_REJECT,
+        rationale=rationale,
+        expected_outcome="Stop orchestration because no safe further progress is available.",
+        risk_flags=list(resolution_state.risk_flags),
+    )
+
+
+def _maybe_build_forced_terminal_decision(
+    *,
+    request: ExecutionRequest,
+    resolution_state: ResolutionState,
+    runtime_state: ExecutionState,
+    budget: LoopBudget,
+    consecutive_invalid_decisions: int,
+) -> NextActionDecision | None:
+    checklist = _build_completion_checklist(request, resolution_state, runtime_state)
+    last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
+
+    if _checklist_requires_finish(checklist) and resolution_state.completed_steps:
+        return NextActionDecision(
+            decision_type=DECISION_FINISH,
+            rationale=(
+                "The completion checklist is already satisfied, so the operational pass should finish now."
+            ),
+            expected_outcome="Stop orchestration because no clearly better next contribution remains.",
+            risk_flags=[],
+        )
+
+    if (
+        last_attempted_subagent == "code_change_agent"
+        and not resolution_state.evidence.changed_files
+        and not resolution_state.risk_flags
+        and not resolution_state.failed_steps
+        and resolution_state.completed_steps
+    ):
+        return NextActionDecision(
+            decision_type=DECISION_FINISH,
+            rationale=(
+                "The last implementation pass completed without materialized file changes and no concrete "
+                "operational gap remains, so the orchestration should stop instead of looping."
+            ),
+            expected_outcome="Stop orchestration because another immediate implementation pass would be redundant.",
+            risk_flags=[],
+        )
+
+    if runtime_state.agent_call_count >= budget.max_agent_calls:
+        return _build_terminal_decision(
+            rationale=(
+                "The orchestrator reached max_agent_calls and must stop with the best terminal decision "
+                "supported by the current checklist and evidence."
+            ),
+            request=request,
+            resolution_state=resolution_state,
+            runtime_state=runtime_state,
+        )
+
+    if (
+        runtime_state.repair_attempt_count >= budget.max_repair_attempts
+        or consecutive_invalid_decisions >= 3
+    ):
+        return _build_terminal_decision(
+            rationale=(
+                "The orchestrator exhausted its repair budget after repeated invalid decisions, so it must stop "
+                "with the safest terminal decision."
+            ),
+            request=request,
+            resolution_state=resolution_state,
+            runtime_state=runtime_state,
+        )
+
+    return None
+
+
 class ExecutionOrchestrator:
     def __init__(
         self,
@@ -408,13 +671,16 @@ class ExecutionOrchestrator:
         self.registry = registry
         self.budget = budget
 
-    def run(self, db: Session, request: ExecutionRequest) -> ExecutionResult:
+    def run(
+        self, db: Session, request: ExecutionRequest
+    ) -> tuple[ExecutionResult, ExecutionRequest]:
         runtime_state = ExecutionState()
         resolution_state = ResolutionState(
             execution_request=request,
             orchestrator_trace=OrchestratorTrace(task_id=request.task_id),
         )
         executed_subagents: list[str] = []
+        consecutive_invalid_decisions = 0
 
         active_request = resolution_state.execution_request
 
@@ -426,57 +692,82 @@ class ExecutionOrchestrator:
                 "title": active_request.task_title,
                 "executor_type": active_request.executor_type,
                 "max_steps": self.budget.max_steps,
+                "max_agent_calls": self.budget.max_agent_calls,
+                "max_repair_attempts": self.budget.max_repair_attempts,
                 "registered_subagents": self.registry.all_names(),
             },
         )
 
         logger.info(
-            "execution_orchestrator_started task_id=%s executor_type=%s max_steps=%s",
+            "execution_orchestrator_started task_id=%s executor_type=%s max_steps=%s max_agent_calls=%s max_repair_attempts=%s",
             active_request.task_id,
             active_request.executor_type,
             self.budget.max_steps,
+            self.budget.max_agent_calls,
+            self.budget.max_repair_attempts,
         )
 
         while runtime_state.step_count < self.budget.max_steps:
             active_request = resolution_state.execution_request
 
-            raw_decision = self._decide_next_action(
+            forced_terminal_decision = _maybe_build_forced_terminal_decision(
                 request=active_request,
-                runtime_state=runtime_state,
                 resolution_state=resolution_state,
-            )
-            decision = _normalize_decision(
-                request=active_request,
-                state=resolution_state,
                 runtime_state=runtime_state,
-                decision=raw_decision,
+                budget=self.budget,
+                consecutive_invalid_decisions=consecutive_invalid_decisions,
             )
+            if forced_terminal_decision is not None:
+                decision = forced_terminal_decision
+            else:
+                raw_decision = self._decide_next_action(
+                    request=active_request,
+                    runtime_state=runtime_state,
+                    resolution_state=resolution_state,
+                )
+                decision = _normalize_decision(
+                    request=active_request,
+                    state=resolution_state,
+                    runtime_state=runtime_state,
+                    decision=raw_decision,
+                )
 
-            if (
-                decision.decision_type != raw_decision.decision_type
-                or decision.subagent_name != raw_decision.subagent_name
-            ):
-                logger.warning(
-                    "execution_orchestrator_decision_normalized task_id=%s phase=%s original=%s/%s normalized=%s/%s",
-                    active_request.task_id,
-                    resolution_state.phase,
-                    raw_decision.decision_type,
-                    raw_decision.subagent_name,
-                    decision.decision_type,
-                    decision.subagent_name,
-                )
-                resolution_state.orchestrator_trace.add_event(
-                    event_type="decision_normalized_by_guardrail",
-                    step_count=runtime_state.step_count,
-                    task_id=active_request.task_id,
-                    payload={
-                        "phase": resolution_state.phase,
-                        "original_decision_type": raw_decision.decision_type,
-                        "original_subagent_name": raw_decision.subagent_name,
-                        "normalized_decision_type": decision.decision_type,
-                        "normalized_subagent_name": decision.subagent_name,
-                    },
-                )
+                if (
+                    decision.decision_type != raw_decision.decision_type
+                    or decision.subagent_name != raw_decision.subagent_name
+                ):
+                    logger.warning(
+                        "execution_orchestrator_decision_normalized task_id=%s phase=%s original=%s/%s normalized=%s/%s rationale=%s",
+                        active_request.task_id,
+                        resolution_state.phase,
+                        raw_decision.decision_type,
+                        raw_decision.subagent_name,
+                        decision.decision_type,
+                        decision.subagent_name,
+                        decision.rationale,
+                    )
+                    resolution_state.orchestrator_trace.add_event(
+                        event_type="decision_normalized_by_guardrail",
+                        step_count=runtime_state.step_count,
+                        task_id=active_request.task_id,
+                        payload={
+                            "phase": resolution_state.phase,
+                            "original_decision_type": raw_decision.decision_type,
+                            "original_subagent_name": raw_decision.subagent_name,
+                            "normalized_decision_type": decision.decision_type,
+                            "normalized_subagent_name": decision.subagent_name,
+                            "normalized_rationale": decision.rationale,
+                        },
+                    )
+
+            logger.info(
+                "execution_orchestrator_decision task_id=%s phase=%s decision_type=%s subagent_name=%s rationale=%s",
+                active_request.task_id,
+                resolution_state.phase,
+                decision.decision_type,
+                decision.subagent_name,
+                decision.rationale,
+            )
 
             resolution_state.orchestrator_trace.add_event(
                 event_type="next_action_decided",
@@ -502,53 +793,75 @@ class ExecutionOrchestrator:
                 _append_trace_notes_to_evidence(resolution_state)
 
                 logger.info(
-                    "execution_orchestrator_finished task_id=%s changed_files=%s commands=%s",
+                    "execution_orchestrator_finished task_id=%s changed_files=%s commands=%s repair_attempts=%s",
                     active_request.task_id,
                     len(resolution_state.evidence.changed_files),
                     len(resolution_state.evidence.commands),
+                    runtime_state.repair_attempt_count,
                 )
 
-                return ExecutionResult(
-                    task_id=active_request.task_id,
-                    decision=EXECUTION_DECISION_PARTIAL,
-                    summary="Operational execution loop completed successfully.",
-                    details=decision.rationale,
-                    completed_scope="Execution engine completed its current operational pass.",
-                    remaining_scope=remaining_scope,
-                    blockers_found=blockers_found,
-                    validation_notes=[
-                        "Execution orchestrator finished normally.",
-                        *resolution_state.risk_flags,
-                    ],
-                    execution_agent_sequence=list(executed_subagents),
-                    evidence=resolution_state.evidence,
+                return (
+                    ExecutionResult(
+                        task_id=active_request.task_id,
+                        decision=EXECUTION_DECISION_PARTIAL,
+                        summary="Operational execution loop completed successfully.",
+                        details=decision.rationale,
+                        completed_scope="Execution engine completed its current operational pass.",
+                        remaining_scope=remaining_scope,
+                        blockers_found=blockers_found,
+                        validation_notes=[
+                            "Execution orchestrator finished normally.",
+                            *resolution_state.risk_flags,
+                        ],
+                        execution_agent_sequence=list(executed_subagents),
+                        evidence=resolution_state.evidence,
+                    ),
+                    active_request,
                 )
 
             if decision.decision_type == DECISION_INVALID:
-                runtime_state.register_agent_call("execution_orchestrator_invalid_decision")
-                resolution_state.mark_step_failed("orchestrator_invalid_decision")
+                consecutive_invalid_decisions += 1
+                runtime_state.register_repair_attempt()
+                resolution_state.mark_step_failed(
+                    f"orchestrator_invalid_decision_{runtime_state.repair_attempt_count}"
+                )
                 resolution_state.add_note(
-                    "The orchestrator proposed an invalid decision for the current state and must decide again."
+                    "The orchestrator proposed an invalid decision for the current state and must repair the orchestration decision."
                 )
                 resolution_state.add_risk_flags(decision.risk_flags)
                 resolution_state.orchestrator_trace.add_event(
                     event_type="orchestrator_decision_invalidated",
                     step_count=runtime_state.step_count,
                     task_id=active_request.task_id,
-                    payload=decision.model_dump(),
+                    payload={
+                        **decision.model_dump(),
+                        "consecutive_invalid_decisions": consecutive_invalid_decisions,
+                        "repair_attempt_count": runtime_state.repair_attempt_count,
+                    },
                 )
                 resolution_state.evidence.add_note(
                     message=(
                         "Orchestrator decision was invalid for the current state. "
-                        "The loop will continue and consume budget."
+                        "This consumed one repair attempt."
                     ),
                     producer="execution_orchestrator",
                 )
+                logger.warning(
+                    "execution_orchestrator_invalid_decision task_id=%s consecutive_invalid_decisions=%s repair_attempt_count=%s rationale=%s",
+                    active_request.task_id,
+                    consecutive_invalid_decisions,
+                    runtime_state.repair_attempt_count,
+                    decision.rationale,
+                )
                 continue
+
+            consecutive_invalid_decisions = 0
 
             if decision.decision_type == DECISION_REJECT:
                 remaining_scope = active_request.task_description or active_request.task_title
-                blockers_found = list(decision.risk_flags)
+                blockers_found = list(
+                    dict.fromkeys([*resolution_state.risk_flags, *decision.risk_flags])
+                )
 
                 resolution_state.orchestrator_trace.add_event(
                     event_type="orchestrator_rejected",
@@ -558,20 +871,26 @@ class ExecutionOrchestrator:
                 )
                 _append_trace_notes_to_evidence(resolution_state)
 
-                return ExecutionResult(
-                    task_id=active_request.task_id,
-                    decision=EXECUTION_DECISION_FAILED,
-                    summary="Execution orchestrator rejected the task.",
-                    details=decision.rationale,
-                    remaining_scope=remaining_scope,
-                    blockers_found=blockers_found,
-                    validation_notes=["Execution orchestrator rejected the task."],
-                    execution_agent_sequence=list(executed_subagents),
-                    evidence=resolution_state.evidence,
+                return (
+                    ExecutionResult(
+                        task_id=active_request.task_id,
+                        decision=EXECUTION_DECISION_FAILED,
+                        summary="Execution orchestrator rejected the task.",
+                        details=decision.rationale,
+                        remaining_scope=remaining_scope,
+                        blockers_found=blockers_found,
+                        validation_notes=["Execution orchestrator rejected the task."],
+                        execution_agent_sequence=list(executed_subagents),
+                        evidence=resolution_state.evidence,
+                    ),
+                    active_request,
                 )
 
             try:
-                step = self._build_step_from_decision(decision)
+                step = self._build_step_from_decision(
+                    decision=decision,
+                    sequence_no=runtime_state.step_count,
+                )
 
                 resolution_state.orchestrator_trace.add_event(
                     event_type="subagent_selected",
@@ -580,6 +899,7 @@ class ExecutionOrchestrator:
                     payload={
                         "subagent_name": step.subagent_name,
                         "target_paths": step.target_paths,
+                        "step_id": step.id,
                     },
                 )
 
@@ -612,7 +932,9 @@ class ExecutionOrchestrator:
                 )
 
             except SubagentRegistryError as exc:
-                resolution_state.mark_step_failed(decision.subagent_name or decision.decision_type)
+                resolution_state.mark_step_failed(
+                    f"registry_error_{decision.subagent_name or decision.decision_type}_{runtime_state.step_count}"
+                )
                 resolution_state.orchestrator_trace.add_event(
                     event_type="subagent_registry_error",
                     step_count=runtime_state.step_count,
@@ -620,20 +942,26 @@ class ExecutionOrchestrator:
                     payload={"error": str(exc)},
                 )
                 _append_trace_notes_to_evidence(resolution_state)
-                return ExecutionResult(
-                    task_id=active_request.task_id,
-                    decision=EXECUTION_DECISION_FAILED,
-                    summary=str(exc),
-                    details="The orchestrator selected an unregistered subagent.",
-                    remaining_scope=active_request.task_description or active_request.task_title,
-                    blockers_found=[str(exc)],
-                    validation_notes=["Registry misconfiguration in orchestrator loop."],
-                    execution_agent_sequence=list(executed_subagents),
-                    evidence=resolution_state.evidence,
+                return (
+                    ExecutionResult(
+                        task_id=active_request.task_id,
+                        decision=EXECUTION_DECISION_FAILED,
+                        summary=str(exc),
+                        details="The orchestrator selected an unregistered subagent.",
+                        remaining_scope=active_request.task_description
+                        or active_request.task_title,
+                        blockers_found=[str(exc)],
+                        validation_notes=["Registry misconfiguration in orchestrator loop."],
+                        execution_agent_sequence=list(executed_subagents),
+                        evidence=resolution_state.evidence,
+                    ),
+                    active_request,
                 )
 
             except SubagentRejectedStepError as exc:
-                resolution_state.mark_step_failed(decision.subagent_name or decision.decision_type)
+                resolution_state.mark_step_failed(
+                    f"subagent_rejected_{decision.subagent_name or decision.decision_type}_{runtime_state.step_count}"
+                )
                 resolution_state.add_risk_flags([str(exc)])
                 resolution_state.orchestrator_trace.add_event(
                     event_type="subagent_rejected_step",
@@ -647,7 +975,9 @@ class ExecutionOrchestrator:
                 )
 
             except Exception as exc:
-                resolution_state.mark_step_failed(decision.subagent_name or decision.decision_type)
+                resolution_state.mark_step_failed(
+                    f"subagent_error_{decision.subagent_name or decision.decision_type}_{runtime_state.step_count}"
+                )
                 resolution_state.orchestrator_trace.add_event(
                     event_type="subagent_unexpected_error",
                     step_count=runtime_state.step_count,
@@ -659,16 +989,20 @@ class ExecutionOrchestrator:
                     },
                 )
                 _append_trace_notes_to_evidence(resolution_state)
-                return ExecutionResult(
-                    task_id=active_request.task_id,
-                    decision=EXECUTION_DECISION_FAILED,
-                    summary=f"Unexpected orchestrator loop failure: {str(exc)}",
-                    details="Unexpected exception inside execution orchestrator loop.",
-                    remaining_scope=active_request.task_description or active_request.task_title,
-                    blockers_found=[str(exc)],
-                    validation_notes=["Unexpected orchestrator loop exception."],
-                    execution_agent_sequence=list(executed_subagents),
-                    evidence=resolution_state.evidence,
+                return (
+                    ExecutionResult(
+                        task_id=active_request.task_id,
+                        decision=EXECUTION_DECISION_FAILED,
+                        summary=f"Unexpected orchestrator loop failure: {str(exc)}",
+                        details="Unexpected exception inside execution orchestrator loop.",
+                        remaining_scope=active_request.task_description
+                        or active_request.task_title,
+                        blockers_found=[str(exc)],
+                        validation_notes=["Unexpected orchestrator loop exception."],
+                        execution_agent_sequence=list(executed_subagents),
+                        evidence=resolution_state.evidence,
+                    ),
+                    active_request,
                 )
 
         active_request = resolution_state.execution_request
@@ -681,16 +1015,19 @@ class ExecutionOrchestrator:
         )
         _append_trace_notes_to_evidence(resolution_state)
 
-        return ExecutionResult(
-            task_id=active_request.task_id,
-            decision=EXECUTION_DECISION_FAILED,
-            summary="Execution budget exceeded before a valid finish decision.",
-            details="The orchestrator loop exceeded max_steps.",
-            remaining_scope=active_request.task_description or active_request.task_title,
-            blockers_found=["max_steps exceeded"],
-            validation_notes=["Execution orchestrator exceeded its budget."],
-            execution_agent_sequence=list(executed_subagents),
-            evidence=resolution_state.evidence,
+        return (
+            ExecutionResult(
+                task_id=active_request.task_id,
+                decision=EXECUTION_DECISION_FAILED,
+                summary="Execution budget exceeded before a valid finish decision.",
+                details="The orchestrator loop exceeded max_steps.",
+                remaining_scope=active_request.task_description or active_request.task_title,
+                blockers_found=["max_steps exceeded"],
+                validation_notes=["Execution orchestrator exceeded its budget."],
+                execution_agent_sequence=list(executed_subagents),
+                evidence=resolution_state.evidence,
+            ),
+            active_request,
         )
 
     def _decide_next_action(
@@ -725,12 +1062,16 @@ class ExecutionOrchestrator:
             ) from exc
 
     @staticmethod
-    def _build_step_from_decision(decision: NextActionDecision) -> ExecutionStep:
+    def _build_step_from_decision(
+        decision: NextActionDecision,
+        *,
+        sequence_no: int,
+    ) -> ExecutionStep:
         if decision.decision_type != DECISION_CALL_SUBAGENT or not decision.subagent_name:
             raise ValueError("ExecutionStep can only be built from a call_subagent decision.")
 
         return ExecutionStep(
-            id=f"dynamic_call_{decision.subagent_name}",
+            id=f"dynamic_call_{sequence_no}_{decision.subagent_name}",
             subagent_name=decision.subagent_name,
             title=decision.subagent_name,
             instructions=decision.rationale,

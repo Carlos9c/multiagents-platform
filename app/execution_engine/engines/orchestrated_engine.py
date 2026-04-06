@@ -16,7 +16,9 @@ from app.execution_engine.subagents.context_selection_agent import ContextSelect
 class OrchestratedExecutionEngine(BaseExecutionEngine):
     backend_name = "orchestrated"
 
-    def execute(self, db: Session, request: ExecutionRequest) -> ExecutionResult:
+    def execute(
+        self, db: Session, request: ExecutionRequest
+    ) -> tuple[ExecutionResult, ExecutionRequest]:
         runtime = StructuredLLMRuntime(model=settings.execution_engine_model)
 
         registry = SubagentRegistry(

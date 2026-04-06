@@ -382,8 +382,9 @@ def test_orchestrator_records_trace_and_finishes(tmp_path):
         budget=LoopBudget(max_steps=6),
     )
 
-    result = orchestrator.run(db=None, request=request)
+    result, returned_request = orchestrator.run(db=None, request=request)
 
+    assert returned_request == request
     assert result.decision == "partial"
     assert "Current operational pass is sufficient." in (result.details or "")
     assert [item.path for item in result.evidence.changed_files] == ["docs/notes-api-contract.md"]
@@ -443,8 +444,9 @@ def test_orchestrator_invalidates_same_subagent_twice_in_a_row(tmp_path):
         budget=LoopBudget(max_steps=6),
     )
 
-    result = orchestrator.run(db=None, request=request)
+    result, returned_request = orchestrator.run(db=None, request=request)
 
+    assert returned_request == request
     assert result.decision == "partial"
     assert "same_subagent_twice_in_a_row" in result.blockers_found
 
