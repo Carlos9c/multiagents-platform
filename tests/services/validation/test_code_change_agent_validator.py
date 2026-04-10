@@ -82,6 +82,47 @@ def _make_execution_request(
     )
 
 
+def _build_execution_evidence(
+    *,
+    changed_files: list[ChangedFile] | None = None,
+    files_read=None,
+    change_dependencies=None,
+    commands: list[CommandExecution] | None = None,
+) -> ExecutionEvidence:
+    evidence = ExecutionEvidence()
+
+    for item in changed_files or []:
+        evidence.add_changed_file(
+            path=item.path,
+            change_type=item.change_type,
+            producer=item.producer,
+        )
+
+    for item in files_read or []:
+        evidence.files_read.append(item)
+
+    for item in change_dependencies or []:
+        evidence.change_dependencies.append(item)
+
+    for item in commands or []:
+        evidence.add_command_execution(
+            command=item.command,
+            producer=item.producer,
+            exit_code=item.exit_code,
+            stdout=item.stdout,
+            stderr=item.stderr,
+            cwd=getattr(item, "cwd", None),
+            timed_out=bool(getattr(item, "timed_out", False)),
+            verification_goal=getattr(item, "verification_goal", None),
+            rationale=getattr(item, "rationale", None),
+            validation_claims=list(getattr(item, "validation_claims", []) or []),
+            expected_exit_codes=list(getattr(item, "expected_exit_codes", []) or []),
+            observed_outcome_summary=getattr(item, "observed_outcome_summary", None),
+        )
+
+    return evidence
+
+
 def _make_execution_result(
     *,
     changed_files: list[ChangedFile] | None = None,
@@ -91,11 +132,11 @@ def _make_execution_result(
 ) -> ExecutionResult:
     return ExecutionResult(
         task_id=10,
-        decision="partial",
+        decision="completed",
         summary="Operational execution loop completed successfully.",
         details="Code and tests were materialized.",
         completed_scope="Created the settings screen and related files.",
-        remaining_scope="External confirmation is still pending.",
+        remaining_scope=None,
         blockers_found=[],
         validation_notes=["Execution orchestrator finished normally."],
         output_snapshot="done",
@@ -104,13 +145,11 @@ def _make_execution_result(
             "code_change_agent",
             "command_runner_agent",
         ],
-        evidence=ExecutionEvidence(
-            changed_files=list(changed_files or []),
-            files_read=list(files_read or []),
-            change_dependencies=list(change_dependencies or []),
-            commands=list(commands or []),
-            notes=[],
-            artifacts_created=[],
+        evidence=_build_execution_evidence(
+            changed_files=changed_files,
+            files_read=files_read,
+            change_dependencies=change_dependencies,
+            commands=commands,
         ),
     )
 
@@ -459,7 +498,6 @@ def test_code_change_agent_validator_raises_on_invalid_llm_output(
     provider = _CapturingProvider(
         {
             "decision": "completed",
-            # falta "summary", así que debe romper la validación estructurada
         }
     )
     monkeypatch.setattr(

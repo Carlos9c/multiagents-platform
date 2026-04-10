@@ -313,12 +313,21 @@ def mutate_live_plan(
             },
         )
 
-    if resolved_intent.intent_type in {"continue", "manual_review", "close", "replan"}:
+    if resolved_intent.intent_type in {"continue", "manual_review", "close"}:
         return LivePlanMutationResult(
             mutation_kind="none",
             patched_execution_plan=None,
             requires_replan=False,
             notes=[],
+            metadata={},
+        )
+
+    if resolved_intent.intent_type == "replan":
+        return LivePlanMutationResult(
+            mutation_kind="escalated_to_replan",
+            patched_execution_plan=None,
+            requires_replan=True,
+            notes=["Resolved intent requires a full replan instead of a live in-place mutation."],
             metadata={},
         )
 

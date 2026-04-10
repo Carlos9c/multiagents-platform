@@ -101,6 +101,46 @@ Execution sequencing input:
 """.strip()
 
 
+def _ensure_final_checkpoint_stage_closure(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        return raw
+
+    execution_batches = raw.get("execution_batches")
+    checkpoints = raw.get("checkpoints")
+
+    if not isinstance(execution_batches, list) or not execution_batches:
+        return raw
+    if not isinstance(checkpoints, list) or not checkpoints:
+        return raw
+
+    final_batch = execution_batches[-1]
+    if not isinstance(final_batch, dict):
+        return raw
+
+    final_batch_id = final_batch.get("batch_id")
+    if not final_batch_id:
+        return raw
+
+    for checkpoint in checkpoints:
+        if not isinstance(checkpoint, dict):
+            continue
+        if checkpoint.get("after_batch_id") != final_batch_id:
+            continue
+
+        focus = checkpoint.get("evaluation_focus")
+        if not isinstance(focus, list):
+            focus = []
+
+        normalized_focus = [str(item) for item in focus if item]
+        if "stage_closure" not in normalized_focus:
+            normalized_focus.append("stage_closure")
+
+        checkpoint["evaluation_focus"] = normalized_focus
+        break
+
+    return raw
+
+
 def call_execution_sequencer_model(
     sequencing_input: ExecutionPlanGenerationInput,
 ) -> ExecutionPlan:
@@ -115,6 +155,7 @@ def call_execution_sequencer_model(
         schema_name="execution_plan",
         json_schema=strict_schema,
     )
+    raw = _ensure_final_checkpoint_stage_closure(raw)
 
     try:
         return ExecutionPlan.model_validate(raw)
@@ -130,5 +171,6 @@ def call_execution_sequencer_model(
             schema_name="execution_plan",
             json_schema=strict_schema,
         )
+        raw_retry = _ensure_final_checkpoint_stage_closure(raw_retry)
 
         return ExecutionPlan.model_validate(raw_retry)

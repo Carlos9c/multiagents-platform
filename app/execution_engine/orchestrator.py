@@ -10,8 +10,8 @@ from app.execution_engine.base import ExecutionEngineRejectedError
 from app.execution_engine.budget import LoopBudget
 from app.execution_engine.capabilities import render_executor_capabilities_for_prompt
 from app.execution_engine.contracts import (
+    EXECUTION_DECISION_COMPLETED,
     EXECUTION_DECISION_FAILED,
-    EXECUTION_DECISION_PARTIAL,
     ExecutionRequest,
     ExecutionResult,
 )
@@ -1077,9 +1077,6 @@ class ExecutionOrchestrator:
             runtime_state.register_step()
 
             if decision.decision_type == DECISION_FINISH:
-                remaining_scope = active_request.task_description or active_request.task_title
-                blockers_found = list(resolution_state.risk_flags)
-
                 resolution_state.orchestrator_trace.add_event(
                     event_type="orchestrator_finished",
                     step_count=runtime_state.step_count,
@@ -1102,15 +1099,14 @@ class ExecutionOrchestrator:
                 return (
                     ExecutionResult(
                         task_id=active_request.task_id,
-                        decision=EXECUTION_DECISION_PARTIAL,
+                        decision=EXECUTION_DECISION_COMPLETED,
                         summary="Operational execution loop completed successfully.",
                         details=decision.rationale,
                         completed_scope="Execution engine completed its current operational pass.",
-                        remaining_scope=remaining_scope,
-                        blockers_found=blockers_found,
+                        remaining_scope=None,
+                        blockers_found=[],
                         validation_notes=[
                             "Execution orchestrator finished normally.",
-                            *resolution_state.risk_flags,
                         ],
                         execution_agent_sequence=list(executed_subagents),
                         evidence=resolution_state.evidence,

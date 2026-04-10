@@ -4,17 +4,17 @@
 
 Este proyecto implementa un sistema de ejecución autónoma de tareas basado en agentes, con un foco fuerte en:
 
-- Ejecución controlada de tareas atómicas  
-- Validación estructurada multi-agente  
-- Persistencia consistente de artefactos  
-- Trazabilidad completa del flujo de trabajo  
-- Recuperación determinista ante fallos  
-- Verificación repo-local explícita mediante evidencia operacional  
-- Separación estricta entre coordinación, ejecución y validación  
+* Ejecución controlada de tareas atómicas
+* Validación estructurada multi-agente
+* Persistencia consistente de artefactos
+* Trazabilidad completa del flujo de trabajo
+* Recuperación determinista ante fallos
+* Verificación repo-local explícita mediante evidencia operacional
+* Separación estricta entre coordinación, ejecución y validación
 
 Flujo principal:
 
-**Task → ExecutionRun → Execution Orchestrator → Subagents → Validation (multi-validator) → Aggregation → Artifact → Task closure → Hierarchy reconciliation**
+Task → ExecutionRun → Execution Orchestrator → Subagents → Validation (multi-validator) → Aggregation → Artifact → Task closure → Hierarchy reconciliation
 
 ---
 
@@ -22,14 +22,14 @@ Flujo principal:
 
 ### 1. Execution Engine
 
-- Ejecuta tareas mediante orquestador + subagentes  
-- Produce `ExecutionResult` con evidencia acumulada  
+* Ejecuta tareas mediante orquestador + subagentes
+* Produce ExecutionResult con evidencia acumulada
 
 Subagentes actuales:
 
-- context_selection_agent  
-- code_change_agent  
-- command_runner_agent  
+* context_selection_agent
+* code_change_agent
+* command_runner_agent
 
 ---
 
@@ -37,31 +37,34 @@ Subagentes actuales:
 
 Decide:
 
-- call_subagent  
-- finish  
-- reject  
-- invalid (guardrail, no decisión operativa real)  
+* call_subagent
+* finish
+* reject
+* invalid (guardrail, no decisión operativa real)
 
 Fases:
 
-- discovery  
-- execution  
+* discovery
+* execution
 
 Notas clave:
 
-- reject → salida válida  
-- invalid → error del LLM, consume budget  
-- coordina, no evalúa calidad  
-- no abre loops de “pulido”  
+* reject → salida válida
+* invalid → error del LLM, consume budget
+* coordina, no evalúa calidad
+* no abre loops de “pulido”
 
 Refinamientos recientes:
 
-- cierre automático cuando:
-  - contexto listo  
-  - implementación suficiente  
-  - verificación material ya cubierta  
-- un fallo de comando solo abre loop si es **reparable**
-- warnings ≠ gap operativo  
+* cierre automático cuando:
+
+  * contexto listo
+  * implementación suficiente
+  * verificación material ya cubierta
+* un fallo de comando solo abre loop si es reparable
+* warnings ≠ gap operativo
+* enforcement de secuencia lógica entre subagentes
+* separación entre fallo técnico y necesidad real de iteración
 
 ---
 
@@ -69,16 +72,16 @@ Refinamientos recientes:
 
 Orquesta:
 
-- ejecución  
-- validación  
-- persistencia  
-- promoción  
-- reconciliación  
+* ejecución
+* validación
+* persistencia
+* promoción
+* reconciliación
 
 Garantiza:
 
-- atomicidad real  
-- consistencia run → artifact → task  
+* atomicidad real
+* consistencia run → artifact → task
 
 ---
 
@@ -88,49 +91,43 @@ Sistema multi-validador basado en evidencia.
 
 Entrada:
 
-```python
 TaskValidationInput
-```
 
 Salida:
 
-```python
 ValidationResult
-```
 
 Principios:
 
-- cada validador consume todo el input  
-- sin inputs especializados  
-- basado en evidencia real  
+* cada validador consume todo el input
+* sin inputs especializados
+* basado en evidencia real
 
 NO:
 
-- no ejecuta comandos  
-- no propone mejoras  
-- no replanifica  
+* no ejecuta comandos
+* no propone mejoras
+* no replanifica
 
 Validadores:
 
-- code_change_agent_validator  
-- command_runner_agent_validator  
+* code_change_agent_validator
+* command_runner_agent_validator
 
 Regla:
 
-**1 validador ↔ 1 subagente**
+1 validador ↔ 1 subagente
 
 Flujo:
 
-1. selección  
-2. ejecución  
-3. agregación  
-4. resultado final  
+1. selección
+2. ejecución
+3. agregación
+4. resultado final
 
 Orden de prioridad:
 
-```
 failed > manual_review > partial > completed
-```
 
 ---
 
@@ -140,10 +137,10 @@ Fuente de verdad del sistema.
 
 Incluye:
 
-- resultados individuales  
-- resultado agregado  
-- evidencia  
-- trazabilidad  
+* resultados individuales
+* resultado agregado
+* evidencia
+* trazabilidad
 
 ---
 
@@ -151,20 +148,18 @@ Incluye:
 
 Estructura:
 
-```
 project/
 ├── source
 ├── executions/<run_id>/
 │   ├── workspace
 │   ├── run
-```
 
 Semántica:
 
-- source → estado persistido  
-- workspace → overlay  
-- run → entorno efímero  
-- run siempre se elimina  
+* source → estado persistido
+* workspace → overlay
+* run → entorno efímero
+* run siempre se elimina
 
 ---
 
@@ -172,32 +167,31 @@ Semántica:
 
 Rol:
 
-- decidir si verificar  
-- ejecutar comando si aplica  
-- registrar evidencia  
+* decidir si verificar
+* ejecutar comando si aplica
+* registrar evidencia
 
-Mejoras:
+Capacidades actuales:
 
-- soporte de:
-  - run_command  
-  - verification_not_applicable  
+* verificación repo-aware
+* compatible con restricciones del runner
+* independiente del lenguaje
 
-Nuevo flujo en 2 pasos:
+Flujo en 2 fases:
 
-1. selección de archivos relevantes  
-2. planificación del comando  
-
-Ahora usa:
-
-- inventario del repo  
-- evidencia acumulada  
-- archivos leídos explícitamente  
+1. selección de archivos relevantes
+2. planificación del comando
 
 Evidencia generada:
 
-- command_execution  
-- notas de decisión  
-- outcome summary  
+* command_execution
+* notas de decisión
+* outcome summary
+
+Soporta:
+
+* ejecución real
+* verification_not_applicable
 
 ---
 
@@ -205,34 +199,40 @@ Evidencia generada:
 
 Rol:
 
-- materializar cambios completos  
+* materializar cambios completos
 
 Mejoras:
 
-- enfoque cross-language  
-- coherencia estructural  
-- cambios mínimos  
-- evitar refactors innecesarios  
+* enfoque cross-language
+* coherencia estructural
+* cambios mínimos
+* evitar refactors innecesarios
+
+Limitaciones actuales:
+
+* depende de la estructura existente
+* puede introducir subestructuras nuevas
+* falta enforcement fuerte de layout
 
 ---
 
 ### 9. Task Hierarchy
 
-- propagación determinista  
-- sin efectos parciales  
+* propagación determinista
+* sin efectos parciales
 
 ---
 
 ### 10. Post-Batch (WIP)
 
-- recovery  
-- evaluación  
-- mutation  
+* recovery
+* evaluación
+* mutation
 
-Refuerzo reciente:
+Refuerzo:
 
-- invariantes terminales del plan  
-- stage_closure obligatorio  
+* invariantes terminales del plan
+* stage_closure obligatorio
 
 ---
 
@@ -240,41 +240,42 @@ Refuerzo reciente:
 
 ### Arquitectura
 
-- orquestador estable  
-- subagentes alineados  
-- validación desacoplada  
-- sin legacy crítico  
+* orquestador estable
+* subagentes alineados
+* validación desacoplada
+* sin legacy crítico
 
 Boundary claro:
 
-- orquestador coordina  
-- subagentes ejecutan  
-- validadores juzgan  
+* orquestador coordina
+* subagentes ejecutan
+* validadores juzgan
 
 ---
 
 ### Ejecución
 
-- flujo completo funcional  
-- evidencia acumulativa estructurada  
-- command_runner_agent más inteligente  
+* flujo completo funcional
+* evidencia estructurada
+* decisiones operativas más precisas
 
 ---
 
 ### Validación
 
-- multi-validator funcional  
-- basado en evidencia  
-- sin sobreingeniería  
+* multi-validator funcional
+* basada en evidencia
+* agregación determinista
 
 ---
 
 ### Tests
 
-- validators ✔  
-- aggregation ✔  
-- orchestrator ✔  
-- command_runner_agent ✔  
+* validators ✔
+* aggregation ✔
+* orchestrator ✔
+* command_runner_agent ✔
+* e2e básicos ✔
 
 ---
 
@@ -282,56 +283,59 @@ Boundary claro:
 
 ### Ejecución
 
-- finish requiere evidencia  
-- invalid no rompe flujo  
-- cierre cuando checklist completo  
+* finish requiere evidencia
+* invalid no rompe flujo
+* cierre cuando checklist completo
+* loops solo si hay gap real
 
 ---
 
 ### Validación
 
-- input único  
-- validadores independientes  
-- agregación determinista  
+* input único
+* validadores independientes
+* agregación determinista
 
 ---
 
 ### Persistencia
 
-- 1 run → 1 artifact  
-- artifact contiene verdad final  
+* 1 run → 1 artifact
+* artifact contiene verdad final
 
 ---
 
 ### Workspace
 
-- aislamiento total  
-- run efímero  
-- promoción controlada  
+* aislamiento total
+* run efímero
+* promoción controlada
 
 ---
 
 ## 🚀 Últimos avances
 
-- eliminación de validation legacy  
-- eliminación de package_builder  
-- simplificación de contratos  
-- multi-validator real  
-- mejora del cierre del orquestador  
-- command_runner_agent en 2 fases  
-- soporte de no verificación  
-- mejora prompts code_change_agent  
-- refuerzo invariantes de execution_plan  
-- corrección de tests complejos  
+* eliminación de validation legacy
+* eliminación de package_builder
+* simplificación de contratos
+* multi-validator real
+* mejora del cierre del orquestador
+* command_runner_agent repo-aware y runner-aware
+* eliminación de heurísticas dependientes de lenguaje
+* soporte de no verificación
+* mejora de prompts
+* refuerzo de invariantes
+* estabilización de loops
 
 ---
 
 ## 🧹 Limpieza realizada
 
-- eliminación de routing legacy  
-- eliminación de builders  
-- unificación de contratos  
-- reducción de heurísticas débiles  
+* eliminación de routing legacy
+* eliminación de builders
+* unificación de contratos
+* reducción de heurísticas débiles
+* eliminación de lógica dependiente de lenguaje
 
 ---
 
@@ -339,35 +343,39 @@ Boundary claro:
 
 ### Alta prioridad
 
-1. End-to-end complejos  
-2. Robustecer command_runner_agent  
-3. Refinar orquestador  
-4. Mejorar code_change_agent  
+1. End-to-end complejos
+2. Refinar orquestador
+3. Mejorar disciplina estructural de code_change_agent
+4. Promoción parcial de artefactos
 
 ---
 
 ### Media
 
-5. Post-batch  
-6. Auditoría  
-7. Métricas  
+5. Estructura tentativa de proyecto (high-level → execution)
+6. Enforcements reales de paths
+7. Contexto estructural del repo más rico
+8. Post-batch
 
 ---
 
 ### Baja
 
-8. Refactors menores  
-9. Configuración avanzada  
+9. Auditoría
+10. Métricas
+11. Refactors
+12. Configuración avanzada
 
 ---
 
 ## 🧠 Filosofía
 
-- la verdad es el resultado validado  
-- validación no re-ejecuta  
-- evidencia = fuente única  
-- sin sobreingeniería  
-- orquestador no decide verdad  
+* la verdad es el resultado validado
+* validación no re-ejecuta
+* evidencia = fuente única
+* sin sobreingeniería
+* orquestador no decide verdad
+* los agentes deben adaptarse al repo
 
 ---
 
@@ -375,19 +383,19 @@ Boundary claro:
 
 Core:
 
-- ejecución sólida  
-- validación robusta  
-- agregación consistente  
+* ejecución sólida
+* validación robusta
+* agregación consistente
 
 Sistema:
 
-- coherente end-to-end  
-- preparado para escalar  
+* coherente end-to-end
+* preparado para escalar
 
 Foco actual:
 
-👉 mejorar decisiones operativas reales (verificar vs no verificar vs cerrar)
+👉 disciplina estructural + decisiones operativas reales
 
 Siguiente paso:
 
-👉 robustez en escenarios reales complejos
+👉 robustez en escenarios complejos y control del layout del repo

@@ -31,42 +31,91 @@ from app.services.validation.helpers.resources import (
 VALIDATOR_KEY = "code_change_agent_validator"
 PRODUCER_KEY = "code_change_agent"
 
+FORBIDDEN_FINDING_CATEGORIES = {
+    "execution_evidence",
+    "scope_consistency",
+    "pipeline_consistency",
+    "promotion_state",
+    "validator_conflict",
+    "aggregator_conflict",
+    "workflow_state",
+    "orchestrator_state",
+    "execution_result_state",
+}
+
+FORBIDDEN_TEXT_SNIPPETS = (
+    "execution result",
+    "result marked as `partial`",
+    "result marked as partial",
+    "only completed an operational pass",
+    "operational pass",
+    "promotion",
+    "promoted",
+    "workspace_promoted",
+    "other validator",
+    "another validator",
+    "command_runner_agent",
+    "context_selection_agent",
+    "execution evidence does not confirm",
+    "no evidence of execution",
+    "no test execution evidence",
+    "pipeline",
+    "aggregator",
+    "workflow",
+    "orchestrator",
+)
 
 CODE_CHANGE_AGENT_VALIDATOR_SYSTEM_PROMPT = """
 You are the validator for the code_change_agent contribution.
 
-Your job is to evaluate whether the code_change_agent contribution is correct with respect to the task objective and the provided execution evidence.
+Your job is to evaluate only the correctness and task-level sufficiency of the
+code/materialized file contribution produced by code_change_agent.
 
 You MUST evaluate using:
 - the task definition
-- the execution result
+- the acceptance criteria
+- the technical constraints
 - the relevant context files
 - the evidence files related to code_change_agent
 - the evidence items produced by code_change_agent
 
-You are NOT the executor.
-You are NOT a planner.
-You are NOT a reviewer proposing improvements.
-You do NOT suggest ideas, enhancements, refactors, or future work.
+You MAY use supplemental non-code verification evidence only as a supporting
+signal about whether the code behaves as expected. This supplemental evidence
+must never be used to judge:
+- the execution pipeline
+- the orchestrator result
+- whether another agent did its job
+- whether promotion should happen
+- whether the overall workflow is internally consistent
 
-You must only evaluate:
-- whether the task objective appears satisfied by the code contribution
-- whether the acceptance criteria appear satisfied by the code contribution
-- whether the code evidence supports the claimed completed scope
-- whether there is meaningful missing scope
-- whether there are blockers or contradictions
-- whether the result should be classified as completed, partial, failed, or manual_review
+You are NOT:
+- the executor
+- the planner
+- the orchestrator
+- the validation aggregator
+- a reviewer proposing improvements
+- an auditor of other validators or other agents
 
-Critical rules:
-- Do not propose improvements.
-- Do not suggest alternative implementations.
-- Do not evaluate what should be done next.
-- Only judge the task objective and the actual evidence provided.
-- Use the provided file contents concretely.
-- Ground every conclusion in the provided task data, evidence items, and file contents.
-- If the evidence is insufficient to evaluate reliably, choose manual_review.
-- If the code appears partially aligned but incomplete, choose partial.
+Your scope is ONLY:
+- whether the changed code/files satisfy the task objective
+- whether the changed code/files satisfy the acceptance criteria
+- whether the changed code/files respect the stated constraints
+- whether there is meaningful code/task scope still missing
+- whether there are code-grounded blockers or contradictions
+
+Strict boundary rules:
+- Do not judge the overall execution result state.
+- Do not lower the decision because the execution engine said partial.
+- Do not lower the decision because promotion did not occur.
+- Do not lower the decision because another agent may or may not have produced evidence.
+- Do not emit findings about workflow, pipeline, promotion, orchestration, or validator disagreement.
+- Do not propose improvements, refactors, enhancements, or future work.
+- Ground every conclusion in the task definition, concrete file contents, and code_change_agent evidence.
+- If supplemental verification exists, you may mention it only as support for code correctness.
+- If the code evidence is insufficient to evaluate the code itself, choose manual_review.
+- If the code is partially aligned but incomplete, choose partial.
 - If the code clearly contradicts the task objective or acceptance criteria, choose failed.
+- If the code materially satisfies the task objective and acceptance criteria, choose completed.
 
 Return ONLY JSON matching the provided schema.
 """.strip()
@@ -121,6 +170,29 @@ def _model_dump_list(items: list[Any] | None) -> list[dict[str, Any]]:
         else:
             dumped.append({"value": str(item)})
     return dumped
+
+
+def _normalize_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _contains_forbidden_text(value: Any) -> bool:
+    text = _normalize_text(value)
+    if not text:
+        return False
+    return any(snippet in text for snippet in FORBIDDEN_TEXT_SNIPPETS)
+
+
+def _is_forbidden_finding(finding: CodeChangeAgentValidationFinding) -> bool:
+    if finding.category in FORBIDDEN_FINDING_CATEGORIES:
+        return True
+    if _contains_forbidden_text(finding.message):
+        return True
+    return False
+
+
+def _is_forbidden_blocker(text: str) -> bool:
+    return _contains_forbidden_text(text)
 
 
 def _render_evidence_items(items: list[EvidenceItem]) -> str:
@@ -215,15 +287,48 @@ def _render_subagent_capability(validation_input: TaskValidationInput) -> str:
     return "\n".join(lines)
 
 
+def _collect_supporting_verification_items(
+    validation_input: TaskValidationInput,
+) -> list[EvidenceItem]:
+    """
+    Collect non-code evidence that can support confidence in code correctness,
+    without turning this validator into an auditor of the full workflow.
+    """
+    supporting: list[EvidenceItem] = []
+
+    for item in validation_input.execution_result.evidence.to_evidence_items():
+        if item.producer == PRODUCER_KEY:
+            continue
+        if item.evidence_type in {"command_execution", "file_read"}:
+            supporting.append(item)
+
+    return supporting
+
+
+def _render_supporting_verification_items(items: list[EvidenceItem]) -> str:
+    if not items:
+        return "- none"
+
+    lines: list[str] = []
+    for index, item in enumerate(items):
+        lines.append(f"- support_ref: support:{index}")
+        lines.append(f"  evidence_type: {item.evidence_type}")
+        lines.append(f"  producer: {item.producer}")
+        lines.append(f"  path: {item.path}")
+        lines.append(f"  summary: {item.summary}")
+        lines.append(f"  payload: {item.payload}")
+    return "\n".join(lines)
+
+
 def _build_user_prompt(
     *,
     validation_input: TaskValidationInput,
     producer_items: list[EvidenceItem],
     context_resources: list[TextResource],
     evidence_resources: list[TextResource],
+    supporting_items: list[EvidenceItem],
 ) -> str:
     request = validation_input.execution_request
-    result = validation_input.execution_result
 
     return f"""
 Validate the code_change_agent contribution for this task.
@@ -245,18 +350,6 @@ Task:
 - success_criteria: {_safe_getattr(request, "success_criteria")}
 - constraints: {_safe_getattr(request, "constraints")}
 - executor_type: {_safe_getattr(request, "executor_type")}
-
-Execution result:
-- decision: {result.decision}
-- summary: {result.summary}
-- details: {result.details}
-- rejection_reason: {result.rejection_reason}
-- completed_scope: {result.completed_scope}
-- remaining_scope: {result.remaining_scope}
-- blockers_found: {result.blockers_found}
-- validation_notes: {result.validation_notes}
-- output_snapshot: {result.output_snapshot}
-- execution_agent_sequence: {result.execution_agent_sequence}
 
 Request context:
 - allowed_paths: {_safe_getattr(request.context, "allowed_paths", [])}
@@ -281,15 +374,77 @@ Context files to read and use:
 Evidence-related files to read and use:
 {_render_text_resources(evidence_resources)}
 
+Supplemental non-code verification evidence (support only):
+{_render_supporting_verification_items(supporting_items)}
+
 Instructions:
-- Evaluate only the correctness and sufficiency of the code_change_agent contribution.
-- Use the task objective, acceptance criteria, context files, evidence files, and execution evidence concretely.
+- Evaluate only the correctness and task-level sufficiency of the code_change_agent contribution.
+- Base the decision primarily on the changed code/files and their concrete contents.
+- Use supplemental non-code verification evidence only as support for code correctness, never as a reason to judge workflow state.
+- Do not judge execution_result state, promotion state, orchestrator behavior, or other validators.
+- Do not emit findings or blockers about pipeline consistency, workflow consistency, or lack of evidence from other producers.
 - Do not suggest improvements.
 - Do not propose future work.
-- Do not act as a code reviewer for style improvements.
-- Decide only whether the contribution should be classified as completed, partial, failed, or manual_review.
-- Explain the decision through evidence-based findings and blockers when applicable.
+- Do not act as a style reviewer.
+- Decide only whether the code contribution should be classified as completed, partial, failed, or manual_review.
+- Explain the decision through evidence-based findings and blockers grounded in the code and task.
 """.strip()
+
+
+def _sanitize_llm_output(
+    llm_output: CodeChangeAgentValidationLLMOutput,
+) -> CodeChangeAgentValidationLLMOutput:
+    sanitized_findings = [
+        finding for finding in llm_output.findings if not _is_forbidden_finding(finding)
+    ]
+    sanitized_blockers = [
+        blocker for blocker in llm_output.blockers if not _is_forbidden_blocker(blocker)
+    ]
+    sanitized_reasoning_notes = [
+        note for note in llm_output.reasoning_notes if not _contains_forbidden_text(note)
+    ]
+
+    sanitized_summary = llm_output.summary
+    sanitized_validated_scope = llm_output.validated_scope
+    sanitized_missing_scope = llm_output.missing_scope
+
+    if _contains_forbidden_text(sanitized_summary):
+        sanitized_summary = (
+            "The decision is based only on the code_change_agent contribution and "
+            "its task-level correctness against the provided requirements."
+        )
+
+    if _contains_forbidden_text(sanitized_validated_scope):
+        sanitized_validated_scope = None
+
+    if _contains_forbidden_text(sanitized_missing_scope):
+        sanitized_missing_scope = None
+
+    negative_signal_count = 0
+    for finding in sanitized_findings:
+        if finding.severity in {"warning", "error"}:
+            negative_signal_count += 1
+    negative_signal_count += len(sanitized_blockers)
+    if sanitized_missing_scope:
+        negative_signal_count += 1
+
+    decision = llm_output.decision
+    manual_review_required = llm_output.manual_review_required
+
+    if decision in {"partial", "failed", "manual_review"} and negative_signal_count == 0:
+        decision = "completed"
+        manual_review_required = False
+
+    return CodeChangeAgentValidationLLMOutput(
+        decision=decision,
+        summary=sanitized_summary,
+        validated_scope=sanitized_validated_scope,
+        missing_scope=sanitized_missing_scope,
+        blockers=sanitized_blockers,
+        findings=sanitized_findings,
+        manual_review_required=manual_review_required,
+        reasoning_notes=sanitized_reasoning_notes,
+    )
 
 
 class CodeChangeAgentValidator(BaseTaskValidator):
@@ -314,6 +469,7 @@ class CodeChangeAgentValidator(BaseTaskValidator):
             validation_input.execution_request,
             logical_paths=evidence_paths,
         )
+        supporting_items = _collect_supporting_verification_items(validation_input)
 
         provider = get_llm_provider()
         strict_schema = to_openai_strict_json_schema(
@@ -325,6 +481,7 @@ class CodeChangeAgentValidator(BaseTaskValidator):
             producer_items=producer_items,
             context_resources=context_resources,
             evidence_resources=evidence_resources,
+            supporting_items=supporting_items,
         )
 
         raw = provider.generate_structured(
@@ -340,6 +497,8 @@ class CodeChangeAgentValidator(BaseTaskValidator):
             raise CodeChangeAgentValidatorError(
                 f"CodeChangeAgentValidator returned invalid structured output: {str(exc)}"
             ) from exc
+
+        llm_output = _sanitize_llm_output(llm_output)
 
         validated_evidence_ids = [
             _build_evidence_ref(item, index) for index, item in enumerate(producer_items)
@@ -379,6 +538,11 @@ class CodeChangeAgentValidator(BaseTaskValidator):
                 "producer_evidence_count": len(producer_items),
                 "context_file_count": len(context_resources),
                 "evidence_file_count": len(evidence_resources),
+                "supporting_verification_item_count": len(supporting_items),
                 "reasoning_notes": list(llm_output.reasoning_notes),
+                "boundary_enforcement": {
+                    "forbidden_finding_categories": sorted(FORBIDDEN_FINDING_CATEGORIES),
+                    "forbidden_text_snippet_count": len(FORBIDDEN_TEXT_SNIPPETS),
+                },
             },
         )

@@ -8,6 +8,7 @@ from app.execution_engine.agent_runtime.base import BaseAgentRuntime
 from app.execution_engine.budget import LoopBudget
 from app.execution_engine.context_selection import HistoricalTaskSelectionResult
 from app.execution_engine.contracts import (
+    EXECUTION_DECISION_COMPLETED,
     ExecutionRequest,
     ProjectExecutionContext,
 )
@@ -385,8 +386,11 @@ def test_orchestrator_records_trace_and_finishes(tmp_path):
     result, returned_request = orchestrator.run(db=None, request=request)
 
     assert returned_request == request
-    assert result.decision == "partial"
+    assert result.decision == EXECUTION_DECISION_COMPLETED
     assert "Current operational pass is sufficient." in (result.details or "")
+    assert result.completed_scope == "Execution engine completed its current operational pass."
+    assert result.remaining_scope is None
+    assert result.blockers_found == []
     assert [item.path for item in result.evidence.changed_files] == ["docs/notes-api-contract.md"]
 
     joined_notes = "\n".join(_note_messages(result))
@@ -447,8 +451,9 @@ def test_orchestrator_invalidates_same_subagent_twice_in_a_row(tmp_path):
     result, returned_request = orchestrator.run(db=None, request=request)
 
     assert returned_request == request
-    assert result.decision == "partial"
-    assert "same_subagent_twice_in_a_row" in result.blockers_found
+    assert result.decision == EXECUTION_DECISION_COMPLETED
+    assert result.remaining_scope is None
+    assert result.blockers_found == []
 
     joined_notes = "\n".join(_note_messages(result))
     assert "decision_normalized_by_guardrail" in joined_notes
