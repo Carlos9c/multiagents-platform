@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -18,6 +19,8 @@ from app.services.llm.schema_utils import to_openai_strict_json_schema
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_storage import ProjectStorageService
 from app.services.workspace_runtime import WorkspaceRuntimeError
+
+logger = logging.getLogger(__name__)
 
 COMMAND_FILE_SELECTION_SYSTEM_PROMPT = """
 You are a repository-local verification context selector.
@@ -521,6 +524,12 @@ class CommandRunnerAgent(BaseSubagent):
                 f"{self.name} received a step for subagent '{step.subagent_name}'."
             )
 
+        logger.info(
+            "command_runner_agent_started task_id=%s step_id=%s",
+            request.task_id,
+            step.id,
+        )
+
         overlay_paths = (
             _dedupe_preserve_order(
                 [item.path for item in state.evidence.changed_files if item.path]
@@ -539,6 +548,12 @@ class CommandRunnerAgent(BaseSubagent):
                 project_id=request.project_id,
                 execution_run_id=request.execution_run_id,
                 overlay_paths=overlay_paths,
+            )
+
+            logger.info(
+                "command_runner_agent_run_tree_materialized task_id=%s run_dir=%s",
+                request.task_id,
+                str(run_dir),
             )
 
             inventory = _build_run_tree_inventory(run_dir)
@@ -575,6 +590,11 @@ class CommandRunnerAgent(BaseSubagent):
             )
 
             if plan.decision == "verification_not_applicable":
+                logger.info(
+                    "command_runner_agent_verification_skipped task_id=%s rationale=%s",
+                    request.task_id,
+                    plan.rationale,
+                )
                 state.evidence.add_note(
                     message=(
                         "Command verification was evaluated and deemed not materially applicable "
@@ -587,6 +607,14 @@ class CommandRunnerAgent(BaseSubagent):
                     producer=self.name,
                 )
                 return state
+
+            logger.info(
+                "command_runner_agent_executing task_id=%s command=%s cwd=%s expected_exit_codes=%s",
+                request.task_id,
+                plan.command,
+                plan.cwd_relative_path,
+                plan.expected_exit_codes,
+            )
 
             command_cwd = _resolve_command_cwd(run_dir, plan.cwd_relative_path)
 
@@ -610,10 +638,23 @@ class CommandRunnerAgent(BaseSubagent):
                     execution_run_id=request.execution_run_id,
                 )
             except Exception:
-                pass
+                logger.warning(
+                    "command_runner_agent_run_tree_cleanup_failed task_id=%s run_id=%s",
+                    request.task_id,
+                    request.execution_run_id,
+                    exc_info=True,
+                )
 
         timed_out = result.exit_code == 124
         exit_code_matched_expectation = result.exit_code in plan.expected_exit_codes
+
+        logger.info(
+            "command_runner_agent_command_result task_id=%s exit_code=%s timed_out=%s matched=%s",
+            request.task_id,
+            result.exit_code,
+            timed_out,
+            exit_code_matched_expectation,
+        )
 
         observed_outcome_summary = (
             "Command timed out."

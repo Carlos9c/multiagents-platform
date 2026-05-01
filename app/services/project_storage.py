@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 PROJECT_META_DIRNAME = "project_meta"
 ARTIFACTS_DIRNAME = "artifacts"
@@ -80,9 +84,66 @@ class ProjectStorageService:
         paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
         paths.executions_dir.mkdir(parents=True, exist_ok=True)
         paths.domain_data_dir.mkdir(parents=True, exist_ok=True)
+
+        self._recover_source_dir_if_needed(paths.source_dir)
+
         paths.source_dir.mkdir(parents=True, exist_ok=True)
 
         return paths
+
+    def _recover_source_dir_if_needed(self, source_dir: Path) -> None:
+        """
+        Recover the canonical source directory if a previous promote_workspace_to_source
+        was interrupted mid-swap.
+
+        Possible orphan states after a crash:
+        - source.backup exists, source does not  → rename backup → source (safe recovery)
+        - source.staging exists                  → remove it (incomplete staging, discard)
+        """
+        parent = source_dir.parent
+        staging_dir = parent / f"{source_dir.name}.staging"
+        backup_dir = parent / f"{source_dir.name}.backup"
+
+        if staging_dir.exists():
+            try:
+                shutil.rmtree(staging_dir)
+                logger.warning(
+                    "project_storage_orphaned_staging_removed project_id=%s path=%s",
+                    source_dir.parent.parent.name,
+                    str(staging_dir),
+                )
+            except Exception:
+                logger.exception(
+                    "project_storage_failed_to_remove_orphaned_staging path=%s",
+                    str(staging_dir),
+                )
+
+        if backup_dir.exists() and not source_dir.exists():
+            try:
+                backup_dir.rename(source_dir)
+                logger.warning(
+                    "project_storage_source_recovered_from_backup project_id=%s path=%s",
+                    source_dir.parent.parent.name,
+                    str(source_dir),
+                )
+            except Exception:
+                logger.exception(
+                    "project_storage_failed_to_recover_source_from_backup path=%s",
+                    str(backup_dir),
+                )
+        elif backup_dir.exists() and source_dir.exists():
+            try:
+                shutil.rmtree(backup_dir)
+                logger.warning(
+                    "project_storage_orphaned_backup_removed project_id=%s path=%s",
+                    source_dir.parent.parent.name,
+                    str(backup_dir),
+                )
+            except Exception:
+                logger.exception(
+                    "project_storage_failed_to_remove_orphaned_backup path=%s",
+                    str(backup_dir),
+                )
 
     def write_project_storage_manifest(
         self,

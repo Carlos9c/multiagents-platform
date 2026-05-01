@@ -86,6 +86,7 @@ class ExecutionRequest(BaseModel):
     technical_constraints: str | None = None
     out_of_scope: str | None = None
 
+    task_type: str | None = None
     executor_type: str
 
     success_criteria: list[str] = Field(default_factory=list)

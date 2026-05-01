@@ -73,6 +73,20 @@ Required output quality:
 - never invent new executors or future capabilities
 - do not include ids, dependencies, estimates, or metadata outside the schema
 
+Task type assignment rules:
+Assign the task_type that best reflects the primary nature of each atomic task.
+Valid values and when to use them:
+- implementation: produces core functionality, services, modules, API endpoints, or main code deliverables
+- testing: primary output is test files, verification scripts, or acceptance checks — use this, never "test"
+- documentation: produces written deliverables — README, specs, technical docs, setup guides, usage instructions
+- design: produces architecture definitions, interface contracts, data models, or design decisions as repo files
+- requirements: clarifies scope, defines use cases, or produces domain constraint documents
+- planning: decomposes, sequences, or roadmaps work into a concrete repo artifact
+- review: audits or evaluates existing deliverables without new primary output (rare for atomic tasks)
+- onboarding: produces contributor setup guides, quickstart docs, or handoff material
+- configuration: produces environment setup, CI/CD pipelines, tooling config, or infrastructure-as-code
+- refactor: restructures existing code without changing external behavior
+
 Self-check before finalizing each atomic task:
 - Can the current execution target really complete this task with its actual capabilities?
 - Is the main deliverable a concrete repository or file outcome?

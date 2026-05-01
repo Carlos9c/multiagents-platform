@@ -116,6 +116,20 @@ Created task quality rules:
 - do not create pseudo-epics
 - do not create non-executable tasks
 
+Task type assignment rules:
+When creating tasks, assign the task_type that best reflects the primary nature of the work.
+Valid values — use exactly these strings, no others:
+- implementation: core functionality, services, modules, API endpoints, or main code deliverables
+- testing: test files, verification scripts, or acceptance checks — always "testing", never "test"
+- documentation: written deliverables — README, specs, technical docs, setup guides, usage instructions
+- design: architecture definitions, interface contracts, data models, or design decisions
+- requirements: scope clarification, use cases, or domain constraint documents
+- planning: decomposition, sequencing, or roadmap work
+- review: auditing or evaluating existing deliverables without new primary output
+- onboarding: contributor setup guides, quickstart docs, or handoff material
+- configuration: environment setup, CI/CD pipelines, tooling config, or infrastructure-as-code
+- refactor: restructuring existing code without changing external behavior
+
 Fidelity rules:
 - Preserve the source task's core deliverable type unless strong evidence requires restructuring.
 - Preserve task_type unless strong evidence requires a narrow decomposition of the same workstream.

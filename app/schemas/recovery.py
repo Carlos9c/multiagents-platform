@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.task_types import TaskType
+
 RecoveryAction = Literal[
     "reatomize",
     "insert_followup",
@@ -14,14 +16,6 @@ RecoveryConfidence = Literal[
     "low",
     "medium",
     "high",
-]
-
-RecoveryTaskType = Literal[
-    "implementation",
-    "test",
-    "documentation",
-    "configuration",
-    "refactor",
 ]
 
 RecoveryTaskPriority = Literal[
@@ -40,7 +34,7 @@ class RecoveryTaskCreate(BaseModel):
     acceptance_criteria: str | None = None
     technical_constraints: str | None = None
     out_of_scope: str | None = None
-    task_type: RecoveryTaskType = "implementation"
+    task_type: TaskType = "implementation"
     priority: RecoveryTaskPriority = "medium"
 
     @model_validator(mode="after")

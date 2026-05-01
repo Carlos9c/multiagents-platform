@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -26,6 +27,8 @@ from app.execution_engine.tools.file_snapshot_tool import (
 from app.execution_engine.tools.file_writer_tool import write_text_file
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
 from app.services.llm.schema_utils import to_openai_strict_json_schema
+
+logger = logging.getLogger(__name__)
 
 CODE_CHANGE_AGENT_SYSTEM_PROMPT = """
 You are a senior repository implementation agent.
@@ -476,6 +479,13 @@ class CodeChangeAgent(BaseSubagent):
 
         state.increment_materialization_attempts()
 
+        logger.info(
+            "code_change_agent_started task_id=%s step_id=%s attempt=%s",
+            request.task_id,
+            step.id,
+            state.materialization_attempt_count,
+        )
+
         source_root = _get_source_root_from_request(request)
 
         user_prompt, files_read = _build_user_prompt(request, step, state)
@@ -497,7 +507,20 @@ class CodeChangeAgent(BaseSubagent):
         try:
             materialization = FileMaterializationResult.model_validate(raw)
         except ValidationError as exc:
+            logger.warning(
+                "code_change_agent_invalid_output task_id=%s step_id=%s error=%s",
+                request.task_id,
+                step.id,
+                str(exc),
+            )
             raise SubagentRejectedStepError(f"Invalid code change output: {str(exc)}") from exc
+
+        logger.info(
+            "code_change_agent_files_planned task_id=%s step_id=%s file_count=%s",
+            request.task_id,
+            step.id,
+            len(materialization.files),
+        )
 
         _validate_generated_files(
             workspace_root=request.context.workspace_path,
@@ -528,6 +551,13 @@ class CodeChangeAgent(BaseSubagent):
                     CHANGE_TYPE_CREATED if generated.operation == "create" else CHANGE_TYPE_MODIFIED
                 )
 
+                logger.info(
+                    "code_change_agent_file_written task_id=%s path=%s operation=%s",
+                    request.task_id,
+                    generated.path,
+                    generated.operation,
+                )
+
                 state.evidence.add_changed_file(
                     path=generated.path,
                     change_type=change_type,
@@ -543,6 +573,11 @@ class CodeChangeAgent(BaseSubagent):
                 )
 
         except Exception:
+            logger.exception(
+                "code_change_agent_write_failed task_id=%s step_id=%s rolling_back=true",
+                request.task_id,
+                step.id,
+            )
             restore_file_snapshot(
                 root_dir=request.context.workspace_path,
                 snapshots=snapshots,
@@ -558,6 +593,13 @@ class CodeChangeAgent(BaseSubagent):
         state.add_risk_flags(materialization.warnings)
         state.add_note(
             f"Artifact materialization completed for {len(ordered_generated_files)} files."
+        )
+
+        logger.info(
+            "code_change_agent_completed task_id=%s step_id=%s files_written=%s",
+            request.task_id,
+            step.id,
+            len(ordered_generated_files),
         )
 
         return state
