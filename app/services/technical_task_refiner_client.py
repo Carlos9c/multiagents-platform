@@ -78,6 +78,20 @@ Self-check rules:
 - If a meaningful sub-area is missing, add a refined task for it.
 - Do not add filler tasks.
 
+Task type assignment rules:
+Assign the task_type that best reflects the primary nature of each refined task.
+Valid values and when to use them:
+- implementation: produces core functionality, services, modules, API endpoints, or main code deliverables
+- testing: primary output is test files, test plans, or verification work — use this, never "test"
+- documentation: produces written deliverables — README, specs, technical docs, setup guides, usage instructions
+- design: produces architecture definitions, interface contracts, data models, or design decisions
+- requirements: clarifies scope, defines use cases, or produces domain constraint documents
+- planning: decomposes, sequences, or roadmaps work
+- review: audits or evaluates existing deliverables without new primary output
+- onboarding: produces contributor setup guides, quickstart docs, or handoff material
+- configuration: produces environment setup, CI/CD pipelines, tooling config, or infrastructure-as-code
+- refactor: restructures existing code without changing external behavior
+
 Future-proofing rules:
 - Refined tasks should remain compatible with a future multi-executor system.
 - Do not assume every refined task ends in code generation.

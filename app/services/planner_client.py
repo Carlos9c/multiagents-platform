@@ -47,12 +47,16 @@ Domain interpretation rules:
 
 Task type guidance:
 - task_type should reflect the primary nature of the task.
-- Use documentation for specifications, README files, technical docs, setup docs, operating guides, process docs, usage instructions, briefs, or structured written guidance.
-- Use onboarding for first-run guidance, contributor setup, handoff material, quickstart flows, or getting-started instructions when relevant.
 - Use implementation for tasks that produce core project capability, functionality, or the main deliverable.
+- Use testing for writing tests, verification, validation, or acceptance checks.
+- Use documentation for specifications, README files, technical docs, setup docs, operating guides, process docs, usage instructions, briefs, or structured written guidance.
 - Use design for architecture, structure, concept design, or planning of how a solution should be shaped.
 - Use requirements for scope clarification, use cases, constraints, business rules, domain definitions, or input clarification.
-- Use testing for verification, validation, acceptance checks, or test-plan creation.
+- Use planning for decomposition, roadmap, or sequencing work.
+- Use review for auditing, code review, or evaluation of existing deliverables.
+- Use onboarding for first-run guidance, contributor setup, handoff material, quickstart flows, or getting-started instructions.
+- Use configuration for environment setup, tooling configuration, CI/CD, or infrastructure-as-code tasks.
+- Use refactor for restructuring existing code without changing external behavior.
 - Do not force documentation or onboarding if they are not natural deliverables of the project.
 
 Planning rules:

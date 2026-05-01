@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
@@ -25,6 +26,8 @@ from app.execution_engine.tools.context_builder_tool import (
 from app.models.project import Project
 from app.models.task import Task
 from app.services.llm.schema_utils import to_openai_strict_json_schema
+
+logger = logging.getLogger(__name__)
 
 HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT = """
 You are a historical task selector for atomic task execution.
@@ -319,6 +322,11 @@ class ContextSelectionAgent(BaseSubagent):
                 catalog=context_input.completed_task_catalog,
             )
         except (ValidationError, SubagentRejectedStepError) as exc:
+            logger.warning(
+                "context_selection_agent_first_attempt_invalid task_id=%s error=%s retrying=true",
+                current_task.id,
+                str(exc),
+            )
             retry_user_prompt = _build_historical_task_selection_retry_prompt(
                 current_task=current_task,
                 catalog=context_input.completed_task_catalog,
@@ -338,6 +346,11 @@ class ContextSelectionAgent(BaseSubagent):
             try:
                 result_retry = HistoricalTaskSelectionResult.model_validate(raw_retry)
             except ValidationError as retry_exc:
+                logger.error(
+                    "context_selection_agent_retry_also_invalid task_id=%s error=%s",
+                    current_task.id,
+                    str(retry_exc),
+                )
                 raise SubagentRejectedStepError(
                     f"Invalid historical task selection output after retry: {str(retry_exc)}"
                 ) from retry_exc
@@ -360,6 +373,12 @@ class ContextSelectionAgent(BaseSubagent):
                 f"{self.name} received a step for subagent '{step.subagent_name}'."
             )
 
+        logger.info(
+            "context_selection_agent_started task_id=%s step_id=%s",
+            state.execution_request.task_id,
+            step.id,
+        )
+
         current_request = state.execution_request
 
         current_task: Task | None = db.get(Task, current_request.task_id)
@@ -380,6 +399,10 @@ class ContextSelectionAgent(BaseSubagent):
         )
 
         if not context_input.should_invoke_context_selection_agent:
+            logger.info(
+                "context_selection_agent_skipped task_id=%s reason=no_completed_historical_tasks",
+                current_request.task_id,
+            )
             empty_selection = HistoricalTaskSelectionResult(selected_task_runs=[])
             state.set_historical_task_selection(empty_selection)
 
@@ -413,6 +436,12 @@ class ContextSelectionAgent(BaseSubagent):
         state.replace_execution_request(enriched_request)
 
         selected_count = len(selection_result.selected_task_runs)
+
+        logger.info(
+            "context_selection_agent_completed task_id=%s selected_task_runs=%s",
+            current_request.task_id,
+            selected_count,
+        )
 
         state.evidence.add_note(
             message=f"Historical context selection completed. selected_task_runs={selected_count}.",

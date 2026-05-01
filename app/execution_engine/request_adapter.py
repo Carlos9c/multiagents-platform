@@ -281,6 +281,7 @@ def build_placeholder_execution_request(
         tests_required=task.tests_required,
         technical_constraints=task.technical_constraints,
         out_of_scope=task.out_of_scope,
+        task_type=task.task_type,
         executor_type=resolved_executor_type,
         success_criteria=_split_multiline_text(task.acceptance_criteria),
         constraints=_split_multiline_text(task.technical_constraints),

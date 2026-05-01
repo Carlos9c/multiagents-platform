@@ -47,6 +47,21 @@ VALID_EXECUTOR_TYPES = {
     EXECUTION_ENGINE,
 }
 
+VALID_TASK_TYPES = frozenset(
+    {
+        "requirements",
+        "design",
+        "planning",
+        "implementation",
+        "testing",
+        "review",
+        "documentation",
+        "onboarding",
+        "configuration",
+        "refactor",
+    }
+)
+
 EXECUTABLE_TASK_STATUSES = {
     TASK_STATUS_PENDING,
     TASK_STATUS_FAILED,
@@ -55,6 +70,10 @@ EXECUTABLE_TASK_STATUSES = {
 
 def is_valid_executor_type(executor_type: str | None) -> bool:
     return executor_type in VALID_EXECUTOR_TYPES
+
+
+def is_valid_task_type(task_type: str | None) -> bool:
+    return task_type in VALID_TASK_TYPES
 
 
 class Task(Base):

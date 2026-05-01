@@ -2,16 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-TaskType = Literal[
-    "requirements",
-    "design",
-    "planning",
-    "implementation",
-    "testing",
-    "review",
-    "documentation",
-    "onboarding",
-]
+from app.schemas.task_types import TaskType
 
 Priority = Literal["high", "medium", "low"]
 

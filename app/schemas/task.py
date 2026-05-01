@@ -5,7 +5,9 @@ from app.models.task import (
     VALID_EXECUTOR_TYPES,
     VALID_PLANNING_LEVELS,
     VALID_TASK_STATUSES,
+    VALID_TASK_TYPES,
     is_valid_executor_type,
+    is_valid_task_type,
 )
 
 
@@ -31,6 +33,15 @@ class TaskCreate(BaseModel):
     status: str = "pending"
     is_blocked: bool = False
     blocking_reason: str | None = None
+
+    @field_validator("task_type")
+    @classmethod
+    def validate_task_type(cls, value: str) -> str:
+        if not is_valid_task_type(value):
+            raise ValueError(
+                f"Invalid task_type '{value}'. Allowed values: {sorted(VALID_TASK_TYPES)}"
+            )
+        return value
 
     @field_validator("planning_level")
     @classmethod

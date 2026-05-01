@@ -235,6 +235,27 @@ def _last_attempted_subagent_name(runtime_state: ExecutionState) -> str | None:
     return None
 
 
+# Task types that inherently require materializing file changes.
+# "review" is the only planner-assigned type where no code output is expected.
+# Recovery variants "test", "refactor", "configuration" are also included.
+TASK_TYPES_REQUIRING_CHANGES = frozenset(
+    {
+        "implementation",
+        "testing",
+        "documentation",
+        "onboarding",
+        "design",
+        "planning",
+        "requirements",
+        "refactor",
+        "configuration",
+    }
+)
+
+# Task types where writing tests is an explicit goal.
+TASK_TYPES_REQUIRING_VERIFICATION = frozenset({"testing"})
+
+
 def _allowed_subagents_for_phase(phase: str) -> list[str]:
     if phase == "discovery":
         return ["context_selection_agent"]
@@ -334,8 +355,12 @@ def _is_executable_implementation_like_task(request: ExecutionRequest) -> bool:
 
 
 def _task_explicitly_requests_repo_local_verification(request: ExecutionRequest) -> bool:
+    if request.task_type and request.task_type.lower() in TASK_TYPES_REQUIRING_VERIFICATION:
+        return True
+
     text = _task_text(request)
     verification_markers = (
+        # English
         "test",
         "tests",
         "verify",
@@ -354,14 +379,28 @@ def _task_explicitly_requests_repo_local_verification(request: ExecutionRequest)
         "unit test",
         "integration test",
         "repository-local verification",
+        # Spanish
+        "prueba",
+        "pruebas",
+        "verificar",
+        "verificación",
+        "validar",
+        "validación",
+        "comprobar",
+        "ejecutar",
+        "construir",
+        "compilar",
     )
     return _contains_any(text, verification_markers)
 
 
 def _task_requires_material_changes(request: ExecutionRequest) -> bool:
-    text = _task_text(request)
+    if request.task_type and request.task_type.lower() in TASK_TYPES_REQUIRING_CHANGES:
+        return True
 
+    text = _task_text(request)
     change_markers = (
+        # English
         "implement",
         "implementation",
         "fix",
@@ -386,11 +425,33 @@ def _task_requires_material_changes(request: ExecutionRequest) -> bool:
         "specification",
         "requirements",
         "document",
+        # Spanish
+        "implementar",
+        "arreglar",
+        "cambiar",
+        "modificar",
+        "actualizar",
+        "crear",
+        "agregar",
+        "añadir",
+        "eliminar",
+        "escribir",
+        "prueba",
+        "pruebas",
+        "migración",
+        "esquema",
         "especificación",
         "requisitos",
         "documentación",
     )
     return _contains_any(text, change_markers)
+
+
+def _code_change_agent_completed_a_step(resolution_state: ResolutionState) -> bool:
+    return any(
+        _extract_subagent_name_from_step_id(step_id) == "code_change_agent"
+        for step_id in resolution_state.completed_steps
+    )
 
 
 def _changed_files_look_documentation_only(resolution_state: ResolutionState) -> bool:
@@ -554,6 +615,9 @@ def _build_completion_checklist(
         not implementation_needed
         or bool(resolution_state.evidence.changed_files)
         or bool(resolution_state.evidence.artifacts_created)
+        # code_change_agent completing a step is direct evidence that the
+        # implementation pass ran, even when keyword detection is ambiguous
+        or _code_change_agent_completed_a_step(resolution_state)
     )
 
     verification_needed = _verification_would_materially_improve(request, resolution_state)
@@ -621,7 +685,6 @@ def _build_operational_state_summary(
         ),
         "latest_command_succeeded": _command_succeeded(latest_command) if latest_command else None,
         "completion_checklist": checklist,
-        "checklist_requires_finish": _checklist_requires_finish(checklist),
     }
 
 
@@ -645,6 +708,7 @@ def _build_orchestrator_prompt(
     return f"""
 Task:
 - task_id: {request.task_id}
+- task_type: {request.task_type}
 - title: {request.task_title}
 - description: {request.task_description}
 - objective: {request.objective}
@@ -680,14 +744,16 @@ Current orchestration state:
 - step_notes: {resolution_state.step_notes}
 - operational_state_summary: {_build_operational_state_summary(request, resolution_state, runtime_state)}
 
-Binary completion checklist for this decision:
+Completion checklist (use as a reasoning aid, not a hard rule):
 - context_ready: {"yes" if checklist["context_ready"] else "no"}
 - implementation_done_if_needed: {"yes" if checklist["implementation_done_if_needed"] else "no"}
 - local_verification_done_if_material: {"yes" if checklist["local_verification_done_if_material"] else "no"}
 - new_concrete_gap_detected: {"yes" if checklist["new_concrete_gap_detected"] else "no"}
 
-Hard finish reminder:
-- If the first three checklist fields are yes and the last one is no, you must return finish.
+Checklist guidance:
+- When the first three fields are yes and the last is no, that is a strong signal to finish — but always verify against task_type and the actual accumulated evidence before deciding.
+- For implementation, testing, or configuration task types, do not finish unless at least one of code_change_agent or command_runner_agent has executed.
+- A checklist that looks satisfied but contradicts the task_type or the visible evidence means a subagent step was likely skipped — call the appropriate subagent instead of finishing.
 
 Accumulated execution evidence:
 - changed_files: {[item.model_dump() for item in resolution_state.evidence.changed_files]}
@@ -766,18 +832,6 @@ def _normalize_decision(
                 extra_risk_flag="invalid_decision_for_discovery_phase",
             )
 
-    checklist = _build_completion_checklist(request, state, runtime_state)
-    if decision.decision_type != DECISION_FINISH and _checklist_requires_finish(checklist):
-        return _invalidate_decision(
-            decision,
-            rationale=(
-                "The completion checklist already requires finish. "
-                "A further subagent call or reject decision is not valid."
-            ),
-            expected_outcome="Retry orchestration with a finish decision.",
-            extra_risk_flag="finish_required_by_completion_checklist",
-        )
-
     if decision.decision_type == DECISION_CALL_SUBAGENT:
         if decision.subagent_name not in allowed_subagents:
             return _invalidate_decision(
@@ -845,19 +899,8 @@ def _maybe_build_forced_terminal_decision(
     budget: LoopBudget,
     consecutive_invalid_decisions: int,
 ) -> NextActionDecision | None:
-    checklist = _build_completion_checklist(request, resolution_state, runtime_state)
     last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
     latest_command = _latest_command_execution(resolution_state)
-
-    if _checklist_requires_finish(checklist) and resolution_state.completed_steps:
-        return NextActionDecision(
-            decision_type=DECISION_FINISH,
-            rationale=(
-                "The completion checklist is already satisfied, so the operational pass should finish now."
-            ),
-            expected_outcome="Stop orchestration because no clearly better next contribution remains.",
-            risk_flags=[],
-        )
 
     if (
         last_attempted_subagent == "code_change_agent"
@@ -1270,6 +1313,12 @@ class ExecutionOrchestrator:
                 )
 
             except Exception as exc:
+                logger.exception(
+                    "execution_orchestrator_subagent_unexpected_error task_id=%s subagent=%s step=%s",
+                    active_request.task_id,
+                    decision.subagent_name,
+                    runtime_state.step_count,
+                )
                 resolution_state.mark_step_failed(
                     f"subagent_error_{decision.subagent_name or decision.decision_type}_{runtime_state.step_count}"
                 )

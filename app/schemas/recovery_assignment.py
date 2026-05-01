@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.schemas.task_types import TaskType
+
 AssignmentInputIntentType = Literal[
     "assign",
     "resequence",
@@ -12,14 +14,6 @@ AssignmentInputIntentType = Literal[
 AssignmentInputMutationScope = Literal[
     "assignment",
     "resequence",
-]
-
-AssignmentTaskType = Literal[
-    "implementation",
-    "test",
-    "documentation",
-    "configuration",
-    "refactor",
 ]
 
 AssignmentPriority = Literal[
@@ -215,7 +209,7 @@ class RecoveryTaskForAssignment(BaseModel):
     technical_constraints: str | None = None
     out_of_scope: str | None = None
 
-    task_type: AssignmentTaskType = "implementation"
+    task_type: TaskType = "implementation"
     priority: AssignmentPriority = "medium"
 
     parent_task_id: int | None = Field(default=None, gt=0)
