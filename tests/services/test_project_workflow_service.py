@@ -3515,3 +3515,194 @@ def test_workflow_blocked_batches_never_includes_completed_batches(
     assert result.completed_batches == ["batch_1", "batch_2"]
     assert result.blocked_batches == ["batch_3"]
     assert set(result.completed_batches).isdisjoint(set(result.blocked_batches))
+
+
+def test_workflow_stops_with_manual_review_when_patched_plan_is_exhausted_but_stage_not_closed(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    """
+    Regression: final batch → assign → patched plan (patch batch executed in same iteration).
+    If the patch batch evaluator says 'continue' (e.g. it sees a partial source task and
+    does not decide to close the stage), the patched plan is fully exhausted by the end of
+    iteration 1.  Without the guard, iteration 2 would start with all batches already in
+    previously_completed_batch_ids, last_post_batch_result would remain None, and the
+    workflow would raise a ProjectWorkflowServiceError 400.  With the guard it should stop
+    cleanly and return awaiting_manual_review.
+    """
+    project = make_project(
+        name="Proyecto exhausted patched plan",
+        description="Regresión: plan agotado sin cierre de stage",
+    )
+    project.enable_technical_refinement = False
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    final_batch_task = make_task(
+        project_id=project.id,
+        title="Final batch task (goes partial)",
+        status=TASK_STATUS_PENDING,
+    )
+    patch_task = make_task(
+        project_id=project.id,
+        title="Recovery patch task",
+        status=TASK_STATUS_PENDING,
+    )
+
+    original_plan = make_execution_plan(
+        plan_version=1,
+        batches=[
+            {
+                "batch_id": "batch_final",
+                "task_ids": [final_batch_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    patched_plan = make_execution_plan(
+        plan_version=2,
+        batches=[
+            {
+                "batch_id": "batch_final",
+                "task_ids": [final_batch_task.id],
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+            {
+                "batch_id": "batch_patch",
+                "batch_internal_id": "2_2_p1",
+                "batch_index": 2,
+                "plan_version": 2,
+                "task_ids": [patch_task.id],
+                "checkpoint_id": "checkpoint_batch_patch",
+                "checkpoint_name": "Patch checkpoint",
+                "evaluation_focus": ["functional_coverage", "stage_closure"],
+            },
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._bootstrap_project_storage_for_execution",
+        lambda project_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_planner_if_needed",
+        lambda db, project_id: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_optional_technical_refinement_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._run_atomic_generation_phase",
+        lambda db, project_id, *, enable_technical_refinement: True,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.generate_execution_plan",
+        lambda db, project_id: original_plan,
+    )
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.persist_execution_plan",
+        lambda **kwargs: None,
+    )
+
+    executed_task_ids = []
+
+    def _fake_execute_task_sync(db, task_id):
+        executed_task_ids.append(task_id)
+        return _successful_execution_result(executor_type=EXECUTION_ENGINE)
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service.execute_task_sync",
+        _fake_execute_task_sync,
+    )
+
+    def _fake_post_batch(
+        db,
+        project_id,
+        plan,
+        batch_id,
+        current_finalization_iteration_count,
+        max_finalization_iterations,
+        checkpoint_artifact_window_start_exclusive,
+    ):
+        if batch_id == "batch_final":
+            # Final batch: recovery task created → assign → patched plan with patch batch.
+            # can_continue_after_application=True triggers the plan switch inside
+            # _run_execution_iteration, which then processes batch_patch in the same pass.
+            return _post_batch_result(
+                status="finalization_reopened",
+                resolved_intent_type="assign",
+                resolved_mutation_scope="assignment",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=True,
+                requires_plan_mutation=True,
+                requires_all_new_tasks_assigned=True,
+                can_continue_after_application=True,
+                should_close_stage=False,
+                requires_manual_review=False,
+                reopened_finalization=True,
+                patched_execution_plan=patched_plan,
+                decision_signals=["recovery_task_inserted"],
+                finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="Final batch has recovery work; continuing with patched plan.",
+            )
+
+        if batch_id == "batch_patch":
+            # Patch batch: the evaluator sees the source task still as partial and says
+            # 'continue' instead of 'close'. This exhausts the patched plan without an
+            # explicit stage-closure signal.
+            return _post_batch_result(
+                status="completed_with_evaluation",
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=True,
+                should_close_stage=False,
+                requires_manual_review=False,
+                reopened_finalization=False,
+                patched_execution_plan=None,
+                decision_signals=["evaluator_did_not_close"],
+                finalization_iteration_count=current_finalization_iteration_count,
+                finalization_guard_triggered=False,
+                notes="Patch batch complete; evaluator deferred stage closure.",
+            )
+
+        raise AssertionError(f"Unexpected batch_id: {batch_id}")
+
+    monkeypatch.setattr(
+        "app.services.project_workflow_service._process_batch_after_terminal_tasks",
+        _fake_post_batch,
+    )
+
+    result = run_project_workflow(
+        db=db_session,
+        project_id=project.id,
+        max_workflow_iterations=3,
+        max_finalization_iterations=2,
+    )
+
+    # The guard fires at the start of iteration 2, before _run_execution_iteration is
+    # called, so no 400 error is raised.
+    assert result.status == "awaiting_manual_review"
+    assert result.manual_review_required is True
+    assert result.completed_batches == ["batch_final", "batch_patch"]
+    assert executed_task_ids == [final_batch_task.id, patch_task.id]
+
+    # Two iterations: iteration 1 processed the batches, iteration 2 is the synthetic
+    # guard iteration (no batches processed, requires_manual_review=True).
+    assert len(result.iterations) == 2
+    iter1 = result.iterations[0]
+    iter2 = result.iterations[1]
+    assert iter1.batch_ids_processed == ["batch_final", "batch_patch"]
+    assert iter2.batch_ids_processed == []
+    assert iter2.requires_manual_review is True
+    assert "exhausted_plan_no_stage_closure" in iter2.decision_signals

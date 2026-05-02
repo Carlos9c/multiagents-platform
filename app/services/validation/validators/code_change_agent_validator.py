@@ -117,6 +117,22 @@ Strict boundary rules:
 - If the code clearly contradicts the task objective or acceptance criteria, choose failed.
 - If the code materially satisfies the task objective and acceptance criteria, choose completed.
 
+Partial decision rules (apply ONLY when decision is 'partial'):
+You MUST set partial_reason to one of:
+  - "files_rejected": at least one produced file is incorrect or incomplete and MUST NOT be promoted.
+    You MUST list those files in rejected_files (relative paths only). rejected_files MUST be non-empty.
+  - "work_missing": the task is incomplete because required work was not done at all (no file to reject —
+    the absence of work is the problem). Set missing_work_summary to describe what is missing.
+  - "files_rejected_and_work_missing": both apply — some files must not be promoted AND work is missing.
+    rejected_files MUST be non-empty and missing_work_summary MUST describe the missing work.
+
+File rejection rules:
+- Only reject files within the code_change_agent competency: source code and configuration files
+  whose content is materially wrong, incomplete, or contradicts the acceptance criteria.
+- rejected_files contains relative file paths exactly as they appear in the evidence.
+- Do NOT reject files preemptively — only reject files you have concrete evidence are wrong.
+- If decision is not 'partial', leave rejected_files empty and partial_reason as null.
+
 Return ONLY JSON matching the provided schema.
 """.strip()
 
@@ -138,6 +154,11 @@ class CodeChangeAgentValidationLLMOutput(BaseModel):
     findings: list[CodeChangeAgentValidationFinding] = Field(default_factory=list)
     manual_review_required: bool = False
     reasoning_notes: list[str] = Field(default_factory=list)
+    rejected_files: list[str] = Field(default_factory=list)
+    partial_reason: (
+        Literal["files_rejected", "work_missing", "files_rejected_and_work_missing"] | None
+    ) = None
+    missing_work_summary: str | None = None
 
 
 class CodeChangeAgentValidatorError(Exception):
@@ -403,6 +424,7 @@ def _sanitize_llm_output(
     sanitized_reasoning_notes = [
         note for note in llm_output.reasoning_notes if not _contains_forbidden_text(note)
     ]
+    sanitized_rejected_files = list(llm_output.rejected_files)
 
     sanitized_summary = llm_output.summary
     sanitized_validated_scope = llm_output.validated_scope
@@ -427,6 +449,8 @@ def _sanitize_llm_output(
     negative_signal_count += len(sanitized_blockers)
     if sanitized_missing_scope:
         negative_signal_count += 1
+    if sanitized_rejected_files:
+        negative_signal_count += 1
 
     decision = llm_output.decision
     manual_review_required = llm_output.manual_review_required
@@ -434,6 +458,29 @@ def _sanitize_llm_output(
     if decision in {"partial", "failed", "manual_review"} and negative_signal_count == 0:
         decision = "completed"
         manual_review_required = False
+
+    partial_reason = llm_output.partial_reason
+    missing_work_summary = llm_output.missing_work_summary
+
+    if decision != "partial":
+        sanitized_rejected_files = []
+        partial_reason = None
+        missing_work_summary = None
+    else:
+        has_rejected = bool(sanitized_rejected_files)
+        has_missing_work = bool(missing_work_summary or sanitized_missing_scope)
+        if partial_reason is None:
+            if has_rejected and has_missing_work:
+                partial_reason = "files_rejected_and_work_missing"
+            elif has_rejected:
+                partial_reason = "files_rejected"
+            else:
+                partial_reason = "work_missing"
+        elif (
+            partial_reason in {"files_rejected", "files_rejected_and_work_missing"}
+            and not has_rejected
+        ):
+            partial_reason = "work_missing"
 
     return CodeChangeAgentValidationLLMOutput(
         decision=decision,
@@ -444,6 +491,9 @@ def _sanitize_llm_output(
         findings=sanitized_findings,
         manual_review_required=manual_review_required,
         reasoning_notes=sanitized_reasoning_notes,
+        rejected_files=sanitized_rejected_files,
+        partial_reason=partial_reason,
+        missing_work_summary=missing_work_summary,
     )
 
 
@@ -533,6 +583,9 @@ class CodeChangeAgentValidator(BaseTaskValidator):
             followup_validation_required=False,
             recommended_next_validator_keys=[],
             partial_validation_summary=None,
+            rejected_files=list(llm_output.rejected_files),
+            partial_reason=llm_output.partial_reason,
+            missing_work_summary=llm_output.missing_work_summary,
             metadata={
                 "producer_key": self.producer_key,
                 "producer_evidence_count": len(producer_items),

@@ -60,10 +60,9 @@ class NextActionDecision(BaseModel):
 
             return self
 
-        if self.subagent_name is not None:
-            raise ValueError("subagent_name must be null unless decision_type='call_subagent'.")
-
-        if self.target_paths:
-            raise ValueError("target_paths must be empty unless decision_type='call_subagent'.")
-
+        # For finish/reject/invalid: strip rather than reject.
+        # OpenAI strict mode requires all fields to be present in the JSON response,
+        # so the LLM legitimately echoes subagent_name/target_paths even when irrelevant.
+        self.subagent_name = None
+        self.target_paths = []
         return self

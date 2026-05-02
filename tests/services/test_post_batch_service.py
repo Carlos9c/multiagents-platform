@@ -10,6 +10,7 @@ from app.models.task import (
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
+    TASK_STATUS_REATOMIZED,
 )
 from app.schemas.recovery import (
     RecoveryContext,
@@ -477,7 +478,7 @@ def test_post_batch_records_recovery_created_tasks_and_reopens_parent(
     db_session.refresh(parent)
     db_session.refresh(failed_task)
 
-    assert failed_task.status == TASK_STATUS_FAILED
+    assert failed_task.status == TASK_STATUS_REATOMIZED
     assert parent.status == TASK_STATUS_PENDING
     assert len(result.recovery_context.recovery_created_tasks) == 1
     assert result.recovery_context.recovery_created_tasks[0].source_task_id == failed_task.id

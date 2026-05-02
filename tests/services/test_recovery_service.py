@@ -7,6 +7,8 @@ from app.models.task import (
     PLANNING_LEVEL_HIGH_LEVEL,
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
+    TASK_STATUS_PENDING,
+    TASK_STATUS_REATOMIZED,
 )
 from app.schemas.recovery import RecoveryDecision
 from app.services.recovery_service import (
@@ -101,7 +103,7 @@ def test_reatomize_creates_new_atomic_tasks_with_pending_executor_and_keeps_sour
 
     db_session.refresh(source_task)
 
-    assert source_task.status == TASK_STATUS_FAILED
+    assert source_task.status == TASK_STATUS_REATOMIZED
     assert len(created_tasks) == 2
 
     for created in created_tasks:
@@ -109,8 +111,8 @@ def test_reatomize_creates_new_atomic_tasks_with_pending_executor_and_keeps_sour
         assert created.parent_task_id == parent.id
         assert created.planning_level == PLANNING_LEVEL_ATOMIC
         assert created.executor_type == PENDING_ENGINE_ROUTING_EXECUTOR
-        assert created.status != TASK_STATUS_FAILED
-        assert created.status != TASK_STATUS_PARTIAL
+        assert created.status == TASK_STATUS_PENDING
+        assert created.is_recovery_task is True
 
     assert created_tasks[0].sequence_order is not None
     assert created_tasks[1].sequence_order is not None

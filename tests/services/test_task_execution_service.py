@@ -170,6 +170,7 @@ def _build_validation_result(
         partial_validation_summary=(
             "Additional follow-up validation required." if followup_validation_required else None
         ),
+        partial_reason="work_missing" if decision == "partial" else None,
         metadata={},
     )
 

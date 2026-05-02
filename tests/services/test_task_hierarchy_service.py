@@ -6,6 +6,7 @@ from app.models.task import (
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
+    TASK_STATUS_REATOMIZED,
 )
 from app.schemas.recovery import RecoveryDecision
 from app.services.recovery_service import (
@@ -71,9 +72,10 @@ def test_reatomize_creates_new_atomic_tasks_and_keeps_source_failed(
 
     db_session.refresh(source_task)
 
-    assert source_task.status == TASK_STATUS_FAILED
+    assert source_task.status == TASK_STATUS_REATOMIZED
     assert len(created_tasks) == 2
     assert all(task.status == TASK_STATUS_PENDING for task in created_tasks)
+    assert all(task.is_recovery_task is True for task in created_tasks)
     assert all(task.parent_task_id == parent.id for task in created_tasks)
     assert created_tasks[0].sequence_order > source_task.sequence_order
 

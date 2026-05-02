@@ -117,14 +117,16 @@ def _ensure_final_checkpoint_stage_closure(raw: dict) -> dict:
     if not isinstance(final_batch, dict):
         return raw
 
-    final_batch_id = final_batch.get("batch_id")
-    if not final_batch_id:
+    # Mirror the model validator's lookup: find the checkpoint whose checkpoint_id
+    # matches the final batch's checkpoint_id (not by after_batch_id).
+    final_checkpoint_id = final_batch.get("checkpoint_id")
+    if not final_checkpoint_id:
         return raw
 
     for checkpoint in checkpoints:
         if not isinstance(checkpoint, dict):
             continue
-        if checkpoint.get("after_batch_id") != final_batch_id:
+        if checkpoint.get("checkpoint_id") != final_checkpoint_id:
             continue
 
         focus = checkpoint.get("evaluation_focus")

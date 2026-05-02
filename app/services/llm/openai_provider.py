@@ -3,7 +3,7 @@ import logging
 import time
 from typing import Any
 
-from openai import OpenAI
+from openai import InternalServerError, OpenAI
 
 from app.services.llm.base import LLMProvider
 
@@ -84,27 +84,51 @@ class OpenAIProvider(LLMProvider):
                 schema_name,
             )
 
-            response = self.client.responses.create(
-                model=self.model,
-                input=[
-                    {
-                        "role": "system",
-                        "content": [{"type": "input_text", "text": system_prompt}],
-                    },
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": user_prompt}],
-                    },
-                ],
-                text={
-                    "format": {
-                        "type": "json_schema",
-                        "name": schema_name,
-                        "schema": json_schema,
-                        "strict": True,
-                    }
-                },
-            )
+            _max_provider_retries = 3
+            for _attempt in range(_max_provider_retries):
+                try:
+                    response = self.client.responses.create(
+                        model=self.model,
+                        input=[
+                            {
+                                "role": "system",
+                                "content": [{"type": "input_text", "text": system_prompt}],
+                            },
+                            {
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": user_prompt}],
+                            },
+                        ],
+                        text={
+                            "format": {
+                                "type": "json_schema",
+                                "name": schema_name,
+                                "schema": json_schema,
+                                "strict": True,
+                            }
+                        },
+                    )
+                    break
+                except InternalServerError as _exc:
+                    _status = getattr(_exc, "status_code", None)
+                    if (
+                        _status is not None
+                        and _status >= 500
+                        and _attempt < _max_provider_retries - 1
+                    ):
+                        _wait = 2**_attempt
+                        logger.warning(
+                            "llm_http_5xx_retry provider=openai model=%s schema=%s status=%s attempt=%s/%s wait_s=%s",
+                            self.model,
+                            schema_name,
+                            _status,
+                            _attempt + 1,
+                            _max_provider_retries,
+                            _wait,
+                        )
+                        time.sleep(_wait)
+                        continue
+                    raise
 
             logger.info(
                 "llm_http_request_finished provider=openai model=%s schema=%s",

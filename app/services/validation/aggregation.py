@@ -18,6 +18,8 @@ from app.services.validation.contracts import (
     ValidationResult,
 )
 
+PartialReason = Literal["files_rejected", "work_missing", "files_rejected_and_work_missing"]
+
 ValidationDecision = Literal["completed", "partial", "failed", "manual_review"]
 
 
@@ -145,6 +147,56 @@ def _build_aggregate_missing_scope(results: list[ValidationResult]) -> str | Non
     return "\n".join(scopes)
 
 
+def _merge_rejected_files(results: list[ValidationResult]) -> list[str]:
+    merged: list[str] = []
+    for result in results:
+        merged.extend(result.rejected_files)
+    return _unique_strings(merged)
+
+
+def _aggregate_partial_reason(
+    results: list[ValidationResult],
+    final_decision: str,
+) -> PartialReason | None:
+    if final_decision != VALIDATION_DECISION_PARTIAL:
+        return None
+
+    has_files_rejected = any(
+        r.partial_reason in {"files_rejected", "files_rejected_and_work_missing"}
+        for r in results
+        if r.decision == VALIDATION_DECISION_PARTIAL
+    )
+    has_work_missing = any(
+        r.partial_reason in {"work_missing", "files_rejected_and_work_missing"}
+        for r in results
+        if r.decision == VALIDATION_DECISION_PARTIAL
+    )
+
+    if has_files_rejected and has_work_missing:
+        return "files_rejected_and_work_missing"
+    if has_files_rejected:
+        return "files_rejected"
+    return "work_missing"
+
+
+def _aggregate_missing_work_summary(
+    results: list[ValidationResult],
+    final_decision: str,
+) -> str | None:
+    if final_decision != VALIDATION_DECISION_PARTIAL:
+        return None
+    summaries = _unique_strings(
+        [
+            r.missing_work_summary
+            for r in results
+            if r.decision == VALIDATION_DECISION_PARTIAL and r.missing_work_summary
+        ]
+    )
+    if not summaries:
+        return None
+    return "\n".join(summaries)
+
+
 def _build_partial_validation_summary(results: list[ValidationResult]) -> str | None:
     partial_summaries = _unique_strings(
         [
@@ -176,6 +228,12 @@ def aggregate_validation_results(
         for result in validator_results
     )
 
+    aggregated_rejected_files = _merge_rejected_files(validator_results)
+    aggregated_partial_reason = _aggregate_partial_reason(validator_results, winning_decision)
+    aggregated_missing_work_summary = _aggregate_missing_work_summary(
+        validator_results, winning_decision
+    )
+
     final_result = ValidationResult(
         validator_key="validation_aggregator",
         discipline=winning_result.discipline,
@@ -196,6 +254,9 @@ def aggregate_validation_results(
         followup_validation_required=followup_validation_required,
         recommended_next_validator_keys=_merge_recommended_next_validator_keys(validator_results),
         partial_validation_summary=_build_partial_validation_summary(validator_results),
+        rejected_files=aggregated_rejected_files,
+        partial_reason=aggregated_partial_reason,
+        missing_work_summary=aggregated_missing_work_summary,
         metadata={
             "aggregated_validator_count": len(validator_results),
             "winning_validator_key": winning_result.validator_key,

@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Iterable
 
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from app.models.task import (
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
+    TASK_STATUS_REATOMIZED,
     TERMINAL_TASK_STATUSES,
     Task,
 )
@@ -23,6 +25,7 @@ from app.schemas.recovery import (
 )
 from app.services.artifacts import create_artifact
 
+logger = logging.getLogger(__name__)
 RECOVERY_DECISION_ARTIFACT_TYPE = "recovery_decision"
 
 
@@ -101,6 +104,7 @@ def _build_created_task_from_recovery(
     parent_task_id: int,
     task_create,
     sequence_order: int,
+    is_recovery_task: bool = False,
 ) -> Task:
     return Task(
         project_id=project_id,
@@ -124,6 +128,7 @@ def _build_created_task_from_recovery(
         status=TASK_STATUS_PENDING,
         is_blocked=False,
         blocking_reason=None,
+        is_recovery_task=is_recovery_task,
     )
 
 
@@ -260,22 +265,29 @@ def materialize_recovery_decision(
         )
 
     _ensure_source_task_is_recoverable(source_task)
+
+    # Anti-cascade: tasks created by a previous reatomization cannot be reatomized again.
+    # The system has already tried to refine this scope once; escalate to manual review.
+    effective_action = decision.action
+    if source_task.is_recovery_task and effective_action == "reatomize":
+        logger.warning(
+            "recovery_anti_cascade task_id=%s source_run_id=%s — recovery task cannot be "
+            "reatomized again, forcing manual_review",
+            source_task.id,
+            decision.source_run_id,
+        )
+        effective_action = "manual_review"
+
     original_status = source_task.status
 
-    if decision.action == "manual_review":
-        db.refresh(source_task)
-        if source_task.status != original_status:
-            raise RecoveryServiceError(
-                f"Recovery integrity error: source task {source_task.id} changed status from "
-                f"'{original_status}' to '{source_task.status}' during manual_review materialization."
-            )
+    if effective_action == "manual_review":
         return []
 
-    if decision.action not in {"reatomize", "insert_followup"}:
-        raise RecoveryServiceError(f"Unsupported recovery action '{decision.action}'.")
+    if effective_action not in {"reatomize", "insert_followup"}:
+        raise RecoveryServiceError(f"Unsupported recovery action '{effective_action}'.")
 
     if not decision.created_tasks:
-        raise RecoveryServiceError(f"Recovery action '{decision.action}' requires created tasks.")
+        raise RecoveryServiceError(f"Recovery action '{effective_action}' requires created tasks.")
 
     parent_task_id = _infer_parent_task_id_for_created_tasks(source_task)
 
@@ -289,22 +301,28 @@ def materialize_recovery_decision(
             parent_task_id=parent_task_id,
             task_create=task_create,
             sequence_order=next_sequence_order,
+            is_recovery_task=(effective_action == "reatomize"),
         )
         next_sequence_order += 1
         db.add(created_task)
         created_tasks.append(created_task)
+
+    if effective_action == "reatomize":
+        source_task.status = TASK_STATUS_REATOMIZED
+        db.add(source_task)
 
     db.commit()
 
     for created_task in created_tasks:
         db.refresh(created_task)
 
-    db.refresh(source_task)
-    if source_task.status != original_status:
-        raise RecoveryServiceError(
-            f"Recovery integrity error: source task {source_task.id} changed status from "
-            f"'{original_status}' to '{source_task.status}' during recovery materialization."
-        )
+    if effective_action == "insert_followup":
+        db.refresh(source_task)
+        if source_task.status != original_status:
+            raise RecoveryServiceError(
+                f"Recovery integrity error: source task {source_task.id} changed status from "
+                f"'{original_status}' to '{source_task.status}' during insert_followup materialization."
+            )
 
     return created_tasks
 

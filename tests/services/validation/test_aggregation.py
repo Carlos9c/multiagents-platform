@@ -27,7 +27,13 @@ def _make_result(
     partial_validation_summary: str | None = None,
     findings: list[ValidationFinding] | None = None,
     metadata: dict | None = None,
+    rejected_files: list[str] | None = None,
+    partial_reason: str | None = None,
+    missing_work_summary: str | None = None,
 ) -> ValidationResult:
+    effective_partial_reason = partial_reason
+    if decision == "partial" and effective_partial_reason is None:
+        effective_partial_reason = "work_missing"
     return ValidationResult(
         validator_key=validator_key,
         discipline="code",
@@ -45,6 +51,9 @@ def _make_result(
         followup_validation_required=followup_validation_required,
         recommended_next_validator_keys=list(recommended_next_validator_keys or []),
         partial_validation_summary=partial_validation_summary,
+        rejected_files=list(rejected_files or []),
+        partial_reason=effective_partial_reason,
+        missing_work_summary=missing_work_summary,
         metadata=dict(metadata or {}),
     )
 

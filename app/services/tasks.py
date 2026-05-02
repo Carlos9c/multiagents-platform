@@ -7,6 +7,7 @@ from app.models.task import (
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
+    TASK_STATUS_REATOMIZED,
     TASK_STATUS_RUNNING,
     Task,
 )
@@ -91,5 +92,19 @@ def mark_task_failed(
         return None
 
     task.status = TASK_STATUS_FAILED
+    _finalize_persistence(db, entity=task, auto_commit=auto_commit)
+    return task
+
+
+def mark_task_reatomized(
+    db: Session,
+    task_id: int,
+    auto_commit: bool = True,
+) -> Task | None:
+    task = db.get(Task, task_id)
+    if not task:
+        return None
+
+    task.status = TASK_STATUS_REATOMIZED
     _finalize_persistence(db, entity=task, auto_commit=auto_commit)
     return task

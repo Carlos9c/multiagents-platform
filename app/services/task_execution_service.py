@@ -3,11 +3,13 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.execution_engine import (
     ExecutionEngineError,
     ExecutionEngineRejectedError,
+    ExecutionEngineTransientError,
     get_execution_engine,
 )
 from app.execution_engine.contracts import (
@@ -19,9 +21,11 @@ from app.execution_engine.contracts import (
 from app.execution_engine.request_adapter import build_placeholder_execution_request
 from app.models.artifact import Artifact
 from app.models.execution_run import (
+    EXECUTION_RUN_STATUS_FAILED,
     FAILURE_TYPE_INTERNAL,
     RECOVERY_ACTION_MANUAL_REVIEW,
     RECOVERY_ACTION_REATOMIZE,
+    RECOVERY_ACTION_RETRY_SAME_TASK,
     ExecutionRun,
 )
 from app.models.task import (
@@ -149,6 +153,20 @@ def _create_execution_run_for_task(db: Session, task: Task) -> ExecutionRun:
     )
 
 
+_MAX_FAILED_RUNS_BEFORE_MANUAL_REVIEW = 1
+
+
+def _count_prior_failed_runs(db: Session, task_id: int) -> int:
+    return (
+        db.query(func.count(ExecutionRun.id))
+        .filter(
+            ExecutionRun.task_id == task_id,
+            ExecutionRun.status == EXECUTION_RUN_STATUS_FAILED,
+        )
+        .scalar()
+    ) or 0
+
+
 def _build_sync_result(
     *,
     task: Task,
@@ -263,16 +281,20 @@ def _promote_validated_workspace_to_source(
     *,
     task: Task,
     run_id: int,
+    files_to_exclude: list[str] | None = None,
 ) -> None:
     """
     Promote the execution-run workspace overlay into canonical project source.
 
     This is intentionally executed only after:
     - execution finished
-    - validation produced decision='completed'
+    - validation produced decision='completed' or decision='partial' with promotable files
 
     And before:
-    - the final task status is persisted as completed
+    - the final task status is persisted
+
+    files_to_exclude: workspace-relative paths that must NOT be promoted (rejected files).
+    If None, all workspace files are promoted.
 
     Promotion applies the run overlay onto the canonical source tree.
     It must not promote any ephemeral run_dir used for command verification.
@@ -286,10 +308,11 @@ def _promote_validated_workspace_to_source(
         workspace_runtime.promote_workspace_to_source(
             project_id=task.project_id,
             execution_run_id=run_id,
+            files_to_exclude=files_to_exclude,
         )
     except Exception as exc:
         raise TaskExecutionServiceError(
-            f"Task {task.id} passed validation but its workspace overlay could not be promoted to source: {str(exc)}"
+            f"Task {task.id} workspace overlay could not be promoted to source: {str(exc)}"
         ) from exc
 
 
@@ -647,6 +670,15 @@ def _validate_after_execution(
             )
             workspace_promoted_to_source = True
 
+        elif decision == "partial":
+            refreshed_task_for_promotion = _get_task_or_raise(db, task.id)
+            _promote_validated_workspace_to_source(
+                task=refreshed_task_for_promotion,
+                run_id=run_id,
+                files_to_exclude=list(validation_result.rejected_files) or None,
+            )
+            workspace_promoted_to_source = True
+
         final_task_status = _resolve_final_task_status(
             validation_decision=decision,
             validation_result_final_task_status=validation_result.final_task_status,
@@ -993,6 +1025,61 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             run_status=refreshed_run.status,
             output_snapshot=None,
             message="Execution was rejected at the execution engine boundary and routed for recovery without validation.",
+            final_task_status=refreshed_task.status,
+            validation_decision=None,
+        )
+
+    except ExecutionEngineTransientError as exc:
+        execution_agent_sequence_json = _serialize_execution_agent_sequence([])
+
+        prior_failed_count = _count_prior_failed_runs(db, task.id)
+        at_retry_ceiling = prior_failed_count >= _MAX_FAILED_RUNS_BEFORE_MANUAL_REVIEW
+        transient_recovery_action = (
+            RECOVERY_ACTION_MANUAL_REVIEW if at_retry_ceiling else RECOVERY_ACTION_RETRY_SAME_TASK
+        )
+
+        mark_execution_run_failed(
+            db=db,
+            run_id=run_id,
+            error_message=str(exc),
+            failure_type=FAILURE_TYPE_INTERNAL,
+            failure_code="execution_engine_transient_error",
+            recovery_action=transient_recovery_action,
+            execution_agent_sequence=execution_agent_sequence_json,
+            validation_notes=(
+                "Transient infrastructure error (HTTP 5xx); retry limit reached, escalating to manual review."
+                if at_retry_ceiling
+                else "Transient infrastructure error (HTTP 5xx); task queued for retry."
+            ),
+            auto_commit=False,
+        )
+        _store_task_execution_agent_sequence(
+            db=db,
+            task=task,
+            execution_agent_sequence_json=execution_agent_sequence_json,
+        )
+        mark_task_failed(db, task.id, auto_commit=False)
+        db.commit()
+
+        _attempt_reconcile_after_failure(
+            db=db,
+            affected_task_ids=[task.id],
+        )
+
+        refreshed_task = _get_task_or_raise(db, task.id)
+        refreshed_run = _get_execution_run_or_raise(db, run_id)
+
+        return _build_sync_result(
+            task=refreshed_task,
+            run_id=run_id,
+            resolved_executor_type=_resolve_executor_type_for_task(task),
+            run_status=refreshed_run.status,
+            output_snapshot=None,
+            message=(
+                "Execution interrupted by a transient infrastructure error; retry limit reached."
+                if at_retry_ceiling
+                else "Execution interrupted by a transient infrastructure error and queued for retry."
+            ),
             final_task_status=refreshed_task.status,
             validation_decision=None,
         )

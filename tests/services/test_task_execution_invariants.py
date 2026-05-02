@@ -160,6 +160,7 @@ def _build_validation_result(
         partial_validation_summary=(
             "Additional validation follow-up required." if followup_validation_required else None
         ),
+        partial_reason="work_missing" if validation_decision == "partial" else None,
         metadata={"confidence": "high"},
     )
 
@@ -381,7 +382,7 @@ def test_invariant_completed_execution_creates_single_validation_artifact_and_pr
     assert payload["task_id"] == task.id
 
 
-def test_invariant_partial_execution_persists_validation_artifact_without_workspace_promotion(
+def test_invariant_partial_execution_persists_validation_artifact_with_workspace_promotion(
     db_session,
     monkeypatch,
     make_project,
@@ -431,7 +432,7 @@ def test_invariant_partial_execution_persists_validation_artifact_without_worksp
 
     assert task.status == TASK_STATUS_PARTIAL
     assert run.status == EXECUTION_RUN_STATUS_SUCCEEDED
-    assert promoted["called"] is False
+    assert promoted["called"] is True
 
     assert json.loads(task.last_execution_agent_sequence) == expected_sequence
     assert json.loads(run.execution_agent_sequence) == expected_sequence
@@ -440,7 +441,7 @@ def test_invariant_partial_execution_persists_validation_artifact_without_worksp
     payload = json.loads(validation_artifacts[0].content)
     assert payload["decision"] == "partial"
     assert payload["final_task_status"] == TASK_STATUS_PARTIAL
-    assert payload["workspace_promoted_to_source"] is False
+    assert payload["workspace_promoted_to_source"] is True
     assert payload["followup_validation_required"] is True
 
 
@@ -976,7 +977,7 @@ def test_validation_artifact_final_task_status_matches_persisted_task_status(
     assert payload["decision"] == validation_decision
     assert payload["final_task_status"] == task.status
 
-    if validation_decision == "completed":
+    if validation_decision in {"completed", "partial"}:
         assert promoted["called"] is True
         assert payload["workspace_promoted_to_source"] is True
     else:

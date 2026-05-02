@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.execution_engine.agent_runtime import BaseAgentRuntime
-from app.execution_engine.base import ExecutionEngineRejectedError
+from app.execution_engine.base import ExecutionEngineRejectedError, ExecutionEngineTransientError
 from app.execution_engine.budget import LoopBudget
 from app.execution_engine.capabilities import render_executor_capabilities_for_prompt
 from app.execution_engine.contracts import (
@@ -36,6 +36,23 @@ from app.services.llm.schema_utils import to_openai_strict_json_schema
 logger = logging.getLogger(__name__)
 
 
+def _is_transient_infrastructure_error(exc: BaseException) -> bool:
+    """Return True if exc (or any cause in its chain) is an HTTP 5xx from OpenAI/Cloudflare."""
+    try:
+        from openai import InternalServerError as _OpenAIInternalServerError
+    except ImportError:
+        return False
+
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, _OpenAIInternalServerError):
+            status = getattr(current, "status_code", None)
+            if status is not None and status >= 500:
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 ORCHESTRATOR_SYSTEM_PROMPT = """
 You are the execution orchestrator for one already-atomic task.
 
@@ -49,6 +66,10 @@ You coordinate subagents.
 You must never change the task itself.
 
 Return ONLY JSON matching the provided schema.
+
+JSON field rules (enforced by the validator — violations cause the whole run to fail):
+- When decision_type is "finish", "reject", or "invalid": subagent_name MUST be null and target_paths MUST be an empty list.
+- When decision_type is "call_subagent": subagent_name MUST be a non-null string from {context_selection_agent, code_change_agent, command_runner_agent}.
 
 Core responsibility:
 - Look at the task, the current phase, the accumulated evidence, and the last executed subagent.
@@ -1062,11 +1083,42 @@ class ExecutionOrchestrator:
             if forced_terminal_decision is not None:
                 decision = forced_terminal_decision
             else:
-                raw_decision = self._decide_next_action(
-                    request=active_request,
-                    runtime_state=runtime_state,
-                    resolution_state=resolution_state,
-                )
+                try:
+                    raw_decision = self._decide_next_action(
+                        request=active_request,
+                        runtime_state=runtime_state,
+                        resolution_state=resolution_state,
+                    )
+                except ExecutionEngineRejectedError as exc:
+                    if exc.failure_code == "invalid_next_action_output" and (
+                        resolution_state.evidence.changed_files
+                        or resolution_state.evidence.commands
+                    ):
+                        _append_trace_notes_to_evidence(resolution_state)
+                        logger.warning(
+                            "execution_orchestrator_completed_on_invalid_output task_id=%s changed_files=%s commands=%s",
+                            active_request.task_id,
+                            len(resolution_state.evidence.changed_files),
+                            len(resolution_state.evidence.commands),
+                        )
+                        return (
+                            ExecutionResult(
+                                task_id=active_request.task_id,
+                                decision=EXECUTION_DECISION_COMPLETED,
+                                summary="Orchestrator produced all available evidence; coordination loop could not determine next step.",
+                                details=exc.message,
+                                remaining_scope=exc.remaining_scope,
+                                blockers_found=exc.blockers_found,
+                                validation_notes=[
+                                    "Orchestrator decision loop interrupted by invalid output after subagent work was completed; evidence forwarded to validation.",
+                                    *(exc.validation_notes or []),
+                                ],
+                                execution_agent_sequence=list(executed_subagents),
+                                evidence=resolution_state.evidence,
+                            ),
+                            active_request,
+                        )
+                    raise
                 decision = _normalize_decision(
                     request=active_request,
                     state=resolution_state,
@@ -1319,6 +1371,10 @@ class ExecutionOrchestrator:
                     decision.subagent_name,
                     runtime_state.step_count,
                 )
+                if _is_transient_infrastructure_error(exc):
+                    raise ExecutionEngineTransientError(
+                        f"Transient infrastructure error during subagent '{decision.subagent_name}': {exc}"
+                    ) from exc
                 resolution_state.mark_step_failed(
                     f"subagent_error_{decision.subagent_name or decision.decision_type}_{runtime_state.step_count}"
                 )
@@ -1382,28 +1438,36 @@ class ExecutionOrchestrator:
         resolution_state: ResolutionState,
     ) -> NextActionDecision:
         schema = to_openai_strict_json_schema(NextActionDecision.model_json_schema())
-        raw = self.runtime.generate_structured(
-            system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
-            user_prompt=_build_orchestrator_prompt(
-                request,
-                runtime_state,
-                resolution_state,
-            ),
-            schema_name="execution_engine_next_action",
-            json_schema=schema,
-        )
+        user_prompt = _build_orchestrator_prompt(request, runtime_state, resolution_state)
 
-        try:
-            return NextActionDecision.model_validate(raw)
-        except ValidationError as exc:
-            raise ExecutionEngineRejectedError(
-                message="Execution orchestrator produced invalid next-action output.",
-                rejection_reason=str(exc),
-                remaining_scope=request.task_description or request.task_title,
-                blockers_found=["invalid_next_action_output"],
-                validation_notes=["The orchestrator returned invalid structured output."],
-                failure_code="invalid_next_action_output",
-            ) from exc
+        last_exc: ValidationError | None = None
+        for attempt in range(2):
+            raw = self.runtime.generate_structured(
+                system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                schema_name="execution_engine_next_action",
+                json_schema=schema,
+            )
+            try:
+                return NextActionDecision.model_validate(raw)
+            except ValidationError as exc:
+                last_exc = exc
+                logger.warning(
+                    "execution_orchestrator_invalid_decision task_id=%s attempt=%s raw=%s errors=%s",
+                    request.task_id,
+                    attempt + 1,
+                    raw,
+                    str(exc),
+                )
+
+        raise ExecutionEngineRejectedError(
+            message="Execution orchestrator produced invalid next-action output.",
+            rejection_reason=str(last_exc),
+            remaining_scope=request.task_description or request.task_title,
+            blockers_found=["invalid_next_action_output"],
+            validation_notes=["The orchestrator returned invalid structured output."],
+            failure_code="invalid_next_action_output",
+        ) from last_exc
 
     @staticmethod
     def _build_step_from_decision(

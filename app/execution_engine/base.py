@@ -10,6 +10,10 @@ class ExecutionEngineError(Exception):
     """Base exception for execution engine failures."""
 
 
+class ExecutionEngineTransientError(ExecutionEngineError):
+    """Raised when a transient infrastructure error (e.g., HTTP 5xx) interrupted execution."""
+
+
 class ExecutionEngineRejectedError(ExecutionEngineError):
     """Raised when the engine deliberately rejects a task."""
 

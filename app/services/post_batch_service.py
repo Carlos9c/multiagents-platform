@@ -20,6 +20,7 @@ from app.models.task import (
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
+    TASK_STATUS_REATOMIZED,
     TERMINAL_TASK_STATUSES,
     Task,
 )
@@ -433,7 +434,11 @@ def _require_recovery_source_task_remains_terminal(
             f"Batch '{batch_id}' in plan version {plan_version} lost source task {source_task_id} after recovery materialization."
         )
 
-    if refreshed_task.status not in {TASK_STATUS_FAILED, TASK_STATUS_PARTIAL}:
+    if refreshed_task.status not in {
+        TASK_STATUS_FAILED,
+        TASK_STATUS_PARTIAL,
+        TASK_STATUS_REATOMIZED,
+    }:
         raise PostBatchServiceError(
             f"Recovery integrity error in batch '{batch_id}' plan version {plan_version}: "
             f"source task {refreshed_task.id} ended with invalid status '{refreshed_task.status}' "

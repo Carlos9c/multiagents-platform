@@ -520,40 +520,30 @@ def test_mutate_live_plan_returns_none_for_non_mutating_intents(
     )
     batch = plan.execution_batches[0]
 
-    for intent_type in ("continue", "manual_review", "close", "replan"):
-        if intent_type == "continue":
-            resolved_intent = _build_resolved_intent(
-                intent_type="continue",
-                mutation_scope="none",
-                requires_plan_mutation=False,
-                can_continue_after_application=True,
-            )
-        elif intent_type == "manual_review":
-            resolved_intent = _build_resolved_intent(
-                intent_type="manual_review",
-                mutation_scope="none",
-                requires_plan_mutation=False,
-                requires_manual_review=True,
-                can_continue_after_application=False,
-            )
-        elif intent_type == "close":
-            resolved_intent = _build_resolved_intent(
-                intent_type="close",
-                mutation_scope="none",
-                requires_plan_mutation=False,
-                should_close_stage=True,
-                can_continue_after_application=False,
-            )
-        else:
-            resolved_intent = _build_resolved_intent(
-                intent_type="replan",
-                mutation_scope="replan",
-                remaining_plan_still_valid=False,
-                requires_plan_mutation=True,
-                reopened_finalization=True,
-                can_continue_after_application=False,
-            )
+    non_mutating_intents = [
+        _build_resolved_intent(
+            intent_type="continue",
+            mutation_scope="none",
+            requires_plan_mutation=False,
+            can_continue_after_application=True,
+        ),
+        _build_resolved_intent(
+            intent_type="manual_review",
+            mutation_scope="none",
+            requires_plan_mutation=False,
+            requires_manual_review=True,
+            can_continue_after_application=False,
+        ),
+        _build_resolved_intent(
+            intent_type="close",
+            mutation_scope="none",
+            requires_plan_mutation=False,
+            should_close_stage=True,
+            can_continue_after_application=False,
+        ),
+    ]
 
+    for resolved_intent in non_mutating_intents:
         result = mutate_live_plan(
             db=db_session,
             project=project,
@@ -577,7 +567,69 @@ def test_mutate_live_plan_returns_none_for_non_mutating_intents(
             persist_recovery_assignment_payload_fn=lambda **kwargs: None,
         )
 
-        assert result.mutation_kind == "none"
+        assert (
+            result.mutation_kind == "none"
+        ), f"Expected none for intent {resolved_intent.intent_type}"
         assert result.requires_replan is False
         assert result.patched_execution_plan is None
         assert result.metadata == {}
+
+
+def test_mutate_live_plan_escalates_to_replan_for_replan_intent(
+    db_session,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    project = make_project()
+    current_task = make_task(project_id=project.id, title="Current batch task")
+
+    plan = make_execution_plan(
+        plan_version=5,
+        batches=[
+            _plan_batch(
+                batch_id="plan_5_batch_1",
+                task_ids=[current_task.id],
+                plan_version=5,
+                batch_index=1,
+            )
+        ],
+    )
+    batch = plan.execution_batches[0]
+
+    resolved_intent = _build_resolved_intent(
+        intent_type="replan",
+        mutation_scope="replan",
+        remaining_plan_still_valid=False,
+        requires_plan_mutation=True,
+        reopened_finalization=True,
+        can_continue_after_application=False,
+    )
+
+    result = mutate_live_plan(
+        db=db_session,
+        project=project,
+        plan=plan,
+        batch=batch,
+        resolved_intent=resolved_intent,
+        evaluation_decision=type(
+            "EvalDecision",
+            (),
+            {"new_recovery_tasks_blocking": False},
+        )(),
+        recovery_context=RecoveryContext(),
+        created_recovery_task_ids=[],
+        executed_task_ids=[current_task.id],
+        successful_task_ids=[current_task.id],
+        problematic_run_ids=[],
+        task_run_summaries=[
+            _build_task_run_summary(task_id=current_task.id, run_id=701),
+        ],
+        build_recovery_assignment_input_fn=lambda **kwargs: None,
+        persist_recovery_assignment_payload_fn=lambda **kwargs: None,
+    )
+
+    assert result.mutation_kind == "escalated_to_replan"
+    assert result.requires_replan is True
+    assert result.patched_execution_plan is None
+    assert result.metadata == {}

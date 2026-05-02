@@ -13,11 +13,13 @@ TASK_STATUS_AWAITING_VALIDATION = "awaiting_validation"
 TASK_STATUS_PARTIAL = "partial"
 TASK_STATUS_COMPLETED = "completed"
 TASK_STATUS_FAILED = "failed"
+TASK_STATUS_REATOMIZED = "reatomized"
 
 TERMINAL_TASK_STATUSES = {
     TASK_STATUS_PARTIAL,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
+    TASK_STATUS_REATOMIZED,
 }
 
 # executor_type sigue existiendo como contrato de dominio de alto nivel.
@@ -40,6 +42,7 @@ VALID_TASK_STATUSES = {
     TASK_STATUS_PARTIAL,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
+    TASK_STATUS_REATOMIZED,
 }
 
 VALID_EXECUTOR_TYPES = {
@@ -149,6 +152,12 @@ class Task(Base):
     )
 
     blocking_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    is_recovery_task: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
 
     project = relationship("Project", backref="tasks")
     parent_task = relationship("Task", remote_side=[id], backref="child_tasks")

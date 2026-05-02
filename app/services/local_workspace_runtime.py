@@ -281,6 +281,7 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         self,
         project_id: int,
         execution_run_id: int,
+        files_to_exclude: list[str] | None = None,
     ) -> Path:
         """
         Promote by applying the workspace overlay onto a staging copy of source_dir.
@@ -289,6 +290,9 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         - stage = copy(source)
         - overlay(workspace -> stage)
         - swap stage into source
+
+        files_to_exclude: if provided, these workspace-relative paths are NOT promoted.
+        All other workspace files are promoted. If None, all workspace files are promoted.
         """
         prepared = self._get_prepared_workspace(project_id, execution_run_id)
         project_paths = self.storage_service.ensure_project_storage(project_id)
@@ -312,6 +316,15 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
         if backup_dir.exists():
             shutil.rmtree(backup_dir)
 
+        if files_to_exclude:
+            excluded_set = set(files_to_exclude)
+            all_workspace_files = self.list_files(workspace_dir)
+            overlay_paths: list[str] | None = [
+                f for f in all_workspace_files if f not in excluded_set
+            ]
+        else:
+            overlay_paths = None
+
         try:
             staging_dir.mkdir(parents=True, exist_ok=False)
 
@@ -321,7 +334,7 @@ class LocalWorkspaceRuntime(BaseWorkspaceRuntime):
             self._apply_workspace_overlay_to_destination(
                 workspace_dir=workspace_dir,
                 destination_dir=staging_dir,
-                overlay_paths=None,
+                overlay_paths=overlay_paths,
             )
 
             if source_dir.exists():

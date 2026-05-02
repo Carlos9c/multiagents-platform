@@ -131,6 +131,7 @@ def _build_validation_result(
         partial_validation_summary=(
             "Additional validation follow-up required." if followup_validation_required else None
         ),
+        partial_reason="work_missing" if validation_decision == "partial" else None,
         metadata={"confidence": "high"},
     )
 
@@ -436,7 +437,7 @@ def test_execute_task_sync_vertical_flow_partial_validation_marks_task_partial(
     assert result.final_task_status == TASK_STATUS_PARTIAL
     assert result.validation_decision == "partial"
     assert task.status == TASK_STATUS_PARTIAL
-    assert promoted["called"] is False
+    assert promoted["called"] is True
     assert json.loads(task.last_execution_agent_sequence) == expected_sequence
     assert json.loads(latest_run.execution_agent_sequence) == expected_sequence
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.execution_engine.contracts import ExecutionRequest, ExecutionResult
 
@@ -73,4 +73,24 @@ class ValidationResult(BaseModel):
     followup_validation_required: bool = False
     recommended_next_validator_keys: list[str] = Field(default_factory=list)
     partial_validation_summary: str | None = None
+    rejected_files: list[str] = Field(default_factory=list)
+    partial_reason: (
+        Literal["files_rejected", "work_missing", "files_rejected_and_work_missing"] | None
+    ) = None
+    missing_work_summary: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_partial_consistency(self) -> "ValidationResult":
+        if self.decision == "partial":
+            if self.partial_reason is None:
+                raise ValueError("partial_reason must be set when decision is 'partial'")
+            if self.partial_reason in {"files_rejected", "files_rejected_and_work_missing"}:
+                if not self.rejected_files:
+                    raise ValueError(
+                        "rejected_files must be non-empty when partial_reason includes 'files_rejected'"
+                    )
+        else:
+            if self.partial_reason is not None:
+                raise ValueError("partial_reason must be None when decision is not 'partial'")
+        return self

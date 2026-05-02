@@ -769,6 +769,45 @@ def run_project_workflow(
             )
             break
 
+        completed_batch_ids = set(completed_batches)
+        if all(b.batch_id in completed_batch_ids for b in plan.execution_batches):
+            # The active plan is fully exhausted: all its batches were processed in a
+            # prior iteration (typically because the previous iteration switched to a
+            # patched plan mid-run and consumed the new final batch there too).
+            # Starting a new iteration would produce a "no post-batch result" error.
+            # Stop here and require manual review because the stage evaluator did not
+            # explicitly close the stage despite exhausting all planned work.
+            manual_review_required = True
+            final_status = "awaiting_manual_review"
+            iterations.append(
+                WorkflowIterationSummary(
+                    iteration_number=iteration_number,
+                    plan_version=plan.plan_version,
+                    starting_plan_version=plan.plan_version,
+                    ending_plan_version=plan.plan_version,
+                    batch_ids_processed=[],
+                    blocked_batch_ids_after_iteration=[],
+                    resolved_intent_type="manual_review",
+                    resolved_mutation_scope="none",
+                    remaining_plan_still_valid=True,
+                    has_new_recovery_tasks=False,
+                    requires_plan_mutation=False,
+                    requires_all_new_tasks_assigned=False,
+                    can_continue_after_application=False,
+                    should_close_stage=False,
+                    requires_manual_review=True,
+                    reopened_finalization=False,
+                    used_patched_plan=False,
+                    decision_signals=["exhausted_plan_no_stage_closure"],
+                    notes=(
+                        "The active execution plan is fully exhausted but the stage evaluator "
+                        "did not explicitly close the stage. Manual review is required to "
+                        "determine next steps."
+                    ),
+                )
+            )
+            break
+
         (
             iteration_summary,
             resulting_status,

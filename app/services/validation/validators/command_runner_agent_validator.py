@@ -71,6 +71,23 @@ Critical rules:
 - A failed intermediate verification attempt that is later clearly repaired by subsequent repository changes and a later successful verification should usually NOT remain partial if the terminal verification evidence is clean and materially covers the task objective.
 - Prefer the terminal/latest successful verification state over intermediate failed attempts when the later evidence clearly supersedes the earlier failure.
 
+Partial decision rules (apply ONLY when decision is 'partial'):
+You MUST set partial_reason to one of:
+  - "files_rejected": command evidence directly proves that a specific file is syntactically invalid,
+    fails to compile, or causes test failures. ONLY reject files you have direct execution proof for.
+    List those files in rejected_files (relative paths). rejected_files MUST be non-empty.
+  - "work_missing": verification evidence is insufficient or incomplete, but no specific file is
+    identified as wrong. Set missing_work_summary to describe what verification is missing.
+  - "files_rejected_and_work_missing": both apply — direct execution failure proves specific files
+    are broken AND verification coverage is incomplete.
+
+Command runner file rejection rules:
+- You may ONLY reject a file if command output directly implicates it (e.g., syntax error in
+  path/to/file.py, compilation failure mentioning a file, test failure with a specific traceback).
+- Do NOT reject files based on code review reasoning — that is the code_change_agent_validator's job.
+- If the command output does not directly name a file, do NOT add it to rejected_files.
+- If decision is not 'partial', leave rejected_files empty and partial_reason as null.
+
 Return ONLY JSON matching the provided schema.
 """.strip()
 
@@ -92,6 +109,11 @@ class CommandRunnerAgentValidationLLMOutput(BaseModel):
     findings: list[CommandRunnerAgentValidationFinding] = Field(default_factory=list)
     manual_review_required: bool = False
     reasoning_notes: list[str] = Field(default_factory=list)
+    rejected_files: list[str] = Field(default_factory=list)
+    partial_reason: (
+        Literal["files_rejected", "work_missing", "files_rejected_and_work_missing"] | None
+    ) = None
+    missing_work_summary: str | None = None
 
 
 class CommandRunnerAgentValidatorError(Exception):
@@ -289,18 +311,21 @@ def _task_looks_like_executable_implementation(validation_input: TaskValidationI
 
     markers = (
         "implement",
-        "implementation",
+        "function",
+        "method",
+        "class",
+        "endpoint",
+        "route",
+        "handler",
+        "component",
         "api",
         "service",
-        "python",
-        "test",
-        "tests",
-        "unit",
-        "create",
-        "list",
-        "repository",
         "module",
         "package",
+        "build",
+        "compile",
+        "test",
+        "refactor",
     )
     return any(marker in text for marker in markers)
 
@@ -393,6 +418,60 @@ def _normalize_llm_output_for_terminal_success(
         findings=findings,
         manual_review_required=False,
         reasoning_notes=reasoning_notes,
+        rejected_files=[],
+        partial_reason=None,
+        missing_work_summary=None,
+    )
+
+
+def _normalize_partial_promotion_fields(
+    llm_output: CommandRunnerAgentValidationLLMOutput,
+) -> CommandRunnerAgentValidationLLMOutput:
+    """Ensure partial promotion fields are consistent with the decision."""
+    decision = llm_output.decision
+    rejected_files = list(llm_output.rejected_files)
+    partial_reason = llm_output.partial_reason
+    missing_work_summary = llm_output.missing_work_summary
+
+    if decision != "partial":
+        rejected_files = []
+        partial_reason = None
+        missing_work_summary = None
+    else:
+        has_rejected = bool(rejected_files)
+        has_missing_work = bool(missing_work_summary or llm_output.missing_scope)
+        if partial_reason is None:
+            if has_rejected and has_missing_work:
+                partial_reason = "files_rejected_and_work_missing"
+            elif has_rejected:
+                partial_reason = "files_rejected"
+            else:
+                partial_reason = "work_missing"
+        elif (
+            partial_reason in {"files_rejected", "files_rejected_and_work_missing"}
+            and not has_rejected
+        ):
+            partial_reason = "work_missing"
+
+    if (
+        rejected_files == list(llm_output.rejected_files)
+        and partial_reason == llm_output.partial_reason
+        and missing_work_summary == llm_output.missing_work_summary
+    ):
+        return llm_output
+
+    return CommandRunnerAgentValidationLLMOutput(
+        decision=decision,
+        summary=llm_output.summary,
+        validated_scope=llm_output.validated_scope,
+        missing_scope=llm_output.missing_scope,
+        blockers=list(llm_output.blockers),
+        findings=list(llm_output.findings),
+        manual_review_required=llm_output.manual_review_required,
+        reasoning_notes=list(llm_output.reasoning_notes),
+        rejected_files=rejected_files,
+        partial_reason=partial_reason,
+        missing_work_summary=missing_work_summary,
     )
 
 
@@ -543,6 +622,7 @@ class CommandRunnerAgentValidator(BaseTaskValidator):
             validation_input=validation_input,
             command_items=command_items,
         )
+        llm_output = _normalize_partial_promotion_fields(llm_output)
 
         validated_evidence_ids = [
             _build_evidence_ref(item, index) for index, item in enumerate(producer_items)
@@ -577,6 +657,9 @@ class CommandRunnerAgentValidator(BaseTaskValidator):
             followup_validation_required=False,
             recommended_next_validator_keys=[],
             partial_validation_summary=None,
+            rejected_files=list(llm_output.rejected_files),
+            partial_reason=llm_output.partial_reason,
+            missing_work_summary=llm_output.missing_work_summary,
             metadata={
                 "producer_key": self.producer_key,
                 "producer_evidence_count": len(producer_items),

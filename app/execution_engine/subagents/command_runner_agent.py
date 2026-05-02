@@ -250,22 +250,24 @@ Selection instructions:
 """.strip()
 
 
-def _validate_selected_paths(
+def _filter_valid_selected_paths(
     *,
     selected_paths: list[str],
     inventory: list[str],
 ) -> list[str]:
     inventory_set = set(inventory)
-    validated: list[str] = []
+    valid: list[str] = []
 
     for path in selected_paths:
-        if path not in inventory_set:
-            raise SubagentRejectedStepError(
-                f"Selected inspection file is not present in candidate run-tree inventory: {path}"
+        if path in inventory_set:
+            valid.append(path)
+        else:
+            logger.warning(
+                "command_runner_agent_selected_path_not_in_inventory skipping path=%s",
+                path,
             )
-        validated.append(path)
 
-    return validated
+    return valid
 
 
 def _read_selected_files(
@@ -396,6 +398,70 @@ Planning instructions:
 """.strip()
 
 
+def _build_file_selection_retry_prompt(
+    *,
+    request: ExecutionRequest,
+    step: ExecutionStep,
+    state: ResolutionState,
+    run_dir: Path,
+    inventory: list[str],
+    validation_error: str,
+) -> str:
+    base = _build_file_selection_prompt(
+        request=request, step=step, state=state, run_dir=run_dir, inventory=inventory
+    )
+    return f"""Your previous output was invalid.
+
+Validation error:
+{validation_error}
+
+You must correct your output and return valid JSON matching the schema.
+
+Key corrections:
+- selected_paths must only contain paths present in the candidate run-tree inventory
+- Do not include paths that are not listed in the inventory
+- selection_rationale and verification_hypothesis must not be empty
+
+{base}""".strip()
+
+
+def _build_command_planning_retry_prompt(
+    *,
+    request: ExecutionRequest,
+    step: ExecutionStep,
+    state: ResolutionState,
+    run_dir: Path,
+    inventory: list[str],
+    inspection_plan: "CommandInspectionPlan",
+    inspected_files: list[dict],
+    validation_error: str,
+) -> str:
+    base = _build_command_planning_prompt(
+        request=request,
+        step=step,
+        state=state,
+        run_dir=run_dir,
+        inventory=inventory,
+        inspection_plan=inspection_plan,
+        inspected_files=inspected_files,
+    )
+    return f"""Your previous output was invalid.
+
+Validation error:
+{validation_error}
+
+You must correct your output and return valid JSON matching the schema.
+
+Key corrections:
+- decision must be exactly "run_command" or "verification_not_applicable"
+- If decision is "run_command": command and expected_exit_codes must not be empty
+- If decision is "verification_not_applicable": command must be "" and expected_exit_codes must be []
+- verification_goal and rationale must not be empty
+- Do not use shell chaining, pipes, or redirection in the command
+
+{base}""".strip()
+
+
 def _resolve_command_cwd(run_dir: Path, cwd_relative_path: str) -> Path:
     relative = (cwd_relative_path or ".").strip() or "."
     candidate = (run_dir / relative).resolve()
@@ -446,15 +512,12 @@ class CommandRunnerAgent(BaseSubagent):
         inventory: list[str],
     ) -> CommandInspectionPlan:
         schema = to_openai_strict_json_schema(CommandInspectionPlan.model_json_schema())
+        user_prompt = _build_file_selection_prompt(
+            request=request, step=step, state=state, run_dir=run_dir, inventory=inventory
+        )
         raw = self.runtime.generate_structured(
             system_prompt=COMMAND_FILE_SELECTION_SYSTEM_PROMPT,
-            user_prompt=_build_file_selection_prompt(
-                request=request,
-                step=step,
-                state=state,
-                run_dir=run_dir,
-                inventory=inventory,
-            ),
+            user_prompt=user_prompt,
             schema_name="execution_engine_command_file_selection",
             json_schema=schema,
         )
@@ -462,11 +525,43 @@ class CommandRunnerAgent(BaseSubagent):
         try:
             plan = CommandInspectionPlan.model_validate(raw)
         except ValidationError as exc:
-            raise SubagentRejectedStepError(
-                f"Invalid command file-selection output: {str(exc)}"
-            ) from exc
+            logger.warning(
+                "command_runner_agent_inspection_plan_invalid_retrying task_id=%s error=%s",
+                request.task_id,
+                str(exc),
+            )
+            retry_raw = self.runtime.generate_structured(
+                system_prompt=COMMAND_FILE_SELECTION_SYSTEM_PROMPT,
+                user_prompt=_build_file_selection_retry_prompt(
+                    request=request,
+                    step=step,
+                    state=state,
+                    run_dir=run_dir,
+                    inventory=inventory,
+                    validation_error=str(exc),
+                ),
+                schema_name="execution_engine_command_file_selection",
+                json_schema=schema,
+            )
+            try:
+                plan = CommandInspectionPlan.model_validate(retry_raw)
+            except ValidationError:
+                logger.warning(
+                    "command_runner_agent_inspection_plan_invalid_after_retry_using_fallback task_id=%s",
+                    request.task_id,
+                )
+                plan = CommandInspectionPlan(
+                    selected_paths=[],
+                    selection_rationale=(
+                        "File inspection plan could not be generated after retry; "
+                        "proceeding without pre-inspected files."
+                    ),
+                    verification_hypothesis=(
+                        "Command planning will proceed using only the inventory and accumulated evidence."
+                    ),
+                )
 
-        plan.selected_paths = _validate_selected_paths(
+        plan.selected_paths = _filter_valid_selected_paths(
             selected_paths=plan.selected_paths,
             inventory=inventory,
         )
@@ -484,17 +579,18 @@ class CommandRunnerAgent(BaseSubagent):
         inspected_files: list[dict],
     ) -> CommandVerificationPlan:
         schema = to_openai_strict_json_schema(CommandVerificationPlan.model_json_schema())
+        user_prompt = _build_command_planning_prompt(
+            request=request,
+            step=step,
+            state=state,
+            run_dir=run_dir,
+            inventory=inventory,
+            inspection_plan=inspection_plan,
+            inspected_files=inspected_files,
+        )
         raw = self.runtime.generate_structured(
             system_prompt=COMMAND_RUNNER_AGENT_SYSTEM_PROMPT,
-            user_prompt=_build_command_planning_prompt(
-                request=request,
-                step=step,
-                state=state,
-                run_dir=run_dir,
-                inventory=inventory,
-                inspection_plan=inspection_plan,
-                inspected_files=inspected_files,
-            ),
+            user_prompt=user_prompt,
             schema_name="execution_engine_command_verification_plan",
             json_schema=schema,
         )
@@ -502,9 +598,32 @@ class CommandRunnerAgent(BaseSubagent):
         try:
             plan = CommandVerificationPlan.model_validate(raw)
         except ValidationError as exc:
-            raise SubagentRejectedStepError(
-                f"Invalid command verification plan output: {str(exc)}"
-            ) from exc
+            logger.warning(
+                "command_runner_agent_command_plan_invalid_retrying task_id=%s error=%s",
+                request.task_id,
+                str(exc),
+            )
+            retry_raw = self.runtime.generate_structured(
+                system_prompt=COMMAND_RUNNER_AGENT_SYSTEM_PROMPT,
+                user_prompt=_build_command_planning_retry_prompt(
+                    request=request,
+                    step=step,
+                    state=state,
+                    run_dir=run_dir,
+                    inventory=inventory,
+                    inspection_plan=inspection_plan,
+                    inspected_files=inspected_files,
+                    validation_error=str(exc),
+                ),
+                schema_name="execution_engine_command_verification_plan",
+                json_schema=schema,
+            )
+            try:
+                plan = CommandVerificationPlan.model_validate(retry_raw)
+            except ValidationError as retry_exc:
+                raise SubagentRejectedStepError(
+                    f"Invalid command verification plan after retry: {str(retry_exc)}"
+                ) from retry_exc
 
         _validate_planned_command(plan)
         return plan
