@@ -6,6 +6,7 @@ from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
     TASK_STATUS_FAILED,
+    TASK_STATUS_FOLLOWED_UP,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
     TASK_STATUS_REATOMIZED,
@@ -221,6 +222,74 @@ def test_materialize_recovery_fails_if_source_atomic_has_no_parent_task_id(
             project_id=project.id,
             decision=decision,
         )
+
+
+def test_insert_followup_sets_source_task_to_followed_up(
+    db_session,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_recovery_decision,
+):
+    project = make_project()
+
+    parent = make_task(
+        project_id=project.id,
+        title="Parent high-level task",
+        description="Parent task.",
+        planning_level=PLANNING_LEVEL_HIGH_LEVEL,
+    )
+
+    source_task = make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Partial atomic task",
+        description="This task ended partial and needs a follow-up.",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        status=TASK_STATUS_PARTIAL,
+        sequence_order=1,
+    )
+    run = make_execution_run(
+        task_id=source_task.id,
+        status="partial",
+        failure_type="validation_failed",
+        failure_code="scope_incomplete",
+    )
+
+    decision = make_recovery_decision(
+        source_task_id=source_task.id,
+        source_run_id=run.id,
+        action="insert_followup",
+        created_tasks=[
+            {
+                "title": "Finish remaining work",
+                "description": "Follow-up task covering the remaining gap.",
+                "objective": "Cover the remaining gap.",
+                "implementation_notes": "Continue from where partial left off.",
+                "acceptance_criteria": "The remaining gap is fully covered.",
+            }
+        ],
+        still_blocks_progress=False,
+    )
+
+    created_tasks = materialize_recovery_decision(
+        db=db_session,
+        project_id=project.id,
+        decision=decision,
+    )
+
+    db_session.refresh(source_task)
+
+    assert source_task.status == TASK_STATUS_FOLLOWED_UP
+    assert len(created_tasks) == 1
+
+    followup = created_tasks[0]
+    assert followup.project_id == project.id
+    assert followup.parent_task_id == parent.id
+    assert followup.planning_level == PLANNING_LEVEL_ATOMIC
+    assert followup.executor_type == PENDING_ENGINE_ROUTING_EXECUTOR
+    assert followup.status == TASK_STATUS_PENDING
+    assert followup.is_recovery_task is False
 
 
 def test_build_recovery_context_entry_keeps_created_task_records_and_open_issue(

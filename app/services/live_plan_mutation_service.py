@@ -72,17 +72,16 @@ def _should_run_immediate_resequence_patch(
     if not created_recovery_task_ids:
         return False
 
-    if not _normalize_bool(
-        _read_attr(evaluation_decision, "new_recovery_tasks_blocking"),
-        False,
-    ):
-        return False
-
     if not intent.remaining_plan_still_valid:
         raise LivePlanMutationServiceError(
             "Cannot apply an immediate resequence patch when the remaining plan is not valid."
         )
 
+    # When there are recovery tasks to place and the resequence intent is active,
+    # always produce an immediate patch regardless of the new_recovery_tasks_blocking
+    # flag. The blocking flag carries advisory urgency from the stage evaluator, but
+    # it does not change the obligation to assign the tasks — deferring without
+    # producing a plan leaves them permanently unassigned.
     return True
 
 

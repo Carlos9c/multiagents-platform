@@ -434,12 +434,16 @@ def test_mutate_live_plan_resequence_inserts_patch_batch_when_blocking_recovery_
     assert persisted["plan"] == result.patched_execution_plan
 
 
-def test_mutate_live_plan_resequence_returns_deferred_when_no_immediate_patch_applies(
+def test_mutate_live_plan_resequence_patches_immediately_regardless_of_blocking_flag(
     db_session,
     make_project,
     make_task,
     make_execution_plan,
+    monkeypatch,
 ):
+    """When intent=resequence and there are recovery tasks, a patch batch is always
+    inserted immediately — the new_recovery_tasks_blocking flag carries advisory
+    urgency but does not gate the obligation to assign the tasks."""
     project = make_project()
     current_task = make_task(project_id=project.id, title="Current batch task")
     recovery_task = make_task(project_id=project.id, title="Recovery task")
@@ -468,6 +472,16 @@ def test_mutate_live_plan_resequence_returns_deferred_when_no_immediate_patch_ap
         reopened_finalization=True,
     )
 
+    persisted = {}
+
+    def fake_persist_patched_execution_plan(**kwargs):
+        persisted["plan"] = kwargs["plan"]
+
+    monkeypatch.setattr(
+        "app.services.live_plan_mutation_service.persist_patched_execution_plan",
+        fake_persist_patched_execution_plan,
+    )
+
     result = mutate_live_plan(
         db=db_session,
         project=project,
@@ -477,7 +491,7 @@ def test_mutate_live_plan_resequence_returns_deferred_when_no_immediate_patch_ap
         evaluation_decision=type(
             "EvalDecision",
             (),
-            {"new_recovery_tasks_blocking": False},
+            {"new_recovery_tasks_blocking": False},  # non-blocking, but patch still fires
         )(),
         recovery_context=RecoveryContext(),
         created_recovery_task_ids=[recovery_task.id],
@@ -491,11 +505,75 @@ def test_mutate_live_plan_resequence_returns_deferred_when_no_immediate_patch_ap
         persist_recovery_assignment_payload_fn=lambda **kwargs: None,
     )
 
+    assert result.mutation_kind == "resequence_patch"
+    assert result.requires_replan is False
+    assert result.patched_execution_plan is not None
+    assert result.metadata["patched_task_ids"] == [recovery_task.id]
+    assert result.metadata["anchor_batch_id"] == batch.batch_id
+    assert persisted["plan"] == result.patched_execution_plan
+
+
+def test_mutate_live_plan_resequence_returns_deferred_when_no_recovery_tasks(
+    db_session,
+    make_project,
+    make_task,
+    make_execution_plan,
+):
+    """resequence_deferred is only produced when created_recovery_task_ids is empty —
+    there is nothing to patch in immediately."""
+    project = make_project()
+    current_task = make_task(project_id=project.id, title="Current batch task")
+
+    plan = make_execution_plan(
+        plan_version=4,
+        batches=[
+            _plan_batch(
+                batch_id="plan_4_batch_1",
+                task_ids=[current_task.id],
+                plan_version=4,
+                batch_index=1,
+            )
+        ],
+    )
+    batch = plan.execution_batches[0]
+
+    resolved_intent = _build_resolved_intent(
+        intent_type="resequence",
+        mutation_scope="resequence",
+        remaining_plan_still_valid=True,
+        has_new_recovery_tasks=False,
+        requires_plan_mutation=True,
+        requires_all_new_tasks_assigned=False,
+        can_continue_after_application=False,
+        reopened_finalization=True,
+    )
+
+    result = mutate_live_plan(
+        db=db_session,
+        project=project,
+        plan=plan,
+        batch=batch,
+        resolved_intent=resolved_intent,
+        evaluation_decision=type(
+            "EvalDecision",
+            (),
+            {"new_recovery_tasks_blocking": False},
+        )(),
+        recovery_context=RecoveryContext(),
+        created_recovery_task_ids=[],
+        executed_task_ids=[current_task.id],
+        successful_task_ids=[current_task.id],
+        problematic_run_ids=[],
+        task_run_summaries=[
+            _build_task_run_summary(task_id=current_task.id, run_id=601),
+        ],
+        build_recovery_assignment_input_fn=lambda **kwargs: None,
+        persist_recovery_assignment_payload_fn=lambda **kwargs: None,
+    )
+
     assert result.mutation_kind == "resequence_deferred"
     assert result.requires_replan is False
     assert result.patched_execution_plan is None
-    assert result.metadata["patched_task_ids"] == []
-    assert result.metadata["anchor_batch_id"] == batch.batch_id
 
 
 def test_mutate_live_plan_returns_none_for_non_mutating_intents(

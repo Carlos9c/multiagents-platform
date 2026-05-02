@@ -3,7 +3,9 @@ import pytest
 from pydantic import ValidationError
 
 from app.models.task import (
+    TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
+    TASK_STATUS_FOLLOWED_UP,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
     TASK_STATUS_REATOMIZED,
@@ -16,7 +18,10 @@ from app.services.task_hierarchy_reconciliation_service import (
     TaskHierarchyReconciliationServiceError,
     reconcile_task_hierarchy_after_changes,
 )
-from app.services.task_hierarchy_service import TaskHierarchyServiceError
+from app.services.task_hierarchy_service import (
+    TaskHierarchyServiceError,
+    consolidate_parent_task_statuses,
+)
 
 
 def test_reatomize_creates_new_atomic_tasks_and_keeps_source_failed(
@@ -217,3 +222,121 @@ def test_reconcile_task_hierarchy_after_changes_rolls_back_flushed_parent_change
 
     assert refreshed_parent_one.status == "pending"
     assert refreshed_parent_two.status == "pending"
+
+
+def test_parent_closes_as_completed_when_all_children_are_followed_up(
+    db_session,
+    make_project,
+    make_task,
+):
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Parent task",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Child one",
+        planning_level="atomic",
+        status=TASK_STATUS_FOLLOWED_UP,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Child two",
+        planning_level="atomic",
+        status=TASK_STATUS_FOLLOWED_UP,
+    )
+
+    result = consolidate_parent_task_statuses(
+        db=db_session,
+        parent_task_id=parent.id,
+    )
+
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_COMPLETED
+    assert parent.id in result.changed_task_ids
+
+
+def test_parent_closes_as_completed_when_children_mix_completed_and_followed_up(
+    db_session,
+    make_project,
+    make_task,
+):
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Parent task",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Completed child",
+        planning_level="atomic",
+        status=TASK_STATUS_COMPLETED,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Followed-up child",
+        planning_level="atomic",
+        status=TASK_STATUS_FOLLOWED_UP,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Reatomized child",
+        planning_level="atomic",
+        status=TASK_STATUS_REATOMIZED,
+    )
+
+    result = consolidate_parent_task_statuses(
+        db=db_session,
+        parent_task_id=parent.id,
+    )
+
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_COMPLETED
+    assert parent.id in result.changed_task_ids
+
+
+def test_parent_stays_pending_when_one_child_is_followed_up_and_another_is_pending(
+    db_session,
+    make_project,
+    make_task,
+):
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Parent task",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Followed-up child",
+        planning_level="atomic",
+        status=TASK_STATUS_FOLLOWED_UP,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Pending child",
+        planning_level="atomic",
+        status=TASK_STATUS_PENDING,
+    )
+
+    result = consolidate_parent_task_statuses(
+        db=db_session,
+        parent_task_id=parent.id,
+    )
+
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_PENDING
+    assert parent.id not in result.changed_task_ids

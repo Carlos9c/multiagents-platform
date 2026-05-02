@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -18,6 +19,7 @@ from app.models.task import (
     TASK_STATUS_AWAITING_VALIDATION,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
+    TASK_STATUS_FOLLOWED_UP,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
     TASK_STATUS_REATOMIZED,
@@ -80,6 +82,8 @@ NON_TERMINAL_RUN_STATUSES = {
 }
 
 VALIDATION_RESULT_ARTIFACT_TYPE = "validation_result"
+
+logger = logging.getLogger(__name__)
 
 
 class PostBatchServiceError(Exception):
@@ -438,6 +442,7 @@ def _require_recovery_source_task_remains_terminal(
         TASK_STATUS_FAILED,
         TASK_STATUS_PARTIAL,
         TASK_STATUS_REATOMIZED,
+        TASK_STATUS_FOLLOWED_UP,
     }:
         raise PostBatchServiceError(
             f"Recovery integrity error in batch '{batch_id}' plan version {plan_version}: "
@@ -1385,11 +1390,116 @@ def process_batch_after_execution(
             )
 
         elif mutation_result.mutation_kind == "resequence_deferred":
-            patched_execution_plan = None
-            notes = (
-                f"{notes} "
-                "The remaining plan requires resequencing, but no immediate local patch batch was materialized."
-            )
+            if resolved_intent.requires_all_new_tasks_assigned and created_recovery_task_ids:
+                # Defensive layer: resequence was deferred but recovery tasks still need
+                # placement in the active plan. Escalate to the assignment mechanism so
+                # that tasks are never silently abandoned. After the primary fix in
+                # _should_run_immediate_resequence_patch this branch should not be
+                # reachable, but it acts as a safety net for future regressions.
+                logger.warning(
+                    "resequence_deferred_escalated_to_assign batch_id=%s recovery_task_ids=%s",
+                    batch_id,
+                    created_recovery_task_ids,
+                )
+                _assign_fallback_intent = ResolvedPostBatchIntent(
+                    intent_type="assign",
+                    mutation_scope="assignment",
+                    remaining_plan_still_valid=resolved_intent.remaining_plan_still_valid,
+                    has_new_recovery_tasks=resolved_intent.has_new_recovery_tasks,
+                    requires_plan_mutation=True,
+                    requires_all_new_tasks_assigned=True,
+                    can_continue_after_application=resolved_intent.can_continue_after_application,
+                    should_close_stage=False,
+                    requires_manual_review=False,
+                    reopened_finalization=resolved_intent.reopened_finalization,
+                    notes=(
+                        f"{notes} Resequence was deferred; escalating to assignment so that "
+                        "recovery tasks are placed in the active plan rather than abandoned."
+                    ),
+                    decision_signals=list(
+                        dict.fromkeys(
+                            list(resolved_intent.decision_signals)
+                            + ["resequence_deferred_escalated_to_assign"]
+                        )
+                    ),
+                )
+                try:
+                    _assign_fallback_result = mutate_live_plan(
+                        db=db,
+                        project=project,
+                        plan=plan,
+                        batch=batch,
+                        resolved_intent=_assign_fallback_intent,
+                        evaluation_decision=evaluation_decision,
+                        recovery_context=aggregated_recovery_context,
+                        created_recovery_task_ids=created_recovery_task_ids,
+                        executed_task_ids=executed_task_ids,
+                        successful_task_ids=successful_task_ids,
+                        problematic_run_ids=problematic_run_ids,
+                        task_run_summaries=task_run_summaries,
+                        build_recovery_assignment_input_fn=_build_recovery_assignment_input,
+                        persist_recovery_assignment_payload_fn=_persist_recovery_assignment_payload,
+                    )
+                except LivePlanMutationServiceError as exc:
+                    raise PostBatchServiceError(
+                        f"Resequence-deferred assignment fallback failed: {str(exc)}"
+                    ) from exc
+
+                resolved_intent = _assign_fallback_intent
+                if _assign_fallback_result.mutation_kind == "assignment":
+                    patched_execution_plan = _assign_fallback_result.patched_execution_plan
+                    assigned_task_ids = list(
+                        _assign_fallback_result.metadata.get("assigned_task_ids", [])
+                    )
+                    unassigned_task_ids = list(
+                        _assign_fallback_result.metadata.get("unassigned_task_ids", [])
+                    )
+                    cluster_count = len(
+                        _assign_fallback_result.metadata.get("compiled_cluster_assignments", [])
+                    )
+                    notes = (
+                        f"{_assign_fallback_intent.notes} "
+                        f"Fallback assignment placed recovery tasks. "
+                        f"clusters_assigned={cluster_count}; assigned_task_ids={assigned_task_ids}."
+                    )
+                elif _assign_fallback_result.mutation_kind == "escalated_to_replan":
+                    patched_execution_plan = None
+                    resolved_intent = ResolvedPostBatchIntent(
+                        intent_type="replan",
+                        mutation_scope="replan",
+                        remaining_plan_still_valid=False,
+                        has_new_recovery_tasks=_assign_fallback_intent.has_new_recovery_tasks,
+                        requires_plan_mutation=True,
+                        requires_all_new_tasks_assigned=False,
+                        can_continue_after_application=False,
+                        should_close_stage=False,
+                        requires_manual_review=False,
+                        reopened_finalization=True,
+                        notes=(
+                            f"{_assign_fallback_intent.notes} Assignment fallback escalated to "
+                            f"replanning because newly created work revealed a structural conflict: "
+                            f"{' '.join(_assign_fallback_result.notes).strip() or 'no extra notes'}"
+                        ),
+                        decision_signals=list(
+                            dict.fromkeys(
+                                list(_assign_fallback_intent.decision_signals)
+                                + ["assignment_escalated_to_replan"]
+                            )
+                        ),
+                    )
+                    notes = resolved_intent.notes
+                else:
+                    raise PostBatchServiceError(
+                        f"Resequence-deferred assignment fallback produced unexpected mutation "
+                        f"kind '{_assign_fallback_result.mutation_kind}'."
+                    )
+            else:
+                patched_execution_plan = None
+                notes = (
+                    f"{notes} "
+                    "The remaining plan requires resequencing, but no immediate local patch "
+                    "batch was materialized."
+                )
 
         else:
             raise PostBatchServiceError(

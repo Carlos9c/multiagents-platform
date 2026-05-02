@@ -334,7 +334,11 @@ def insert_patch_batch_after_batch(
     patched_checkpoints = list(plan.checkpoints)
     patched_checkpoints.append(patch_checkpoint)
 
-    provisional_plan = ExecutionPlan(
+    # Use model_construct to skip validators — the provisional plan may temporarily
+    # violate invariants (e.g. the new patch batch becomes the final batch without
+    # stage_closure). normalize_execution_plan_terminal_invariants fixes these before
+    # returning a fully validated ExecutionPlan.
+    provisional_plan = ExecutionPlan.model_construct(
         plan_version=plan.plan_version,
         supersedes_plan_version=plan.supersedes_plan_version,
         planning_scope=plan.planning_scope,

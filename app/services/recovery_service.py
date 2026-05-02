@@ -10,6 +10,7 @@ from app.models.task import (
     PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_ATOMIC,
     TASK_STATUS_FAILED,
+    TASK_STATUS_FOLLOWED_UP,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
     TASK_STATUS_REATOMIZED,
@@ -307,22 +308,18 @@ def materialize_recovery_decision(
         db.add(created_task)
         created_tasks.append(created_task)
 
-    if effective_action == "reatomize":
-        source_task.status = TASK_STATUS_REATOMIZED
-        db.add(source_task)
+    new_source_status = (
+        TASK_STATUS_REATOMIZED if effective_action == "reatomize" else TASK_STATUS_FOLLOWED_UP
+    )
+    source_task.status = new_source_status
+    db.add(source_task)
 
     db.commit()
 
     for created_task in created_tasks:
         db.refresh(created_task)
 
-    if effective_action == "insert_followup":
-        db.refresh(source_task)
-        if source_task.status != original_status:
-            raise RecoveryServiceError(
-                f"Recovery integrity error: source task {source_task.id} changed status from "
-                f"'{original_status}' to '{source_task.status}' during insert_followup materialization."
-            )
+    db.refresh(source_task)
 
     return created_tasks
 
