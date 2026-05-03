@@ -34,7 +34,7 @@ def test_insert_patch_batch_after_batch_creates_plan_local_patch(make_execution_
         ],
     )
 
-    patched = insert_patch_batch_after_batch(
+    patched, returned_patch_batch = insert_patch_batch_after_batch(
         plan=plan,
         anchor_batch_id="plan_3_batch_1",
         task_ids=[101, 102],
@@ -78,6 +78,8 @@ def test_insert_patch_batch_after_batch_creates_plan_local_patch(make_execution_
     assert patch_checkpoint.reason == "Validate patch batch."
     assert patch_checkpoint.can_introduce_new_tasks is True
     assert patch_checkpoint.can_resequence_remaining_work is True
+
+    assert returned_patch_batch.batch_id == patch_batch.batch_id
 
 
 def _make_plan() -> ExecutionPlan:
@@ -185,7 +187,7 @@ def _make_plan() -> ExecutionPlan:
 def test_insert_patch_batch_after_intermediate_batch_preserves_final_stage_closure():
     plan = _make_plan()
 
-    patched_plan = insert_patch_batch_after_batch(
+    patched_plan, _ = insert_patch_batch_after_batch(
         plan=plan,
         anchor_batch_id="plan_1_batch_1",
         task_ids=[201, 202],
@@ -218,7 +220,7 @@ def test_insert_patch_batch_after_intermediate_batch_preserves_final_stage_closu
 def test_insert_patch_batch_after_penultimate_batch_keeps_single_valid_final_closure():
     plan = _make_plan()
 
-    patched_plan = insert_patch_batch_after_batch(
+    patched_plan, _ = insert_patch_batch_after_batch(
         plan=plan,
         anchor_batch_id="plan_1_batch_2",
         task_ids=[301],

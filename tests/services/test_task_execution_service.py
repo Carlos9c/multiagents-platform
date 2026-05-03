@@ -115,6 +115,10 @@ def _patch_engine(
 
 def _patch_workspace_runtime(monkeypatch, *, promoted_state: dict | None = None):
     def _factory(storage_service):
+        def _promote(**kwargs):
+            if promoted_state is not None:
+                promoted_state["called"] = True
+
         return types.SimpleNamespace(
             prepare_workspace=lambda **kwargs: types.SimpleNamespace(
                 project_id=kwargs["project_id"],
@@ -123,9 +127,7 @@ def _patch_workspace_runtime(monkeypatch, *, promoted_state: dict | None = None)
                 run_dir=".",
                 source_dir=".",
             ),
-            promote_workspace_to_source=lambda **kwargs: (
-                promoted_state.__setitem__("called", True) if promoted_state is not None else None
-            ),
+            promote_workspace_to_source=_promote,
         )
 
     monkeypatch.setattr(
@@ -170,7 +172,6 @@ def _build_validation_result(
         partial_validation_summary=(
             "Additional follow-up validation required." if followup_validation_required else None
         ),
-        partial_reason="work_missing" if decision == "partial" else None,
         metadata={},
     )
 
@@ -453,6 +454,42 @@ def test_execute_task_sync_partial_reconciles_parent_to_partial(
     assert parent.status == TASK_STATUS_PARTIAL
     assert json.loads(atomic_task.last_execution_agent_sequence) == expected_sequence
     assert json.loads(latest_run.execution_agent_sequence) == expected_sequence
+
+
+def test_execute_task_sync_partial_promotes_full_workspace(
+    db_session,
+    monkeypatch,
+    make_project,
+    make_task,
+):
+    project = make_project()
+    atomic_task = make_task(
+        project_id=project.id,
+        title="Atomic task with incomplete scope",
+        status=TASK_STATUS_PENDING,
+        executor_type=EXECUTION_ENGINE,
+    )
+
+    promoted = {"called": False}
+
+    _patch_engine(
+        monkeypatch,
+        _build_engine_result(
+            task_id=atomic_task.id,
+            decision=EXECUTION_DECISION_PARTIAL,
+            summary="Partial execution: scope incomplete.",
+        ),
+    )
+    _patch_workspace_runtime(monkeypatch, promoted_state=promoted)
+    _patch_validation_service(
+        monkeypatch,
+        decision="partial",
+        final_task_status=TASK_STATUS_PARTIAL,
+    )
+
+    execute_task_sync(db_session, atomic_task.id)
+
+    assert promoted["called"] is True
 
 
 def test_execute_task_sync_failed_terminal_path_reconciles_parent_to_failed(

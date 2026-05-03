@@ -131,7 +131,6 @@ def _build_validation_result(
         partial_validation_summary=(
             "Additional validation follow-up required." if followup_validation_required else None
         ),
-        partial_reason="work_missing" if validation_decision == "partial" else None,
         metadata={"confidence": "high"},
     )
 

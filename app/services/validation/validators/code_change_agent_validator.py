@@ -15,6 +15,7 @@ from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 from app.services.validation.base import BaseTaskValidator
 from app.services.validation.contracts import (
+    PartialAnnotation,
     TaskValidationInput,
     ValidationFinding,
     ValidationResult,
@@ -118,20 +119,20 @@ Strict boundary rules:
 - If the code materially satisfies the task objective and acceptance criteria, choose completed.
 
 Partial decision rules (apply ONLY when decision is 'partial'):
-You MUST set partial_reason to one of:
-  - "files_rejected": at least one produced file is incorrect or incomplete and MUST NOT be promoted.
-    You MUST list those files in rejected_files (relative paths only). rejected_files MUST be non-empty.
-  - "work_missing": the task is incomplete because required work was not done at all (no file to reject —
-    the absence of work is the problem). Set missing_work_summary to describe what is missing.
-  - "files_rejected_and_work_missing": both apply — some files must not be promoted AND work is missing.
-    rejected_files MUST be non-empty and missing_work_summary MUST describe the missing work.
+When decision is 'partial', you MUST populate partial_annotations with one or more entries
+describing each specific gap that prevents the task from being complete. Each annotation requires:
+  - file_path: the relative path of the file that has a gap (exactly as it appears in the evidence),
+    or null if the gap is not specific to a single file
+  - issue_summary: a concrete description of what is incomplete or wrong in that file/area
+  - required_action: exactly what must be done to close this gap — be specific and actionable,
+    since recovery will use this to generate a precise follow-up task
 
-File rejection rules:
-- Only reject files within the code_change_agent competency: source code and configuration files
-  whose content is materially wrong, incomplete, or contradicts the acceptance criteria.
-- rejected_files contains relative file paths exactly as they appear in the evidence.
-- Do NOT reject files preemptively — only reject files you have concrete evidence are wrong.
-- If decision is not 'partial', leave rejected_files empty and partial_reason as null.
+Rules for partial_annotations:
+- Only annotate gaps you have concrete evidence for from the task definition, acceptance criteria,
+  and file contents. Do not annotate speculatively or preemptively.
+- Do not use rejected_files — describe what is incomplete or wrong via partial_annotations instead.
+- If decision is not 'partial', leave partial_annotations empty.
+- Each required_action must be actionable: recovery consumes these annotations to create follow-up tasks.
 
 Return ONLY JSON matching the provided schema.
 """.strip()
@@ -145,6 +146,12 @@ class CodeChangeAgentValidationFinding(BaseModel):
     file_paths: list[str] = Field(default_factory=list)
 
 
+class PartialAnnotationLLMOutput(BaseModel):
+    file_path: str | None = None
+    issue_summary: str
+    required_action: str
+
+
 class CodeChangeAgentValidationLLMOutput(BaseModel):
     decision: Literal["completed", "partial", "failed", "manual_review"]
     summary: str
@@ -154,11 +161,7 @@ class CodeChangeAgentValidationLLMOutput(BaseModel):
     findings: list[CodeChangeAgentValidationFinding] = Field(default_factory=list)
     manual_review_required: bool = False
     reasoning_notes: list[str] = Field(default_factory=list)
-    rejected_files: list[str] = Field(default_factory=list)
-    partial_reason: (
-        Literal["files_rejected", "work_missing", "files_rejected_and_work_missing"] | None
-    ) = None
-    missing_work_summary: str | None = None
+    partial_annotations: list[PartialAnnotationLLMOutput] = Field(default_factory=list)
 
 
 class CodeChangeAgentValidatorError(Exception):
@@ -424,7 +427,6 @@ def _sanitize_llm_output(
     sanitized_reasoning_notes = [
         note for note in llm_output.reasoning_notes if not _contains_forbidden_text(note)
     ]
-    sanitized_rejected_files = list(llm_output.rejected_files)
 
     sanitized_summary = llm_output.summary
     sanitized_validated_scope = llm_output.validated_scope
@@ -449,7 +451,7 @@ def _sanitize_llm_output(
     negative_signal_count += len(sanitized_blockers)
     if sanitized_missing_scope:
         negative_signal_count += 1
-    if sanitized_rejected_files:
+    if llm_output.partial_annotations:
         negative_signal_count += 1
 
     decision = llm_output.decision
@@ -459,28 +461,9 @@ def _sanitize_llm_output(
         decision = "completed"
         manual_review_required = False
 
-    partial_reason = llm_output.partial_reason
-    missing_work_summary = llm_output.missing_work_summary
-
-    if decision != "partial":
-        sanitized_rejected_files = []
-        partial_reason = None
-        missing_work_summary = None
-    else:
-        has_rejected = bool(sanitized_rejected_files)
-        has_missing_work = bool(missing_work_summary or sanitized_missing_scope)
-        if partial_reason is None:
-            if has_rejected and has_missing_work:
-                partial_reason = "files_rejected_and_work_missing"
-            elif has_rejected:
-                partial_reason = "files_rejected"
-            else:
-                partial_reason = "work_missing"
-        elif (
-            partial_reason in {"files_rejected", "files_rejected_and_work_missing"}
-            and not has_rejected
-        ):
-            partial_reason = "work_missing"
+    sanitized_partial_annotations = (
+        list(llm_output.partial_annotations) if decision == "partial" else []
+    )
 
     return CodeChangeAgentValidationLLMOutput(
         decision=decision,
@@ -491,9 +474,7 @@ def _sanitize_llm_output(
         findings=sanitized_findings,
         manual_review_required=manual_review_required,
         reasoning_notes=sanitized_reasoning_notes,
-        rejected_files=sanitized_rejected_files,
-        partial_reason=partial_reason,
-        missing_work_summary=missing_work_summary,
+        partial_annotations=sanitized_partial_annotations,
     )
 
 
@@ -583,9 +564,14 @@ class CodeChangeAgentValidator(BaseTaskValidator):
             followup_validation_required=False,
             recommended_next_validator_keys=[],
             partial_validation_summary=None,
-            rejected_files=list(llm_output.rejected_files),
-            partial_reason=llm_output.partial_reason,
-            missing_work_summary=llm_output.missing_work_summary,
+            partial_annotations=[
+                PartialAnnotation(
+                    file_path=a.file_path,
+                    issue_summary=a.issue_summary,
+                    required_action=a.required_action,
+                )
+                for a in llm_output.partial_annotations
+            ],
             metadata={
                 "producer_key": self.producer_key,
                 "producer_evidence_count": len(producer_items),

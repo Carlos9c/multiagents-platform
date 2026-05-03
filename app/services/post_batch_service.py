@@ -263,6 +263,7 @@ def _build_recovery_oriented_validation_summary(
         "blockers": payload.get("blockers") or [],
         "manual_review_required": bool(payload.get("manual_review_required", False)),
         "followup_validation_required": bool(payload.get("followup_validation_required", False)),
+        "partial_annotations": payload.get("partial_annotations") or [],
         "final_task_status": payload.get("final_task_status"),
         "raw_validation_artifact_content": validation_artifact.content,
         "parse_error": payload.get("parse_error"),
@@ -790,7 +791,7 @@ def _build_recovery_assignment_recovery_signals(
                 source_run_id=decision.source_run_id,
                 recovery_action=decision.action,
                 recovery_reason=decision.reason,
-                covered_gap_summary=decision.reason,
+                covered_gap_summary=decision.covered_gap_summary,
                 still_blocks_progress=decision.still_blocks_progress,
                 execution_guidance=None,
                 evaluation_guidance=None,
@@ -1075,6 +1076,30 @@ def _build_recovery_assignment_input(
     )
 
 
+def _assert_no_unassigned_nonterminal_tasks(
+    db: Session,
+    *,
+    project_id: int,
+    plan: ExecutionPlan,
+) -> None:
+    plan_task_ids = {tid for batch in plan.execution_batches for tid in batch.task_ids}
+    unassigned = (
+        db.query(Task.id)
+        .filter(
+            Task.project_id == project_id,
+            Task.status.notin_(list(TERMINAL_TASK_STATUSES)),
+            Task.id.notin_(list(plan_task_ids)) if plan_task_ids else True,
+        )
+        .all()
+    )
+    if unassigned:
+        ids = sorted(row[0] for row in unassigned)
+        raise PostBatchServiceError(
+            f"Stage closure blocked: {len(ids)} non-terminal task(s) are not assigned to any "
+            f"batch in plan version {plan.plan_version}: task_ids={ids}"
+        )
+
+
 def _reconcile_hierarchy_after_batch_changes(
     db: Session,
     *,
@@ -1305,6 +1330,39 @@ def process_batch_after_execution(
         intent=resolved_intent,
         is_final_batch=is_final_batch,
     )
+
+    # Placement gate: if recovery tasks were created and the evaluator returned "continue",
+    # the tasks would be left unassigned. Force to "assign" so placement always runs before
+    # the next batch starts. manual_review and replan are intentionally excluded — they cut
+    # the process and placement is handled when execution resumes.
+    if created_recovery_task_ids and resolved_intent.intent_type == "continue":
+        logger.warning(
+            "placement_gate_triggered batch_id=%s recovery_task_ids=%s — intent 'continue' "
+            "overridden to 'assign': recovery tasks must be placed before the next batch starts.",
+            batch_id,
+            created_recovery_task_ids,
+        )
+        resolved_intent = ResolvedPostBatchIntent(
+            intent_type="assign",
+            mutation_scope="assignment",
+            remaining_plan_still_valid=resolved_intent.remaining_plan_still_valid,
+            has_new_recovery_tasks=True,
+            requires_plan_mutation=True,
+            requires_all_new_tasks_assigned=True,
+            can_continue_after_application=resolved_intent.can_continue_after_application,
+            should_close_stage=False,
+            requires_manual_review=False,
+            reopened_finalization=resolved_intent.reopened_finalization,
+            notes=(
+                f"{resolved_intent.notes} Intent overridden from 'continue' to 'assign': "
+                "recovery tasks must be placed in the plan before the next batch can start."
+            ),
+            decision_signals=list(
+                dict.fromkeys(
+                    list(resolved_intent.decision_signals) + ["continue_overridden_to_assign"]
+                )
+            ),
+        )
 
     patched_execution_plan: ExecutionPlan | None = None
     finalization_guard_triggered = False
@@ -1544,6 +1602,12 @@ def process_batch_after_execution(
             notes = resolved_intent.notes
 
         elif resolved_intent.intent_type == "close":
+            effective_plan = patched_execution_plan if patched_execution_plan is not None else plan
+            _assert_no_unassigned_nonterminal_tasks(
+                db,
+                project_id=project_id,
+                plan=effective_plan,
+            )
             status = "project_stage_closed"
             notes = (
                 resolved_intent.notes
@@ -1610,11 +1674,18 @@ def process_batch_after_execution(
             "manual_review",
             "close",
         }:
-            status = (
-                "checkpoint_blocked"
-                if resolved_intent.intent_type != "close"
-                else "project_stage_closed"
-            )
+            if resolved_intent.intent_type == "close":
+                effective_plan = (
+                    patched_execution_plan if patched_execution_plan is not None else plan
+                )
+                _assert_no_unassigned_nonterminal_tasks(
+                    db,
+                    project_id=project_id,
+                    plan=effective_plan,
+                )
+                status = "project_stage_closed"
+            else:
+                status = "checkpoint_blocked"
         else:
             raise PostBatchServiceError(
                 f"Unsupported resolved intent_type '{resolved_intent.intent_type}'."

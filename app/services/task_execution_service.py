@@ -281,23 +281,16 @@ def _promote_validated_workspace_to_source(
     *,
     task: Task,
     run_id: int,
-    files_to_exclude: list[str] | None = None,
 ) -> None:
     """
     Promote the execution-run workspace overlay into canonical project source.
 
-    This is intentionally executed only after:
-    - execution finished
-    - validation produced decision='completed' or decision='partial' with promotable files
+    Executed only after execution finished and validation decided 'completed' or 'partial'.
+    All workspace files are always promoted in full — partial_annotations in the validation
+    result describe what still needs to be done, which recovery uses to create follow-up tasks.
 
-    And before:
-    - the final task status is persisted
-
-    files_to_exclude: workspace-relative paths that must NOT be promoted (rejected files).
-    If None, all workspace files are promoted.
-
-    Promotion applies the run overlay onto the canonical source tree.
-    It must not promote any ephemeral run_dir used for command verification.
+    Promotion applies the run overlay onto the canonical source tree and must not touch the
+    ephemeral run_dir used for command verification.
 
     This helper must not persist task or run state. Callers are responsible
     for degrading the orchestration state coherently if promotion fails.
@@ -308,7 +301,6 @@ def _promote_validated_workspace_to_source(
         workspace_runtime.promote_workspace_to_source(
             project_id=task.project_id,
             execution_run_id=run_id,
-            files_to_exclude=files_to_exclude,
         )
     except Exception as exc:
         raise TaskExecutionServiceError(
@@ -384,6 +376,9 @@ def _serialize_validation_result_artifact(
             validation_result.recommended_next_validator_keys or []
         ),
         "partial_validation_summary": validation_result.partial_validation_summary,
+        "partial_annotations": [
+            a.model_dump(mode="json") for a in (validation_result.partial_annotations or [])
+        ],
         "final_task_status": final_task_status,
         "workspace_promoted_to_source": workspace_promoted_to_source,
         "validated_evidence_ids": list(validation_result.validated_evidence_ids or []),
@@ -675,7 +670,6 @@ def _validate_after_execution(
             _promote_validated_workspace_to_source(
                 task=refreshed_task_for_promotion,
                 run_id=run_id,
-                files_to_exclude=list(validation_result.rejected_files) or None,
             )
             workspace_promoted_to_source = True
 

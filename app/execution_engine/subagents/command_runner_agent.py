@@ -71,7 +71,8 @@ Hard rules:
 - Do not use shell chaining, pipes, redirection, or multiple commands.
 - Prefer project-standard commands already supported by the repository layout.
 - Use the smallest useful verification command.
-- The working directory must be "." or a relative path inside the candidate run tree.
+- Determine the working directory from the inventory: locate build configs, test runner configs, Makefiles, package manifests, or entrypoints that signal where the command belongs. '.' is the default; use a subdirectory only when you find concrete evidence in the inventory that the tooling requires it.
+- When test or spec files appear in the inventory under a subdirectory (e.g., tests/, spec/, __tests__/, test/), the command must explicitly reference that path — pass the subdirectory as an argument to the runner (e.g., pytest tests/, go test ./tests/..., jest tests/, rspec spec/, python -m unittest discover -s tests). Do not use a bare runner invocation that relies on root-level auto-discovery; if the test files are not at the project root, auto-discovery from '.' will produce zero results and the command will be useless.
 - Do not invent tools, executables, frameworks, entrypoints, or files that are not grounded in the provided inventory/context.
 - The goal is to produce operational evidence for external validation, not to perform open-ended exploration.
 
@@ -122,7 +123,18 @@ class CommandInspectionPlan(BaseModel):
 class CommandVerificationPlan(BaseModel):
     decision: Literal["run_command", "verification_not_applicable"]
     command: str = ""
-    cwd_relative_path: str = "."
+    cwd_relative_path: str = Field(
+        default=".",
+        description=(
+            "Working directory for the command, as a path relative to the run-tree root. "
+            "Determine the correct value by examining the run-tree inventory and inspected "
+            "file contents: look for build configuration files, test runner configs, "
+            "Makefiles, package manifests, or executable entrypoints that indicate where "
+            "the command should run. '.' (the run-tree root) is the default and is correct "
+            "for most projects. Only use a subdirectory when you find concrete evidence in "
+            "the inventory that the command must run from that specific location."
+        ),
+    )
     verification_goal: str
     rationale: str
     validation_claims: list[str] = Field(default_factory=list)
@@ -395,6 +407,7 @@ Planning instructions:
 - Ground the decision strictly in the provided run-tree inventory, inspected file contents, task context, and accumulated evidence.
 - Prefer the smallest useful verification command.
 - Prefer repository-supported executable paths over generic guesses.
+- If the inventory contains test or spec files under a subdirectory (e.g., tests/, spec/, __tests__/), you MUST pass that subdirectory explicitly to the test runner. Bare runner invocations without path arguments (e.g., "python -m unittest" with no args) discover zero tests when the test directory is not the project root, which makes the command useless. Always construct the command so it will find the tests you can see in the inventory.
 """.strip()
 
 
@@ -458,6 +471,42 @@ Key corrections:
 - If decision is "verification_not_applicable": command must be "" and expected_exit_codes must be []
 - verification_goal and rationale must not be empty
 - Do not use shell chaining, pipes, or redirection in the command
+
+{base}""".strip()
+
+
+def _build_command_planning_constraint_retry_prompt(
+    *,
+    request: ExecutionRequest,
+    step: ExecutionStep,
+    state: ResolutionState,
+    run_dir: Path,
+    inventory: list[str],
+    inspection_plan: "CommandInspectionPlan",
+    inspected_files: list[dict],
+    constraint_error: str,
+) -> str:
+    base = _build_command_planning_prompt(
+        request=request,
+        step=step,
+        state=state,
+        run_dir=run_dir,
+        inventory=inventory,
+        inspection_plan=inspection_plan,
+        inspected_files=inspected_files,
+    )
+    return f"""Your previous command plan was rejected because it violated a hard execution constraint.
+
+Constraint violation:
+{constraint_error}
+
+You must plan a different command that does NOT use shell constructs such as &&, ||, |, >, >>, <, or ;.
+
+Correction rules:
+- Choose exactly ONE self-contained command. No chaining, no pipes, no redirection.
+- If the verification you had in mind required multiple steps, pick only the single most valuable one.
+- If no single allowed command can provide meaningful verification, choose verification_not_applicable.
+- Prefer narrow commands that are already supported by the repository layout (e.g. a test runner, a compiler check, a lint tool invocation).
 
 {base}""".strip()
 
@@ -625,7 +674,37 @@ class CommandRunnerAgent(BaseSubagent):
                     f"Invalid command verification plan after retry: {str(retry_exc)}"
                 ) from retry_exc
 
-        _validate_planned_command(plan)
+        try:
+            _validate_planned_command(plan)
+        except SubagentRejectedStepError as constraint_exc:
+            logger.warning(
+                "command_runner_agent_command_plan_constraint_violation_retrying task_id=%s error=%s",
+                request.task_id,
+                str(constraint_exc),
+            )
+            constraint_retry_raw = self.runtime.generate_structured(
+                system_prompt=COMMAND_RUNNER_AGENT_SYSTEM_PROMPT,
+                user_prompt=_build_command_planning_constraint_retry_prompt(
+                    request=request,
+                    step=step,
+                    state=state,
+                    run_dir=run_dir,
+                    inventory=inventory,
+                    inspection_plan=inspection_plan,
+                    inspected_files=inspected_files,
+                    constraint_error=str(constraint_exc),
+                ),
+                schema_name="execution_engine_command_verification_plan",
+                json_schema=schema,
+            )
+            try:
+                plan = CommandVerificationPlan.model_validate(constraint_retry_raw)
+            except ValidationError as retry_exc:
+                raise SubagentRejectedStepError(
+                    f"Invalid command verification plan after constraint retry: {str(retry_exc)}"
+                ) from retry_exc
+            _validate_planned_command(plan)
+
         return plan
 
     def execute_step(

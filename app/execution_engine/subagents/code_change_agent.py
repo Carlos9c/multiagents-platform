@@ -89,6 +89,7 @@ Implementation quality expectations:
 - Only introduce configuration when it is required for the implementation to work inside the repository.
 - When a test or executable artifact is required, make the implementation compatible with straightforward repository-local execution.
 - Avoid partial structural moves that force follow-up cleanups.
+- Do not create auxiliary verification scripts, smoke-test scripts, or throwaway entrypoints whose only purpose is to check if the implementation runs. Operational verification is the responsibility of the command_runner_agent using existing project tooling.
 
 Decision policy:
 - First decide what minimal coherent artifact slice is needed.

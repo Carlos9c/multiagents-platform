@@ -59,6 +59,10 @@ Validation-use rule:
   and validation.final_task_status as structured signals.
 - If validation.decision=partial, prefer insert_followup over reatomize unless there is strong evidence
   that the original task itself was structurally wrong.
+- If validation.decision=partial, use validation.partial_annotations as the primary signal for scoping
+  insert_followup tasks. Each annotation identifies a specific gap with file_path, issue_summary, and
+  required_action — the follow-up task should directly address those annotated gaps. If partial_annotations
+  is empty, fall back to validation.missing_scope to infer the remaining work.
 - If validation.validated_scope shows meaningful partial progress, preserve that progress.
 - If validation.missing_scope identifies a concrete remaining gap, prefer narrow follow-up work that closes
   that gap while preserving the original task intent.

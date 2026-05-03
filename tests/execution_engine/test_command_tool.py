@@ -397,6 +397,8 @@ def test_command_runner_agent_rejects_disallowed_shell_constructs_in_planned_com
     monkeypatch,
     tmp_path: Path,
 ):
+    # Both the initial plan AND the constraint retry return disallowed constructs →
+    # the agent must ultimately raise after exhausting retries.
     runtime = FakeRuntime(
         responses=[
             _inspection_response("app/service.py"),
@@ -406,6 +408,16 @@ def test_command_runner_agent_rejects_disallowed_shell_constructs_in_planned_com
                 "cwd_relative_path": ".",
                 "verification_goal": "Run verification.",
                 "rationale": "Try two checks.",
+                "validation_claims": ["verification_attempted"],
+                "expected_exit_codes": [0],
+            },
+            # constraint retry also returns a bad command
+            {
+                "decision": "run_command",
+                "command": "pytest -q | tee results.txt",
+                "cwd_relative_path": ".",
+                "verification_goal": "Run verification.",
+                "rationale": "Still piping.",
                 "validation_claims": ["verification_attempted"],
                 "expected_exit_codes": [0],
             },
@@ -439,6 +451,87 @@ def test_command_runner_agent_rejects_disallowed_shell_constructs_in_planned_com
             step=step,
             state=state,
         )
+
+
+def test_command_runner_agent_retries_on_disallowed_shell_constructs_and_succeeds(
+    monkeypatch,
+    tmp_path: Path,
+):
+    # Initial plan has disallowed constructs; constraint retry returns a valid single command.
+    runtime = FakeRuntime(
+        responses=[
+            _inspection_response("app/service.py"),
+            {
+                "decision": "run_command",
+                "command": "pytest -q && python -m app",
+                "cwd_relative_path": ".",
+                "verification_goal": "Run verification.",
+                "rationale": "Try two checks.",
+                "validation_claims": ["verification_attempted"],
+                "expected_exit_codes": [0],
+            },
+            # constraint retry returns a single allowed command
+            {
+                "decision": "run_command",
+                "command": 'python -c "print(123)"',
+                "cwd_relative_path": ".",
+                "verification_goal": "Verify the minimal executable check succeeds.",
+                "rationale": "Single allowed command.",
+                "validation_claims": ["smoke_check_passed"],
+                "expected_exit_codes": [0],
+            },
+        ]
+    )
+    agent = CommandRunnerAgent(runtime=runtime)
+    request = _build_request(task_id=110, execution_run_id=210)
+    step = _build_step()
+    state = _build_state_with_changed_file(path="app/service.py")
+
+    run_tree = tmp_path / "run_tree"
+    run_tree.mkdir(parents=True, exist_ok=True)
+    (run_tree / "app").mkdir(parents=True, exist_ok=True)
+    (run_tree / "app" / "service.py").write_text("print('ok')\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        agent.workspace_runtime,
+        "materialize_run_tree",
+        lambda **kwargs: run_tree,
+    )
+    monkeypatch.setattr(
+        agent.workspace_runtime,
+        "cleanup_run_tree",
+        lambda **kwargs: None,
+    )
+
+    called = {"run_command": 0}
+
+    def _fake_run_command(*, command: str, cwd: str):
+        called["run_command"] += 1
+        assert command == 'python -c "print(123)"'
+        return types.SimpleNamespace(
+            command=command,
+            exit_code=0,
+            stdout="123\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "app.execution_engine.subagents.command_runner_agent.run_command",
+        _fake_run_command,
+    )
+
+    updated_state = agent.execute_step(
+        db=types.SimpleNamespace(),
+        request=request,
+        step=step,
+        state=state,
+    )
+
+    assert called["run_command"] == 1
+    assert len(updated_state.evidence.commands) == 1
+    assert updated_state.evidence.commands[0].exit_code == 0
+    # Constraint retry prompt was generated (3 calls total: inspection, initial plan, retry)
+    assert len(runtime.calls) == 3
 
 
 def test_command_runner_agent_rejects_cwd_outside_run_tree(

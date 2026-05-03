@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 from app.schemas.execution_plan import (
-    CheckpointDefinition,
     ExecutionBatch,
     ExecutionPlan,
 )
@@ -16,6 +15,8 @@ from app.schemas.recovery_assignment import (
     RecoveryAssignmentLLMOutput,
 )
 from app.services.execution_plan_patch_service import (
+    ExecutionPlanPatchServiceError,
+    insert_patch_batch_after_batch,
     normalize_execution_plan_terminal_invariants,
 )
 
@@ -75,15 +76,6 @@ def _dedupe_preserve_order(values: list[int]) -> list[int]:
     return result
 
 
-def _get_batch_or_raise(plan: ExecutionPlan, batch_id: str) -> ExecutionBatch:
-    batch = next((item for item in plan.execution_batches if item.batch_id == batch_id), None)
-    if batch is None:
-        raise RecoveryAssignmentCompilerError(
-            f"Batch '{batch_id}' not found in execution plan version {plan.plan_version}."
-        )
-    return batch
-
-
 def _get_batch_position_or_raise(plan: ExecutionPlan, batch_id: str) -> int:
     for index, batch in enumerate(plan.execution_batches):
         if batch.batch_id == batch_id:
@@ -102,186 +94,6 @@ def _remaining_batches_after_current(
     return list(plan.execution_batches[current_position + 1 :])
 
 
-def _build_patch_batch_internal_id(
-    *,
-    plan_version: int,
-    anchor_batch_index: int,
-    patch_index: int,
-) -> str:
-    return f"{plan_version}_{anchor_batch_index}_p{patch_index}"
-
-
-def _build_patch_batch_id(
-    *,
-    plan_version: int,
-    anchor_batch_index: int,
-    patch_index: int,
-) -> str:
-    return f"plan_{plan_version}_batch_{anchor_batch_index}_patch_{patch_index}"
-
-
-def _build_patch_checkpoint_id(
-    *,
-    plan_version: int,
-    anchor_batch_index: int,
-    patch_index: int,
-) -> str:
-    return f"checkpoint_plan_{plan_version}_batch_{anchor_batch_index}_patch_{patch_index}"
-
-
-def _build_patch_batch_name(
-    *,
-    plan_version: int,
-    anchor_batch_index: int,
-    patch_index: int,
-) -> str:
-    return f"Plan {plan_version} · Batch {anchor_batch_index}.{patch_index}"
-
-
-def _next_patch_index_for_anchor(
-    *,
-    plan: ExecutionPlan,
-    anchor_batch_index: int,
-) -> int:
-    patch_indexes = [
-        batch.patch_index
-        for batch in plan.execution_batches
-        if batch.is_patch_batch and batch.anchor_batch_index == anchor_batch_index
-    ]
-    patch_indexes = [value for value in patch_indexes if value is not None]
-    return (max(patch_indexes) if patch_indexes else 0) + 1
-
-
-def _insert_patch_batch_after_batch(
-    *,
-    plan: ExecutionPlan,
-    anchor_batch_id: str,
-    task_ids: list[int],
-    goal: str,
-    checkpoint_reason: str,
-    risk_level: str = "medium",
-) -> tuple[ExecutionPlan, ExecutionBatch]:
-    if not task_ids:
-        raise RecoveryAssignmentCompilerError(
-            "Patch batch insertion requires at least one task id."
-        )
-
-    anchor_batch = _get_batch_or_raise(plan, anchor_batch_id)
-    anchor_batch_index = anchor_batch.batch_index
-    patch_index = _next_patch_index_for_anchor(
-        plan=plan,
-        anchor_batch_index=anchor_batch_index,
-    )
-
-    was_anchor_final_batch = plan.execution_batches[-1].batch_id == anchor_batch_id
-
-    patch_checkpoint_id = _build_patch_checkpoint_id(
-        plan_version=plan.plan_version,
-        anchor_batch_index=anchor_batch_index,
-        patch_index=patch_index,
-    )
-
-    patch_batch = ExecutionBatch(
-        batch_internal_id=_build_patch_batch_internal_id(
-            plan_version=plan.plan_version,
-            anchor_batch_index=anchor_batch_index,
-            patch_index=patch_index,
-        ),
-        batch_id=_build_patch_batch_id(
-            plan_version=plan.plan_version,
-            anchor_batch_index=anchor_batch_index,
-            patch_index=patch_index,
-        ),
-        batch_index=anchor_batch_index,
-        plan_version=plan.plan_version,
-        name=_build_patch_batch_name(
-            plan_version=plan.plan_version,
-            anchor_batch_index=anchor_batch_index,
-            patch_index=patch_index,
-        ),
-        goal=goal,
-        task_ids=list(task_ids),
-        entry_conditions=["Recovery assignment patch batch inserted into the live plan."],
-        expected_outputs=["Recovery-assigned cluster executed and validated."],
-        risk_level=risk_level,
-        checkpoint_after=True,
-        checkpoint_id=patch_checkpoint_id,
-        checkpoint_reason=checkpoint_reason,
-        is_patch_batch=True,
-        anchor_batch_index=anchor_batch_index,
-        patch_index=patch_index,
-    )
-
-    patch_evaluation_focus = ["functional_coverage", "dependency_validation"]
-    if was_anchor_final_batch and "stage_closure" not in patch_evaluation_focus:
-        patch_evaluation_focus.append("stage_closure")
-
-    patch_checkpoint = CheckpointDefinition(
-        checkpoint_id=patch_checkpoint_id,
-        name=f"Patch checkpoint {anchor_batch_index}.{patch_index}",
-        reason=checkpoint_reason,
-        after_batch_id=patch_batch.batch_id,
-        evaluation_goal="Evaluate whether the recovery-assigned cluster was integrated safely.",
-        evaluation_focus=patch_evaluation_focus,
-        can_introduce_new_tasks=True,
-        can_resequence_remaining_work=True,
-    )
-
-    anchor_position = _get_batch_position_or_raise(plan, anchor_batch_id)
-    insert_position = anchor_position + 1
-    while (
-        insert_position < len(plan.execution_batches)
-        and plan.execution_batches[insert_position].is_patch_batch
-        and plan.execution_batches[insert_position].anchor_batch_index == anchor_batch_index
-    ):
-        insert_position += 1
-
-    patched_batches = list(plan.execution_batches)
-    patched_batches.insert(insert_position, patch_batch)
-
-    patched_checkpoints: list[CheckpointDefinition] = []
-    for checkpoint in plan.checkpoints:
-        if (
-            was_anchor_final_batch
-            and checkpoint.checkpoint_id == anchor_batch.checkpoint_id
-            and "stage_closure" in checkpoint.evaluation_focus
-        ):
-            patched_checkpoints.append(
-                CheckpointDefinition(
-                    checkpoint_id=checkpoint.checkpoint_id,
-                    name=checkpoint.name,
-                    reason=checkpoint.reason,
-                    after_batch_id=checkpoint.after_batch_id,
-                    evaluation_goal=checkpoint.evaluation_goal,
-                    evaluation_focus=[
-                        item for item in checkpoint.evaluation_focus if item != "stage_closure"
-                    ],
-                    can_introduce_new_tasks=checkpoint.can_introduce_new_tasks,
-                    can_resequence_remaining_work=checkpoint.can_resequence_remaining_work,
-                )
-            )
-        else:
-            patched_checkpoints.append(checkpoint)
-
-    patched_checkpoints.append(patch_checkpoint)
-
-    patched_plan = ExecutionPlan(
-        plan_version=plan.plan_version,
-        supersedes_plan_version=plan.supersedes_plan_version,
-        planning_scope=plan.planning_scope,
-        global_goal=plan.global_goal,
-        execution_batches=patched_batches,
-        checkpoints=patched_checkpoints,
-        ready_task_ids=list(plan.ready_task_ids),
-        blocked_task_ids=list(plan.blocked_task_ids),
-        inferred_dependencies=list(plan.inferred_dependencies),
-        sequencing_rationale=plan.sequencing_rationale,
-        uncertainties=list(plan.uncertainties),
-    )
-
-    return patched_plan, patch_batch
-
-
 def _append_cluster_after_current_tail(
     *,
     plan: ExecutionPlan,
@@ -290,13 +102,18 @@ def _append_cluster_after_current_tail(
     checkpoint_reason: str,
 ) -> tuple[ExecutionPlan, ExecutionBatch]:
     final_batch = plan.execution_batches[-1]
-    return _insert_patch_batch_after_batch(
-        plan=plan,
-        anchor_batch_id=final_batch.batch_id,
-        task_ids=task_ids,
-        goal=goal,
-        checkpoint_reason=checkpoint_reason,
-    )
+    try:
+        return insert_patch_batch_after_batch(
+            plan=plan,
+            anchor_batch_id=final_batch.batch_id,
+            task_ids=task_ids,
+            goal=goal,
+            checkpoint_reason=checkpoint_reason,
+        )
+    except ExecutionPlanPatchServiceError as exc:
+        raise RecoveryAssignmentCompilerError(
+            f"Failed to append patch batch at plan tail: {exc}"
+        ) from exc
 
 
 def _replace_batch_in_plan(
@@ -632,13 +449,18 @@ def _materialize_cluster_as_patch_after_batch(
     cluster: AssignmentClusterProposal,
     anchor_batch_id: str,
 ) -> tuple[ExecutionPlan, CompiledClusterAssignment]:
-    patched_plan, created_patch_batch = _insert_patch_batch_after_batch(
-        plan=plan,
-        anchor_batch_id=anchor_batch_id,
-        task_ids=list(cluster.task_ids_in_execution_order),
-        goal=_cluster_goal(cluster),
-        checkpoint_reason=_cluster_checkpoint_reason(cluster),
-    )
+    try:
+        patched_plan, created_patch_batch = insert_patch_batch_after_batch(
+            plan=plan,
+            anchor_batch_id=anchor_batch_id,
+            task_ids=list(cluster.task_ids_in_execution_order),
+            goal=_cluster_goal(cluster),
+            checkpoint_reason=_cluster_checkpoint_reason(cluster),
+        )
+    except ExecutionPlanPatchServiceError as exc:
+        raise RecoveryAssignmentCompilerError(
+            f"Failed to insert patch batch for cluster '{cluster.cluster_id}': {exc}"
+        ) from exc
 
     compiled_assignment = CompiledClusterAssignment(
         cluster_id=cluster.cluster_id,

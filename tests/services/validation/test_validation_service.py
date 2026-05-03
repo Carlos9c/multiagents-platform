@@ -50,7 +50,6 @@ class _FakeValidator:
             followup_validation_required=False,
             recommended_next_validator_keys=[],
             partial_validation_summary=None,
-            partial_reason="work_missing" if self.decision == "partial" else None,
             metadata={"validator_key": self.validator_key},
         )
 
@@ -172,7 +171,6 @@ def test_validate_execution_result_runs_selected_validators_in_order(monkeypatch
         followup_validation_required=False,
         recommended_next_validator_keys=[],
         partial_validation_summary="Partial validation summary",
-        partial_reason="work_missing",
         metadata={"aggregated": True},
     )
 
@@ -213,7 +211,6 @@ def test_validate_execution_result_runs_selected_validators_in_order(monkeypatch
         followup_validation_required=False,
         recommended_next_validator_keys=[],
         partial_validation_summary=None,
-        partial_reason="work_missing",
         metadata={"validator_key": "command_runner_agent_validator"},
     )
 

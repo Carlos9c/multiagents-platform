@@ -6,6 +6,7 @@ from typing import Any, Literal
 from sqlalchemy.orm import Session
 
 from app.models.project import Project
+from app.models.task import Task
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.post_batch import PostBatchTaskRunSummary
 from app.schemas.post_batch_intent import ResolvedPostBatchIntent
@@ -41,6 +42,23 @@ class LivePlanMutationResult:
     requires_replan: bool
     notes: list[str]
     metadata: dict[str, Any]
+
+
+def _sync_sequence_order_from_plan(
+    db: Session,
+    *,
+    plan: ExecutionPlan,
+    task_ids_to_sync: set[int],
+) -> None:
+    for position, batch in enumerate(plan.execution_batches, start=1):
+        for task_id in batch.task_ids:
+            if task_id not in task_ids_to_sync:
+                continue
+            task = db.get(Task, task_id)
+            if task is not None:
+                task.sequence_order = position
+                db.add(task)
+    db.flush()
 
 
 def _read_attr(obj: Any, name: str, default: Any = None) -> Any:
@@ -188,6 +206,12 @@ def mutate_live_plan(
             plan=compiled_assignment.patched_execution_plan
         )
 
+        _sync_sequence_order_from_plan(
+            db=db,
+            plan=patched_execution_plan,
+            task_ids_to_sync=set(compiled_assignment.assigned_task_ids),
+        )
+
         persist_patched_execution_plan(
             db=db,
             project_id=project.id,
@@ -265,7 +289,7 @@ def mutate_live_plan(
             created_recovery_task_ids=created_recovery_task_ids,
             evaluation_decision=evaluation_decision,
         ):
-            patched_execution_plan = insert_patch_batch_after_batch(
+            patched_execution_plan, _ = insert_patch_batch_after_batch(
                 plan=plan,
                 anchor_batch_id=batch.batch_id,
                 task_ids=created_recovery_task_ids,
@@ -275,8 +299,10 @@ def mutate_live_plan(
                 ),
             )
 
-            patched_execution_plan = normalize_execution_plan_terminal_invariants(
-                plan=patched_execution_plan
+            _sync_sequence_order_from_plan(
+                db=db,
+                plan=patched_execution_plan,
+                task_ids_to_sync=set(created_recovery_task_ids),
             )
 
             persist_patched_execution_plan(

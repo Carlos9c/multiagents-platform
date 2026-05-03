@@ -15,6 +15,7 @@ from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 from app.services.validation.base import BaseTaskValidator
 from app.services.validation.contracts import (
+    PartialAnnotation,
     TaskValidationInput,
     ValidationFinding,
     ValidationResult,
@@ -72,21 +73,19 @@ Critical rules:
 - Prefer the terminal/latest successful verification state over intermediate failed attempts when the later evidence clearly supersedes the earlier failure.
 
 Partial decision rules (apply ONLY when decision is 'partial'):
-You MUST set partial_reason to one of:
-  - "files_rejected": command evidence directly proves that a specific file is syntactically invalid,
-    fails to compile, or causes test failures. ONLY reject files you have direct execution proof for.
-    List those files in rejected_files (relative paths). rejected_files MUST be non-empty.
-  - "work_missing": verification evidence is insufficient or incomplete, but no specific file is
-    identified as wrong. Set missing_work_summary to describe what verification is missing.
-  - "files_rejected_and_work_missing": both apply — direct execution failure proves specific files
-    are broken AND verification coverage is incomplete.
+When decision is 'partial', you MUST populate partial_annotations with one or more entries
+describing each specific gap in the verification coverage. Each annotation requires:
+  - file_path: the relative path of the file that has a verification gap (exactly as named in command
+    output, e.g. traceback path, syntax error path), or null if the gap is not specific to a single file
+  - issue_summary: a concrete description of what the command evidence showed is incomplete or wrong
+  - required_action: exactly what verification or fix must be done to close this gap — be specific
+    and actionable, since recovery will use this to generate a precise follow-up task
 
-Command runner file rejection rules:
-- You may ONLY reject a file if command output directly implicates it (e.g., syntax error in
-  path/to/file.py, compilation failure mentioning a file, test failure with a specific traceback).
-- Do NOT reject files based on code review reasoning — that is the code_change_agent_validator's job.
-- If the command output does not directly name a file, do NOT add it to rejected_files.
-- If decision is not 'partial', leave rejected_files empty and partial_reason as null.
+Rules for partial_annotations:
+- Only annotate gaps supported by direct command evidence (error messages, test failures, tracebacks).
+- Do not annotate speculatively — only document what the command output concretely shows.
+- Do not use rejected_files — use partial_annotations to describe broken files instead.
+- If decision is not 'partial', leave partial_annotations empty.
 
 Return ONLY JSON matching the provided schema.
 """.strip()
@@ -100,6 +99,12 @@ class CommandRunnerAgentValidationFinding(BaseModel):
     file_paths: list[str] = Field(default_factory=list)
 
 
+class PartialAnnotationLLMOutput(BaseModel):
+    file_path: str | None = None
+    issue_summary: str
+    required_action: str
+
+
 class CommandRunnerAgentValidationLLMOutput(BaseModel):
     decision: Literal["completed", "partial", "failed", "manual_review"]
     summary: str
@@ -109,11 +114,7 @@ class CommandRunnerAgentValidationLLMOutput(BaseModel):
     findings: list[CommandRunnerAgentValidationFinding] = Field(default_factory=list)
     manual_review_required: bool = False
     reasoning_notes: list[str] = Field(default_factory=list)
-    rejected_files: list[str] = Field(default_factory=list)
-    partial_reason: (
-        Literal["files_rejected", "work_missing", "files_rejected_and_work_missing"] | None
-    ) = None
-    missing_work_summary: str | None = None
+    partial_annotations: list[PartialAnnotationLLMOutput] = Field(default_factory=list)
 
 
 class CommandRunnerAgentValidatorError(Exception):
@@ -418,61 +419,27 @@ def _normalize_llm_output_for_terminal_success(
         findings=findings,
         manual_review_required=False,
         reasoning_notes=reasoning_notes,
-        rejected_files=[],
-        partial_reason=None,
-        missing_work_summary=None,
+        partial_annotations=[],
     )
 
 
-def _normalize_partial_promotion_fields(
+def _normalize_partial_fields(
     llm_output: CommandRunnerAgentValidationLLMOutput,
 ) -> CommandRunnerAgentValidationLLMOutput:
-    """Ensure partial promotion fields are consistent with the decision."""
-    decision = llm_output.decision
-    rejected_files = list(llm_output.rejected_files)
-    partial_reason = llm_output.partial_reason
-    missing_work_summary = llm_output.missing_work_summary
-
-    if decision != "partial":
-        rejected_files = []
-        partial_reason = None
-        missing_work_summary = None
-    else:
-        has_rejected = bool(rejected_files)
-        has_missing_work = bool(missing_work_summary or llm_output.missing_scope)
-        if partial_reason is None:
-            if has_rejected and has_missing_work:
-                partial_reason = "files_rejected_and_work_missing"
-            elif has_rejected:
-                partial_reason = "files_rejected"
-            else:
-                partial_reason = "work_missing"
-        elif (
-            partial_reason in {"files_rejected", "files_rejected_and_work_missing"}
-            and not has_rejected
-        ):
-            partial_reason = "work_missing"
-
-    if (
-        rejected_files == list(llm_output.rejected_files)
-        and partial_reason == llm_output.partial_reason
-        and missing_work_summary == llm_output.missing_work_summary
-    ):
-        return llm_output
-
-    return CommandRunnerAgentValidationLLMOutput(
-        decision=decision,
-        summary=llm_output.summary,
-        validated_scope=llm_output.validated_scope,
-        missing_scope=llm_output.missing_scope,
-        blockers=list(llm_output.blockers),
-        findings=list(llm_output.findings),
-        manual_review_required=llm_output.manual_review_required,
-        reasoning_notes=list(llm_output.reasoning_notes),
-        rejected_files=rejected_files,
-        partial_reason=partial_reason,
-        missing_work_summary=missing_work_summary,
-    )
+    """Ensure partial_annotations is empty when decision is not 'partial'."""
+    if llm_output.decision != "partial" and llm_output.partial_annotations:
+        return CommandRunnerAgentValidationLLMOutput(
+            decision=llm_output.decision,
+            summary=llm_output.summary,
+            validated_scope=llm_output.validated_scope,
+            missing_scope=llm_output.missing_scope,
+            blockers=list(llm_output.blockers),
+            findings=list(llm_output.findings),
+            manual_review_required=llm_output.manual_review_required,
+            reasoning_notes=list(llm_output.reasoning_notes),
+            partial_annotations=[],
+        )
+    return llm_output
 
 
 def _build_user_prompt(
@@ -622,7 +589,7 @@ class CommandRunnerAgentValidator(BaseTaskValidator):
             validation_input=validation_input,
             command_items=command_items,
         )
-        llm_output = _normalize_partial_promotion_fields(llm_output)
+        llm_output = _normalize_partial_fields(llm_output)
 
         validated_evidence_ids = [
             _build_evidence_ref(item, index) for index, item in enumerate(producer_items)
@@ -657,9 +624,14 @@ class CommandRunnerAgentValidator(BaseTaskValidator):
             followup_validation_required=False,
             recommended_next_validator_keys=[],
             partial_validation_summary=None,
-            rejected_files=list(llm_output.rejected_files),
-            partial_reason=llm_output.partial_reason,
-            missing_work_summary=llm_output.missing_work_summary,
+            partial_annotations=[
+                PartialAnnotation(
+                    file_path=a.file_path,
+                    issue_summary=a.issue_summary,
+                    required_action=a.required_action,
+                )
+                for a in llm_output.partial_annotations
+            ],
             metadata={
                 "producer_key": self.producer_key,
                 "producer_evidence_count": len(producer_items),

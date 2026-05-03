@@ -250,7 +250,7 @@ def insert_patch_batch_after_batch(
     entry_conditions: list[str] | None = None,
     expected_outputs: list[str] | None = None,
     risk_level: str = "medium",
-) -> ExecutionPlan:
+) -> tuple[ExecutionPlan, ExecutionBatch]:
     if not task_ids:
         raise ExecutionPlanPatchServiceError("Patch batch insertion requires at least one task_id.")
 
@@ -352,7 +352,11 @@ def insert_patch_batch_after_batch(
         uncertainties=list(plan.uncertainties),
     )
 
-    return normalize_execution_plan_terminal_invariants(plan=provisional_plan)
+    normalized_plan = normalize_execution_plan_terminal_invariants(plan=provisional_plan)
+    normalized_patch_batch = next(
+        b for b in normalized_plan.execution_batches if b.batch_id == patch_batch.batch_id
+    )
+    return normalized_plan, normalized_patch_batch
 
 
 def persist_patched_execution_plan(

@@ -162,5 +162,11 @@ class Task(Base):
         default=False,
     )
 
+    followup_depth: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
     project = relationship("Project", backref="tasks")
     parent_task = relationship("Task", remote_side=[id], backref="child_tasks")

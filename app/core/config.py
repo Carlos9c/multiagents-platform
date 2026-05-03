@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     execution_engine_backend: str = "orchestrated"
     execution_engine_model: str | None = None
     execution_engine_max_steps: int = 8
-    execution_engine_max_agent_calls: int = 6
+    execution_engine_max_agent_calls: int = 8
     execution_engine_max_tool_calls: int = 12
     execution_engine_max_command_runs: int = 4
     execution_engine_max_repair_attempts: int = 2

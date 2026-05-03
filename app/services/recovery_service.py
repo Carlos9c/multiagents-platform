@@ -106,6 +106,7 @@ def _build_created_task_from_recovery(
     task_create,
     sequence_order: int,
     is_recovery_task: bool = False,
+    followup_depth: int = 0,
 ) -> Task:
     return Task(
         project_id=project_id,
@@ -130,6 +131,7 @@ def _build_created_task_from_recovery(
         is_blocked=False,
         blocking_reason=None,
         is_recovery_task=is_recovery_task,
+        followup_depth=followup_depth,
     )
 
 
@@ -279,7 +281,18 @@ def materialize_recovery_decision(
         )
         effective_action = "manual_review"
 
-    original_status = source_task.status
+    # Depth cap: followup chains are limited to 2 levels (original → followup_1 → followup_2).
+    # A third followup would indicate the agent keeps failing to close the same gap; escalate.
+    source_followup_depth = getattr(source_task, "followup_depth", 0) or 0
+    if source_followup_depth >= 2 and effective_action == "insert_followup":
+        logger.warning(
+            "recovery_followup_depth_cap task_id=%s source_run_id=%s followup_depth=%s — "
+            "maximum followup chain depth reached, forcing manual_review",
+            source_task.id,
+            decision.source_run_id,
+            source_followup_depth,
+        )
+        effective_action = "manual_review"
 
     if effective_action == "manual_review":
         return []
@@ -295,6 +308,8 @@ def materialize_recovery_decision(
     sibling_count = db.query(Task).filter(Task.parent_task_id == parent_task_id).count()
     next_sequence_order = sibling_count + 1
 
+    new_followup_depth = (source_followup_depth + 1) if effective_action == "insert_followup" else 0
+
     created_tasks: list[Task] = []
     for task_create in decision.created_tasks:
         created_task = _build_created_task_from_recovery(
@@ -303,6 +318,7 @@ def materialize_recovery_decision(
             task_create=task_create,
             sequence_order=next_sequence_order,
             is_recovery_task=(effective_action == "reatomize"),
+            followup_depth=new_followup_depth,
         )
         next_sequence_order += 1
         db.add(created_task)
