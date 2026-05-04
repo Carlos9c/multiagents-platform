@@ -885,6 +885,43 @@ def _normalize_decision(
             extra_risk_flag="finish_without_any_completed_step",
         )
 
+    # Guard: if the last command_runner_agent verification failed with markers that indicate
+    # a repairable repository gap (ImportError, ModuleNotFoundError, collection error, etc.),
+    # block finish so the orchestrator is forced to call code_change_agent for a repair pass.
+    # This prevents the LLM from rationalizing test import failures as "environment issues"
+    # and finishing prematurely when a repository change could actually close the gap.
+    # Narrowly scoped to command_runner_agent failures only — context_selection and
+    # code_change failures are handled separately by the existing step-failure logic.
+    # _normalize_decision is only reached when the budget is not exhausted, so blocking
+    # finish here is safe — _maybe_build_forced_terminal_decision handles budget exits.
+    if decision.decision_type == DECISION_FINISH:
+        _last_attempted = _last_attempted_subagent_name(runtime_state)
+        if _last_attempted == "command_runner_agent":
+            _latest_cmd = _latest_command_execution(state)
+            if (
+                _latest_cmd is not None
+                and not _command_succeeded(_latest_cmd)
+                and _failed_verification_is_repairable_by_repo_changes(
+                    request=request,
+                    resolution_state=state,
+                    command=_latest_cmd,
+                )
+            ):
+                return _invalidate_decision(
+                    decision,
+                    rationale=(
+                        "The last verification command failed with output that is programmatically "
+                        "identified as repairable by repository changes (e.g. ImportError, "
+                        "ModuleNotFoundError, collection error). Finishing now would skip the "
+                        "required repair pass. Call code_change_agent to address the gap."
+                    ),
+                    expected_outcome=(
+                        "Retry orchestration by calling code_change_agent to repair the "
+                        "repository gap indicated by the last failed verification command."
+                    ),
+                    extra_risk_flag="finish_blocked_by_repairable_verification_gap",
+                )
+
     return decision
 
 

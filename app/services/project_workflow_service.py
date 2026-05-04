@@ -618,6 +618,8 @@ def _run_execution_iteration(
             continue
 
         if resolved_intent_type in {"assign", "resequence"}:
+            if patched_execution_plan is not None:
+                current_plan = patched_execution_plan
             resulting_status = "execution_in_progress"
             break
 
@@ -852,8 +854,40 @@ def run_project_workflow(
         final_status = resulting_status
 
     else:
+        # The workflow exhausted all allowed iterations without explicit closure or manual-review
+        # signal. Force manual review and append a synthetic termination iteration so that
+        # ProjectWorkflowResult's invariant ("manual_review_required=True requires the last
+        # iteration to have requires_manual_review=True") is satisfied.
         manual_review_required = True
         final_status = "awaiting_manual_review"
+        termination_iteration_number = len(iterations) + 1
+        termination_plan_version = plan_version or 1
+        iterations.append(
+            WorkflowIterationSummary(
+                iteration_number=termination_iteration_number,
+                plan_version=termination_plan_version,
+                starting_plan_version=termination_plan_version,
+                ending_plan_version=termination_plan_version,
+                batch_ids_processed=[],
+                blocked_batch_ids_after_iteration=[],
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
+                requires_manual_review=True,
+                reopened_finalization=False,
+                used_patched_plan=False,
+                decision_signals=["workflow_iteration_limit_reached"],
+                notes=(
+                    f"Workflow iteration limit ({max_workflow_iterations}) reached without "
+                    "explicit stage closure or manual-review signal. Manual review is required."
+                ),
+            )
+        )
 
     if execution_plan_generated:
         try:

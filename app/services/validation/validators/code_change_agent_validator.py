@@ -118,6 +118,19 @@ Strict boundary rules:
 - If the code clearly contradicts the task objective or acceptance criteria, choose failed.
 - If the code materially satisfies the task objective and acceptance criteria, choose completed.
 
+Default-to-completed rule when verification evidence is present (burden of proof):
+- When supplemental non-code verification evidence shows a terminal command succeeded
+  (exit_code=0) and its goal covers the core task objective, your default decision is
+  "completed" for the code contribution.
+- You may only override this default to "partial" if you can identify a SPECIFIC structural
+  gap directly visible in the file contents: a missing function, a wrong implementation, an
+  absent integration point explicitly required by the acceptance criteria.
+- "The test might not cover everything" or "additional functionality could be added" are NOT
+  grounds for "partial" when the terminal verification passed. Do not declare partial to be
+  cautious when the evidence does not concretely support it.
+- Only annotate partial_annotations for gaps you can locate in the actual file contents or
+  acceptance criteria. Do not annotate gaps you infer might exist without direct evidence.
+
 Partial decision rules (apply ONLY when decision is 'partial'):
 When decision is 'partial', you MUST populate partial_annotations with one or more entries
 describing each specific gap that prevents the task from being complete. Each annotation requires:

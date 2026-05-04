@@ -262,8 +262,23 @@ def _build_related_file_context(
     workspace_root: str,
     source_root: str | None,
     request: ExecutionRequest,
+    exclude_paths: set[str] | None = None,
     max_files: int = 12,
 ) -> tuple[str, list[tuple[str, str | None]]]:
+    preloaded = request.context.preloaded_dependency_files
+
+    parts: list[str] = []
+    files_read: list[tuple[str, str | None]] = []
+
+    for rel_path, content in preloaded.items():
+        if exclude_paths and rel_path in exclude_paths:
+            continue
+        parts.append(f"- path: {rel_path}")
+        parts.append("  source: preloaded_dependency")
+        parts.append("  content:")
+        parts.append(content)
+        files_read.append((rel_path, "preloaded_dependency"))
+
     candidates: list[str] = []
 
     candidates.extend(request.context.relevant_files)
@@ -274,7 +289,9 @@ def _build_related_file_context(
             candidates.extend(item.changed_files)
             candidates.extend(item.files_read)
 
-    seen: set[str] = set()
+    seen: set[str] = set(preloaded.keys())
+    if exclude_paths:
+        seen.update(exclude_paths)
     selected: list[str] = []
     for path in candidates:
         if not path or path in seen:
@@ -284,11 +301,8 @@ def _build_related_file_context(
 
     selected = selected[:max_files]
 
-    if not selected:
+    if not selected and not parts:
         return "[no related file content loaded]", []
-
-    parts: list[str] = []
-    files_read: list[tuple[str, str | None]] = []
 
     for rel_path in selected:
         parts.append(f"- path: {rel_path}")
@@ -323,6 +337,49 @@ def _build_related_file_context(
     return "\n".join(parts), files_read
 
 
+def _build_current_workspace_state(
+    *,
+    workspace_root: str,
+    state: ResolutionState,
+) -> tuple[str, list[str]]:
+    """
+    Load the current content of every file written during this execution run.
+    Returns (formatted_section, list_of_loaded_paths).
+
+    This is the authoritative ground truth for repair passes: the model sees exactly
+    what it wrote in previous attempts rather than reconstructing file contents from memory.
+    """
+    seen: set[str] = set()
+    unique_paths: list[str] = []
+    for cf in state.evidence.changed_files:
+        if cf.path not in seen:
+            seen.add(cf.path)
+            unique_paths.append(cf.path)
+
+    if not unique_paths:
+        return "[no files written in this execution run yet]", []
+
+    parts: list[str] = []
+    loaded_paths: list[str] = []
+    root = Path(workspace_root).resolve()
+
+    for rel_path in unique_paths:
+        full_path = (root / rel_path).resolve()
+        parts.append(f"- path: {rel_path}")
+        if full_path.is_file():
+            try:
+                content = read_text_file(str(full_path))
+                parts.append("  content:")
+                parts.append(content)
+                loaded_paths.append(rel_path)
+            except Exception as exc:
+                parts.append(f"  content_error: {str(exc)}")
+        else:
+            parts.append("  content: [not found in workspace overlay]")
+
+    return "\n".join(parts), loaded_paths
+
+
 def _build_user_prompt(
     request: ExecutionRequest,
     step: ExecutionStep,
@@ -334,10 +391,15 @@ def _build_user_prompt(
         workspace_root=request.context.workspace_path,
         source_root=source_root,
     )
+    current_workspace_state, workspace_state_paths = _build_current_workspace_state(
+        workspace_root=request.context.workspace_path,
+        state=state,
+    )
     related_file_context, files_read = _build_related_file_context(
         workspace_root=request.context.workspace_path,
         source_root=source_root,
         request=request,
+        exclude_paths=set(workspace_state_paths),
     )
 
     project_context_summary = _build_project_context_summary(request)
@@ -375,7 +437,10 @@ Historical task context:
 Repository inventory:
 {workspace_inventory}
 
-Related file content:
+Current workspace state (files written in this run — authoritative current content for repair passes):
+{current_workspace_state}
+
+Related file content (historical context and source baseline):
 {related_file_context}
 
 Current orchestration state:
@@ -404,6 +469,8 @@ Important:
 - The listed files are initial context, not a hard boundary.
 - Prefer completeness and coherence over artificial file limits.
 - Keep the implementation conservative and scoped.
+- When current workspace state is non-empty, treat it as the ground truth for existing file
+  contents: do not reconstruct or reinvent what those files contain.
 """.strip()
 
     return prompt, files_read

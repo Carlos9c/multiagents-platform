@@ -235,6 +235,14 @@ Materializa las decisiones de recovery sobre tareas fallidas/parciales.
 | `insert_followup` | `followed_up` | `False` | Tarea fuente marcada terminal; scope residual delegado |
 | `manual_review` | sin cambio (`partial`) | — | No crea tareas |
 
+**Guards de recovery (`materialize_recovery_decision`):**
+
+| Guard | Condición de disparo | Efecto |
+|---|---|---|
+| `recovery_anti_cascade` | `is_recovery_task=True` + acción `reatomize` | Fuerza `manual_review` |
+| `recovery_followup_depth_cap` | `followup_depth >= 2` + acción `insert_followup` | Fuerza `manual_review` |
+| `recovery_repeated_failure_cap` | ≥ 1 sibling recovery ya fallado/partial + acción `insert_followup` | Fuerza `manual_review` |
+
 **`RecoveryContext`** acumula a través del pipeline: `recovery_decisions`, `recovery_created_tasks`, `open_issues`.
 
 ### 3. Post-Batch Decision Service (`app/services/post_batch_decision_service.py`)
@@ -423,6 +431,7 @@ Cada servicio que llama al LLM tiene su propio **client** (`*_client.py`) que en
 | `executor_type` | str | `pending_engine_routing`, etc. |
 | `status` | str | Ver tabla de statuses |
 | `is_recovery_task` | bool | Si fue creada por recovery (bloquea reatomize en cascada) |
+| `followup_depth` | int | Profundidad en la cadena de followup (0 = tarea original) |
 | `is_blocked` | bool | Bloqueo manual |
 | `blocking_reason` | str \| None | Razón del bloqueo |
 | `sequence_order` | int \| None | Orden de secuencia dentro del padre |
@@ -583,7 +592,7 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**237 tests — todos passing.**
+**239 tests — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
@@ -605,15 +614,33 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 
 ## Cambios recientes
 
-### Status `followed_up` — nuevo estado terminal
+### Retry de timeouts LLM (`services/llm/openai_provider.py`)
 
-La acción `insert_followup` del sistema de recovery ahora transiciona la tarea fuente al status `followed_up` en lugar de dejarla en `partial`. Esto cierra el único path que dejaba tareas en estado ambiguo indefinidamente.
+`APITimeoutError` se incluye ahora en el loop de reintentos del provider, junto con `InternalServerError` (5xx). El sistema reintenta hasta 2 veces (esperas de 2s y 4s) antes de propagar el error. Antes, un timeout transitorio propagaba directamente como fallo de tarea, desencadenando recovery innecesaria y consumiendo iteraciones del workflow. Con este fix, los timeouts transitorios se absorben a nivel de infraestructura sin afectar al estado de la tarea.
 
-Impacto:
-- `TASK_STATUS_FOLLOWED_UP = "followed_up"` añadido a `TERMINAL_TASK_STATUSES` y `VALID_TASK_STATUSES`
-- `insert_followup` diferenciado de `reatomize`: las nuevas tareas llevan `is_recovery_task=False`
-- Lógica de cierre de padre actualizada: padre → `completed` cuando todos los hijos ∈ `{completed, reatomized, followed_up}`
-- Sin migración de Alembic requerida (`status` es `String(50)` sin constraints de enum a nivel DB)
+### Contexto de archivos para tareas de recovery
+
+Las tareas de recovery (`is_recovery_task=True` o `followup_depth > 0`) ejecutan en contexto degradado: el `context_selection_agent` tiende a seleccionar las mismas tareas históricas que fallaron, sin acceso directo a los archivos que deberían editar.
+
+**Tres mejoras implementadas:**
+
+1. **Sibling file hints** (`request_adapter.py`): `_load_recovery_source_file_hints` recopila los `files_read` de los runs hermanos fallados/parciales y los inyecta como `preloaded_dependency_files`. Los archivos de las dependencias de los runs fallados llegan al `code_change_agent` sin pasar por el selector de contexto.
+
+2. **Enriquecimiento del modelo de recovery** (`recovery_service.py`, `recovery_client.py`): el prompt de `call_recovery_model` incluye el contenido de hasta 3 archivos fuente no-test leídos durante el run fallado. El decisor tiene visibilidad de la API real antes de proponer qué tareas crear.
+
+3. **Anti-repetición cap** (`recovery_service.py`): `recovery_repeated_failure_cap` escala a `manual_review` cuando hay ≥ 1 sibling recovery ya fallado/parcial (antes el umbral era ≥ 2). La cadena de followups queda acotada a: tarea original → un followup → `manual_review`.
+
+### Campo `followup_depth` en Task
+
+Nuevo campo `followup_depth: int` en el modelo `Task` (migración Alembic `d4e5f6a7b8c9`). Registra la profundidad de la tarea en su cadena de followup (0 = tarea original, 1 = primer followup, etc.).
+
+`recovery_followup_depth_cap`: si `followup_depth >= 2` y la acción propuesta es `insert_followup`, el sistema fuerza `manual_review`. El cap evita cadenas de micro-followups que agotan el presupuesto de iteraciones del workflow.
+
+### Reparación de ceguera contextual en `code_change_agent` (`subagents/code_change_agent.py`)
+
+En los pases de reparación (repair passes), el agente solo tenía acceso a los archivos del contexto histórico seleccionado, no a los archivos que él mismo había escrito en intentos anteriores del mismo run. El resultado era que el agente reconstruía el contenido de los archivos de memoria, acumulando drift respecto al estado real del workspace.
+
+**Fix:** nuevo section "Current workspace state" en el prompt de `code_change_agent`. Antes de construir el related file context, se cargan los contenidos actuales de todos los archivos presentes en `state.evidence.changed_files` desde el overlay del workspace. El parámetro `exclude_paths` evita duplicar ese contenido en la sección "Related file content". Los pases de reparación ahora parten del estado real, no de una reconstrucción especulativa.
 
 ### Corrección de robustez en live plan mutation
 
@@ -633,42 +660,49 @@ Impacto:
 
 Fix: `model_construct` para el plan provisional. La normalización produce el plan final válido con `stage_closure` garantizado.
 
+### Status `followed_up` — estado terminal de followup
+
+La acción `insert_followup` del sistema de recovery transiciona la tarea fuente al status `followed_up` en lugar de dejarla en `partial`. Cierra el path que dejaba tareas en estado ambiguo indefinidamente.
+
+- `TASK_STATUS_FOLLOWED_UP = "followed_up"` añadido a `TERMINAL_TASK_STATUSES` y `VALID_TASK_STATUSES`
+- Lógica de cierre de padre: padre → `completed` cuando todos los hijos ∈ `{completed, reatomized, followed_up}`
+
 ---
 
 ## Próximos pasos propuestos
 
 ### Alta prioridad
 
-**1. Test de integración del escalado defensivo `resequence_deferred → assign`**
+**1. Precisión del validador en decisiones parciales**
+El `command_runner_agent_validator` puede declarar `partial` incluso cuando el terminal test tiene exit_code=0, si el LLM detecta scope no cubierto en los criterios de aceptación. Esta sobre-generación de decisiones parciales alimenta cadenas de followups que terminan en `recovery_followup_depth_cap`. El fix en `_normalize_llm_output_for_terminal_success` ya eleva a `completed` cuando el terminal test es limpio y la tarea parece implementación ejecutable, pero la lista de markers de `_task_looks_like_executable_implementation` es incompleta (no cubre persistence, storage, data). Ampliar esa lista o relajar el criterio de normalización para tareas con tests pasando.
+
+**2. Test de integración del escalado defensivo `resequence_deferred → assign`**
 El path de fallback introducido en el fix de robustez no tiene cobertura de test directa. Añadir un test en `test_post_batch_service.py` que monkeypatchee `mutate_live_plan` para devolver `resequence_deferred` con recovery tasks y verifique que el escalado a `assign` se ejecuta y produce un plan válido.
 
-**2. Test explícito del caso single-batch con patch**
-El fix de `model_construct` cubre un escenario real: plan de un solo batch donde el patch batch se convierte en el final. Añadir test en `test_execution_plan_patch_service.py` que ejercite este path directamente.
-
-**3. Observabilidad estructurada del post-batch pipeline**
-El sistema ya emite `logger.warning` en el escalado defensivo. Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`) de forma consistente en todo el pipeline para facilitar correlación en producción.
+**3. Observabilidad estructurada del pipeline completo**
+El sistema ya emite `logger.warning` en cada guard de recovery y en el escalado defensivo. Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`) de forma consistente en todo el pipeline para facilitar correlación en producción sin necesidad de leer artifacts.
 
 ### Media prioridad
 
-**4. Enriquecimiento de `StageEvaluationInput` con datos de run**
-El `evaluation_service` juzga el outcome de un batch pero no tiene acceso al estado de los runs individuales. Añadir un resumen de run-level a la entrada del evaluador para producir evaluaciones más precisas, especialmente en batches con mezcla de éxito parcial y fallo.
+**4. Optimización del tamaño de prompt en `code_change_agent`**
+La inyección del workspace state puede generar prompts de 70-80k caracteres en proyectos con historial extenso, aumentando la probabilidad de timeout. Añadir un presupuesto de caracteres configurable para las secciones de contenido de archivos (workspace state + related file context), truncando por tamaño antes de insertar en el prompt.
 
-**5. Telemetría estructurada en recovery assignment compiler**
+**5. Enriquecimiento de `StageEvaluationInput` con datos de run**
+El `evaluation_service` juzga el outcome de un batch pero no tiene acceso al estado de los runs individuales. Añadir un resumen de run-level a la entrada del evaluador para producir evaluaciones más precisas en batches con mezcla de éxito parcial y fallo.
+
+**6. Test explícito del caso single-batch con patch**
+El fix de `model_construct` cubre un escenario real: plan de un solo batch donde el patch batch se convierte en el final. Añadir test en `test_execution_plan_patch_service.py` que ejercite este path directamente.
+
+**7. Telemetría estructurada en recovery assignment compiler**
 `compile_recovery_assignment_plan` escala a `requires_replan=True` sin exponer exactamente qué cluster falló y por qué. Añadir notas estructuradas (cluster_id, razón del fallo) antes del escalado para simplificar el debugging de replans inesperados.
-
-**6. Promoción parcial de artefactos**
-El workspace runtime promueve todo o nada. Para tareas `partial` con progreso material, explorar promoción selectiva del overlay para no perder trabajo parcial en escenarios de recovery.
-
-**7. Contexto estructural del repositorio en `context_selection_agent`**
-El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto seleccionado.
 
 ### Baja prioridad
 
-**8. Límite de profundidad de recovery**
-El guard anti-cascada bloquea `reatomize` sobre tareas `is_recovery_task=True`, pero `insert_followup` no tiene límite. Considerar un campo `recovery_depth` en `Task` y un límite configurable.
+**8. Contexto estructural del repositorio en `context_selection_agent`**
+El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto seleccionado.
 
 **9. Métricas de ejecución por proyecto**
-Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch. Datos útiles para ajustar parámetros de orquestación y detectar proyectos problemáticos.
+Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de timeout retries. Datos útiles para ajustar parámetros de orquestación y detectar proyectos problemáticos antes de que agoten el iteration limit.
 
 **10. Tests end-to-end con engine real**
 Los tests actuales cubren servicios individuales con mocks. Añadir tests de integración que ejerciten el flujo completo desde `execute_task_sync` hasta la reconciliación de jerarquía, con un engine real pero LLM mockeado a nivel de provider.
@@ -684,6 +718,6 @@ Los tests actuales cubren servicios individuales con mocks. Añadir tests de int
 | Persistencia | 1 run → 1 artifact; artifact contiene la verdad final |
 | Workspace | Aislamiento total entre runs; `run/` siempre eliminado; promoción controlada |
 | Plan | El checkpoint final siempre incluye `stage_closure` |
-| Recovery | `is_recovery_task=True` bloquea `reatomize` (anti-cascada); `insert_followup` no limita cascada |
+| Recovery | `is_recovery_task=True` bloquea `reatomize`; `followup_depth >= 2` bloquea `insert_followup`; ≥1 sibling recovery fallado bloquea nuevo followup |
 | Jerarquía | Propagación determinista; rollback si falla algún paso; sin efectos parciales sobre padres |
 | Descomposición | `MAX_ATOMIC_TASKS_PER_PARENT = 8`; `MAX_IMPLEMENTATION_STEPS_PER_ATOMIC = 20` |

@@ -1,5 +1,6 @@
 import json
 import logging
+from pathlib import Path
 from typing import Iterable
 
 from sqlalchemy.orm import Session
@@ -28,6 +29,54 @@ from app.services.artifacts import create_artifact
 
 logger = logging.getLogger(__name__)
 RECOVERY_DECISION_ARTIFACT_TYPE = "recovery_decision"
+
+
+def _deserialize_files_read_paths(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    paths: list[str] = []
+    for item in payload:
+        if isinstance(item, dict):
+            path = item.get("path")
+            if isinstance(path, str) and path.strip():
+                paths.append(path.strip())
+    return list(dict.fromkeys(p for p in paths if p))
+
+
+def _load_relevant_file_contents_for_recovery(
+    run: ExecutionRun,
+    *,
+    source_path: str,
+) -> str | None:
+    paths = _deserialize_files_read_paths(run.files_read)
+    non_test = [
+        p for p in paths
+        if "/test" not in p.lower()
+        and not p.lower().startswith("test")
+        and "\\test" not in p.lower()
+    ][:3]
+
+    if not non_test:
+        return None
+
+    source = Path(source_path)
+    sections: list[str] = []
+    for rel_path in non_test:
+        full_path = source / rel_path
+        if full_path.is_file():
+            try:
+                content = full_path.read_text(encoding="utf-8")
+                sections.append(f"--- {rel_path} ---\n{content}")
+            except Exception:
+                pass
+
+    return "\n\n".join(sections) if sections else None
 
 
 class RecoveryServiceError(Exception):
@@ -221,6 +270,7 @@ def generate_recovery_decision(
     run = _get_run_or_raise(db, run_id)
     source_task = _get_task_or_raise(db, run.task_id)
 
+    from app.services.project_storage import ProjectStorageService
     from app.services.recovery_client import call_recovery_model
 
     source_task_summary = _build_source_task_summary(
@@ -232,6 +282,17 @@ def generate_recovery_decision(
         source_run=run,
     )
 
+    relevant_file_contents: str | None = None
+    try:
+        storage_service = ProjectStorageService()
+        project_paths = storage_service.ensure_project_storage(source_task.project_id)
+        relevant_file_contents = _load_relevant_file_contents_for_recovery(
+            run,
+            source_path=str(project_paths.source_dir),
+        )
+    except Exception:
+        pass
+
     decision = call_recovery_model(
         source_task_summary=source_task_summary,
         execution_trajectory_summary=execution_trajectory_summary,
@@ -239,6 +300,7 @@ def generate_recovery_decision(
         validation_context_summary=validation_context_summary,
         next_batch_summary=next_batch_summary,
         remaining_plan_summary=remaining_plan_summary,
+        relevant_file_contents=relevant_file_contents,
     )
 
     if decision.source_run_id != run.id:
@@ -293,6 +355,31 @@ def materialize_recovery_decision(
             source_followup_depth,
         )
         effective_action = "manual_review"
+
+    # Anti-repetition cap: if 1+ recovery sibling already failed/partial, a second automated
+    # follow-up is unlikely to succeed; escalate to manual review to break the loop.
+    if effective_action == "insert_followup" and source_task.parent_task_id is not None:
+        from sqlalchemy import or_
+
+        failed_recovery_sibling_count = (
+            db.query(Task)
+            .filter(
+                Task.parent_task_id == source_task.parent_task_id,
+                Task.id != source_task.id,
+                Task.status.in_([TASK_STATUS_FAILED, TASK_STATUS_PARTIAL]),
+                or_(Task.is_recovery_task.is_(True), Task.followup_depth > 0),
+            )
+            .count()
+        )
+        if failed_recovery_sibling_count >= 1:
+            logger.warning(
+                "recovery_repeated_failure_cap task_id=%s source_run_id=%s — "
+                "found %s failed/partial recovery siblings, forcing manual_review",
+                source_task.id,
+                decision.source_run_id,
+                failed_recovery_sibling_count,
+            )
+            effective_action = "manual_review"
 
     if effective_action == "manual_review":
         return []

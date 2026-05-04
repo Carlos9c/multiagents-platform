@@ -169,8 +169,17 @@ def build_recovery_user_prompt(
     validation_context_summary: str,
     next_batch_summary: str | None,
     remaining_plan_summary: str | None,
+    relevant_file_contents: str | None = None,
 ) -> str:
     capability_text = render_executor_capabilities_for_prompt(EXECUTION_ENGINE)
+
+    relevant_files_section = ""
+    if relevant_file_contents:
+        relevant_files_section = f"""
+
+Relevant source files (read during the failed execution — use these to write accurate API references):
+{relevant_file_contents}
+"""
 
     return f"""
 Source task summary:
@@ -190,7 +199,7 @@ Next batch summary:
 
 Remaining plan summary:
 {remaining_plan_summary or "None"}
-
+{relevant_files_section}
 Execution engine capability catalog:
 {capability_text}
 
@@ -293,6 +302,7 @@ def call_recovery_model(
     validation_context_summary: str,
     next_batch_summary: str | None = None,
     remaining_plan_summary: str | None = None,
+    relevant_file_contents: str | None = None,
 ) -> RecoveryDecision:
     provider = get_llm_provider()
     strict_schema = to_openai_strict_json_schema(RecoveryDecision.model_json_schema())
@@ -304,6 +314,7 @@ def call_recovery_model(
         validation_context_summary=validation_context_summary,
         next_batch_summary=next_batch_summary,
         remaining_plan_summary=remaining_plan_summary,
+        relevant_file_contents=relevant_file_contents,
     )
 
     raw = provider.generate_structured(

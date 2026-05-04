@@ -3,7 +3,7 @@ import logging
 import time
 from typing import Any
 
-from openai import InternalServerError, OpenAI
+from openai import APITimeoutError, InternalServerError, OpenAI
 
 from app.services.llm.base import LLMProvider
 
@@ -109,6 +109,20 @@ class OpenAIProvider(LLMProvider):
                         },
                     )
                     break
+                except APITimeoutError:
+                    if _attempt < _max_provider_retries - 1:
+                        _wait = 2**_attempt
+                        logger.warning(
+                            "llm_timeout_retry provider=openai model=%s schema=%s attempt=%s/%s wait_s=%s",
+                            self.model,
+                            schema_name,
+                            _attempt + 1,
+                            _max_provider_retries,
+                            _wait,
+                        )
+                        time.sleep(_wait)
+                        continue
+                    raise
                 except InternalServerError as _exc:
                     _status = getattr(_exc, "status_code", None)
                     if (

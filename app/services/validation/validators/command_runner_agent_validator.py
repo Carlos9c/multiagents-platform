@@ -72,6 +72,17 @@ Critical rules:
 - A failed intermediate verification attempt that is later clearly repaired by subsequent repository changes and a later successful verification should usually NOT remain partial if the terminal verification evidence is clean and materially covers the task objective.
 - Prefer the terminal/latest successful verification state over intermediate failed attempts when the later evidence clearly supersedes the earlier failure.
 
+Default-to-completed rule (burden of proof):
+- When the terminal verification command succeeded (exit_code=0) and its verification_goal
+  covers the core task objective, your default decision is "completed".
+- You may only override this default to "partial" if you can identify a SPECIFIC acceptance
+  criterion that the command output demonstrably did NOT verify. You must be able to name
+  both the unverified criterion and the concrete evidence gap from the command output.
+- Hypothetical or speculative gaps ("might be missing", "could be incomplete", "not fully
+  proven") are not sufficient grounds for "partial". Only evidence-anchored gaps qualify.
+- If the terminal test passed and you cannot name a specific unverified criterion with
+  supporting command output, choose "completed" — do not choose "partial" to be cautious.
+
 Partial decision rules (apply ONLY when decision is 'partial'):
 When decision is 'partial', you MUST populate partial_annotations with one or more entries
 describing each specific gap in the verification coverage. Each annotation requires:
@@ -297,38 +308,20 @@ def _has_resolved_intermediate_failure(command_items: list[Any]) -> bool:
     return any(not _command_succeeded(item) for item in command_items[:-1])
 
 
-def _task_looks_like_executable_implementation(validation_input: TaskValidationInput) -> bool:
-    request = validation_input.execution_request
-    text = " ".join(
-        [
-            request.task_title or "",
-            request.task_description or "",
-            request.objective or "",
-            request.acceptance_criteria or "",
-            request.tests_required or "",
-            request.technical_constraints or "",
-        ]
-    ).lower()
+_NON_VERIFIABLE_TASK_TYPES = frozenset({
+    "documentation",
+    "planning",
+    "requirements",
+    "review",
+    "onboarding",
+})
 
-    markers = (
-        "implement",
-        "function",
-        "method",
-        "class",
-        "endpoint",
-        "route",
-        "handler",
-        "component",
-        "api",
-        "service",
-        "module",
-        "package",
-        "build",
-        "compile",
-        "test",
-        "refactor",
-    )
-    return any(marker in text for marker in markers)
+
+def _task_is_verifiable_implementation(validation_input: TaskValidationInput) -> bool:
+    task_type = (
+        getattr(validation_input.execution_request, "task_type", None) or ""
+    ).strip().lower()
+    return task_type not in _NON_VERIFIABLE_TASK_TYPES
 
 
 def _normalize_llm_output_for_terminal_success(
@@ -343,7 +336,7 @@ def _normalize_llm_output_for_terminal_success(
     if not _is_terminal_verification_clean(command_items):
         return llm_output
 
-    if not _task_looks_like_executable_implementation(validation_input):
+    if not _task_is_verifiable_implementation(validation_input):
         return llm_output
 
     latest = command_items[-1]

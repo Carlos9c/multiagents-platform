@@ -17,7 +17,7 @@ from app.services.validation.contracts import TaskValidationInput
 from app.services.validation.validators.command_runner_agent_validator import (
     CommandRunnerAgentValidator,
     CommandRunnerAgentValidatorError,
-    _task_looks_like_executable_implementation,
+    _task_is_verifiable_implementation,
 )
 
 
@@ -512,17 +512,15 @@ def test_command_runner_agent_validator_raises_on_invalid_llm_output(
 # ---------------------------------------------------------------------------
 
 
-def _make_minimal_validation_input(*, title: str, description: str = "") -> TaskValidationInput:
+def _make_minimal_validation_input(*, task_type: str | None = None) -> TaskValidationInput:
     request = ExecutionRequest(
         task_id=1,
         project_id=1,
         execution_run_id=1,
-        task_title=title,
-        task_description=description,
+        task_title="Some task",
+        task_type=task_type,
         objective="",
         acceptance_criteria="",
-        tests_required="",
-        technical_constraints="",
         executor_type="execution_engine",
         context=ProjectExecutionContext(
             project_id=1,
@@ -544,30 +542,29 @@ def _make_minimal_validation_input(*, title: str, description: str = "") -> Task
 
 
 @pytest.mark.parametrize(
-    ("title", "expected"),
+    ("task_type", "expected"),
     [
-        # Removed broad markers — should no longer match
-        ("List project requirements", False),
-        ("Create documentation for the project", False),
-        ("Write a specification document", False),
-        ("Update the README", False),
-        # Language-agnostic implementation markers — should match
-        ("Implement the user endpoint", True),
-        ("Add a new function to the auth module", True),
-        ("Build the payment service", True),
-        ("Refactor the database handler", True),
-        ("Add unit test for the checkout component", True),
-        ("Compile and verify the package", True),
-        ("Add a new API route for user registration", True),
-        # Cross-ecosystem coverage
-        ("Implement the OrderController class", True),  # Java/Spring
-        ("Build the Rust crate and run tests", True),  # Rust
-        ("Add a React component for the dashboard", True),  # JS/TS
-        ("Create a Go service for the auth module", True),  # service + module
-        # "create" alone (no other marker) should not match
-        ("Create a diagram for the onboarding flow", False),
+        # Non-verifiable types — normalization must NOT fire
+        ("documentation", False),
+        ("planning", False),
+        ("requirements", False),
+        ("review", False),
+        ("onboarding", False),
+        # Verifiable types — normalization must fire
+        ("implementation", True),
+        ("testing", True),
+        ("configuration", True),
+        ("refactor", True),
+        ("design", True),
+        # Unknown or absent task_type — default to verifiable (safe)
+        ("", True),
+        (None, True),
+        # Case-insensitive
+        ("Documentation", False),
+        ("PLANNING", False),
+        ("Implementation", True),
     ],
 )
-def test_task_looks_like_executable_implementation(title, expected):
-    validation_input = _make_minimal_validation_input(title=title)
-    assert _task_looks_like_executable_implementation(validation_input) is expected
+def test_task_is_verifiable_implementation(task_type, expected):
+    validation_input = _make_minimal_validation_input(task_type=task_type)
+    assert _task_is_verifiable_implementation(validation_input) is expected

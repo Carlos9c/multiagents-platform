@@ -153,6 +153,30 @@ def _merge_partial_annotations(results: list[ValidationResult]) -> list[PartialA
     return merged
 
 
+def _should_upgrade_partial_to_completed(
+    *,
+    winning_decision: str,
+    validator_results: list[ValidationResult],
+) -> bool:
+    """
+    Upgrade partial→completed when partial validators have no concrete annotations.
+
+    A partial decision is only actionable when at least one partial validator can name
+    a specific gap via partial_annotations. Without annotations there is nothing concrete
+    for recovery to act on, and a competing completed result (backed by a clean terminal
+    test) is a stronger signal than speculative partial reasoning.
+    """
+    if winning_decision != VALIDATION_DECISION_PARTIAL:
+        return False
+    if not any(r.decision == VALIDATION_DECISION_COMPLETED for r in validator_results):
+        return False
+    return not any(
+        bool(r.partial_annotations)
+        for r in validator_results
+        if r.decision == VALIDATION_DECISION_PARTIAL
+    )
+
+
 def _build_partial_validation_summary(results: list[ValidationResult]) -> str | None:
     partial_summaries = _unique_strings(
         [
@@ -175,6 +199,17 @@ def aggregate_validation_results(
 
     winning_result = _pick_winning_result(validator_results)
     winning_decision = winning_result.decision
+
+    upgraded_to_completed = _should_upgrade_partial_to_completed(
+        winning_decision=winning_decision,
+        validator_results=validator_results,
+    )
+    if upgraded_to_completed:
+        completed_results = [
+            r for r in validator_results if r.decision == VALIDATION_DECISION_COMPLETED
+        ]
+        winning_result = completed_results[0]
+        winning_decision = VALIDATION_DECISION_COMPLETED
 
     followup_validation_required = any(
         result.followup_validation_required for result in validator_results
@@ -222,6 +257,11 @@ def aggregate_validation_results(
         f"Winning validation decision: {winning_decision}",
         f"Winning validator: {winning_result.validator_key}",
     ]
+    if upgraded_to_completed:
+        notes.append(
+            "Partial upgraded to completed: no partial validator had concrete annotations "
+            "and at least one validator reported completed."
+        )
 
     return ValidationAggregationResult(
         final_result=final_result,

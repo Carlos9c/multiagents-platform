@@ -43,6 +43,7 @@ class ProjectExecutionContext(BaseModel):
     relevant_files: list[str] = Field(default_factory=list)
     key_decisions: list[str] = Field(default_factory=list)
     related_tasks: list[RelatedTaskSummary] = Field(default_factory=list)
+    preloaded_dependency_files: dict[str, str] = Field(default_factory=dict)
 
 
 class HistoricalTaskRunContext(BaseModel):

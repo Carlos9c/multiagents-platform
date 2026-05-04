@@ -6,7 +6,7 @@ from app.services.validation.aggregation import (
     ValidationAggregationError,
     aggregate_validation_results,
 )
-from app.services.validation.contracts import ValidationFinding, ValidationResult
+from app.services.validation.contracts import PartialAnnotation, ValidationFinding, ValidationResult
 
 
 def _make_result(
@@ -25,6 +25,7 @@ def _make_result(
     followup_validation_required: bool = False,
     recommended_next_validator_keys: list[str] | None = None,
     partial_validation_summary: str | None = None,
+    partial_annotations: list[PartialAnnotation] | None = None,
     findings: list[ValidationFinding] | None = None,
     metadata: dict | None = None,
 ) -> ValidationResult:
@@ -45,6 +46,7 @@ def _make_result(
         followup_validation_required=followup_validation_required,
         recommended_next_validator_keys=list(recommended_next_validator_keys or []),
         partial_validation_summary=partial_validation_summary,
+        partial_annotations=list(partial_annotations or []),
         metadata=dict(metadata or {}),
     )
 
@@ -88,7 +90,8 @@ def test_aggregate_validation_results_returns_completed_when_all_are_completed()
     ]
 
 
-def test_aggregate_validation_results_prioritizes_partial_over_completed():
+def test_aggregate_validation_results_prioritizes_partial_over_completed_when_annotations_present():
+    # Partial with concrete annotations must always win over completed.
     results = [
         _make_result(
             validator_key="code_change_agent_validator",
@@ -105,6 +108,13 @@ def test_aggregate_validation_results_prioritizes_partial_over_completed():
             blockers=["verification gap"],
             final_task_status="partial",
             partial_validation_summary="Command evidence is meaningful but incomplete.",
+            partial_annotations=[
+                PartialAnnotation(
+                    file_path="app/service.py",
+                    issue_summary="Missing error handler",
+                    required_action="Add error handling for the edge case",
+                )
+            ],
         ),
     ]
 
@@ -123,6 +133,36 @@ def test_aggregate_validation_results_prioritizes_partial_over_completed():
     assert aggregation.final_result.missing_scope == (
         "A stronger verification signal is still missing."
     )
+
+
+def test_aggregate_partial_without_annotations_upgraded_to_completed_when_completed_evidence_present():
+    # Partial without concrete annotations + completed result → upgraded to completed.
+    results = [
+        _make_result(
+            validator_key="code_change_agent_validator",
+            decision="completed",
+            validated_scope="Code contribution validated.",
+            final_task_status="completed",
+            validated_evidence_ids=["changed_file:0"],
+        ),
+        _make_result(
+            validator_key="command_runner_agent_validator",
+            decision="partial",
+            summary="Verification evidence is present but validator could not confirm full scope.",
+            missing_scope="Unclear whether all acceptance criteria are covered.",
+            blockers=["incomplete verification confidence"],
+            final_task_status="partial",
+            # No partial_annotations — gap is speculative, not concrete
+        ),
+    ]
+
+    aggregation = aggregate_validation_results(validator_results=results)
+
+    assert aggregation.winning_decision == "completed"
+    assert aggregation.final_result.decision == "completed"
+    assert aggregation.final_result.final_task_status == "completed"
+    assert aggregation.final_result.partial_annotations == []
+    assert any("upgraded to completed" in note for note in aggregation.notes)
 
 
 def test_aggregate_validation_results_prioritizes_manual_review_over_partial():
@@ -280,6 +320,7 @@ def test_aggregate_validation_results_propagates_followup_validation_required():
 
 
 def test_aggregate_validation_results_uses_winning_result_discipline_and_metadata_points_to_winner():
+    # Partial with concrete annotations wins; metadata reflects the original partial winner.
     results = [
         _make_result(
             validator_key="code_change_agent_validator",
@@ -290,6 +331,13 @@ def test_aggregate_validation_results_uses_winning_result_discipline_and_metadat
             validator_key="command_runner_agent_validator",
             decision="partial",
             final_task_status="partial",
+            partial_annotations=[
+                PartialAnnotation(
+                    file_path="app/handler.py",
+                    issue_summary="Missing validation logic",
+                    required_action="Add input validation",
+                )
+            ],
         ),
     ]
 

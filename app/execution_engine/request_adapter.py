@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -12,7 +13,8 @@ from app.execution_engine.contracts import (
     ProjectExecutionContext,
     RelatedTaskSummary,
 )
-from app.models.task import Task
+from app.models.execution_run import ExecutionRun
+from app.models.task import TASK_STATUS_FAILED, TASK_STATUS_PARTIAL, Task
 from app.services.execution_runs import get_execution_run
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_memory_service import build_project_operational_context
@@ -144,6 +146,107 @@ def _deserialize_change_dependencies(raw: str | None) -> dict[str, list[str]]:
         merged[normalized_path] = _dedupe_preserve_order(existing + normalized_deps)
 
     return merged
+
+
+def _load_dependency_file_contents(
+    historical_context: HistoricalExecutionContext | None,
+    *,
+    source_path: str,
+) -> dict[str, str]:
+    if historical_context is None:
+        return {}
+
+    contents: dict[str, str] = {}
+    seen: set[str] = set()
+    source = Path(source_path)
+
+    for run_ctx in historical_context.selected_task_runs:
+        for rel_path in run_ctx.changed_files:
+            if rel_path in seen:
+                continue
+            seen.add(rel_path)
+            full_path = source / rel_path
+            if full_path.is_file():
+                try:
+                    contents[rel_path] = full_path.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+
+    return contents
+
+
+def _is_test_file(path: str) -> bool:
+    lower = path.lower()
+    return "/test" in lower or lower.startswith("test") or "\\test" in lower
+
+
+def _load_recovery_source_file_hints(
+    db: Session,
+    *,
+    task_id: int,
+    source_path: str,
+) -> dict[str, str]:
+    """
+    For recovery tasks, collect files_read from failed/partial sibling runs and
+    return their contents so code_change_agent has the API surface without relying
+    on context_selection_agent to pick the right historical tasks.
+    """
+    task = db.get(Task, task_id)
+    if task is None:
+        return {}
+
+    followup_depth = getattr(task, "followup_depth", 0) or 0
+    is_recovery = getattr(task, "is_recovery_task", False)
+
+    if followup_depth == 0 and not is_recovery:
+        return {}
+
+    if task.parent_task_id is None:
+        return {}
+
+    sibling_tasks = (
+        db.query(Task)
+        .filter(
+            Task.parent_task_id == task.parent_task_id,
+            Task.id != task_id,
+            Task.status.in_([TASK_STATUS_FAILED, TASK_STATUS_PARTIAL]),
+        )
+        .all()
+    )
+
+    if not sibling_tasks:
+        return {}
+
+    collected_paths: list[str] = []
+    seen: set[str] = set()
+
+    for sibling in sibling_tasks:
+        latest_run = (
+            db.query(ExecutionRun)
+            .filter(ExecutionRun.task_id == sibling.id)
+            .order_by(ExecutionRun.id.desc())
+            .first()
+        )
+        if latest_run is None:
+            continue
+        for path in _deserialize_files_read(latest_run.files_read):
+            if path not in seen:
+                seen.add(path)
+                collected_paths.append(path)
+
+    non_test = [p for p in collected_paths if not _is_test_file(p)][:10]
+
+    contents: dict[str, str] = {}
+    source = Path(source_path)
+    for rel_path in non_test:
+        full_path = source / rel_path
+        if full_path.is_file():
+            try:
+                contents[rel_path] = full_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
+
+    return contents
 
 
 def _build_key_decisions(project_context) -> list[str]:
@@ -308,6 +411,19 @@ def adapt_execution_request(
         selection=context_selection_result,
     )
 
+    recovery_file_hints = _load_recovery_source_file_hints(
+        db=db,
+        task_id=request.task_id,
+        source_path=request.context.source_path,
+    )
+
+    dependency_files = _load_dependency_file_contents(
+        historical_context,
+        source_path=request.context.source_path,
+    )
+    # Recovery hints are the fallback; dependency files from completed runs take priority.
+    preloaded_dependency_files = {**recovery_file_hints, **dependency_files}
+
     adapted_context = ProjectExecutionContext(
         project_id=request.context.project_id,
         source_path=request.context.source_path,
@@ -315,6 +431,7 @@ def adapt_execution_request(
         relevant_files=list(request.context.relevant_files),
         key_decisions=_build_key_decisions(project_context),
         related_tasks=_build_related_tasks(project_context, request.task_id),
+        preloaded_dependency_files=preloaded_dependency_files,
     )
 
     return request.model_copy(

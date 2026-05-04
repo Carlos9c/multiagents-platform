@@ -777,15 +777,25 @@ class CommandRunnerAgent(BaseSubagent):
                         source="run_tree_inspection",
                     )
 
-            plan = self._plan_command(
-                request=request,
-                step=step,
-                state=state,
-                run_dir=run_dir,
-                inventory=inventory,
-                inspection_plan=inspection_plan,
-                inspected_files=inspected_files,
-            )
+            try:
+                plan = self._plan_command(
+                    request=request,
+                    step=step,
+                    state=state,
+                    run_dir=run_dir,
+                    inventory=inventory,
+                    inspection_plan=inspection_plan,
+                    inspected_files=inspected_files,
+                )
+            except SubagentRejectedStepError as exc:
+                state.evidence.add_note(
+                    message=(
+                        f"command_runner_agent: verification planning aborted — "
+                        f"could not produce a valid executable command after retries: {exc}"
+                    ),
+                    producer=self.name,
+                )
+                raise
 
             if plan.decision == "verification_not_applicable":
                 logger.info(
