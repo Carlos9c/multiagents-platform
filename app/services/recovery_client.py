@@ -52,36 +52,83 @@ Execution-route rule:
 - Do not reatomize purely because multiple agents were involved.
 - Use the route as evidence, not as an automatic trigger.
 
+Workspace state rule:
+Every recovery decision must account for the workspace state left by the source task.
+- recovery_posture='reatomize_required' (validation.decision=failed or manual_review, or
+  execution terminated before validation):
+  The task's workspace was NOT promoted to the canonical source tree. The source tree is
+  unchanged from before the task ran. The replacement task starts with no prior work from
+  the failed run in place. The new task must be fully self-contained from the original
+  objectives. Use blockers, missing_scope, and partial_annotations from the failure as
+  the concrete guide for what to correct — embed this into implementation_notes so the
+  executor does not repeat the same error.
+- recovery_posture='insert_followup_preferred' (validation.decision=partial):
+  The task's workspace WAS promoted — validated partial progress exists in the canonical
+  source tree and is ready to be extended. A follow-up task starts with that work already
+  in place. The follow-up must close only the remaining gap; it must not redo what is
+  already there. Express this explicitly in the follow-up's out_of_scope and
+  implementation_notes.
+
 Validation-use rule:
 - Validation is not the thing being re-evaluated; it is operational evidence for recovery.
-- Use validation.decision, validation.summary, validation.validated_scope, validation.missing_scope,
-  validation.blockers, validation.manual_review_required, validation.followup_validation_required,
-  and validation.final_task_status as structured signals.
-- If validation.decision=partial, prefer insert_followup over reatomize unless there is strong evidence
-  that the original task itself was structurally wrong.
-- If validation.decision=partial, use validation.partial_annotations as the primary signal for scoping
-  insert_followup tasks. Each annotation identifies a specific gap with file_path, issue_summary, and
-  required_action — the follow-up task should directly address those annotated gaps. If partial_annotations
-  is empty, fall back to validation.missing_scope to infer the remaining work.
-- If validation.validated_scope shows meaningful partial progress, preserve that progress.
-- If validation.missing_scope identifies a concrete remaining gap, prefer narrow follow-up work that closes
-  that gap while preserving the original task intent.
-- If validation.blockers describe ambiguity, unsafe state, or unreliable automation, consider manual_review.
-- If validation.manual_review_required=true, do not force aggressive automated recovery without strong contrary evidence.
-- If validation.followup_validation_required=true, do not assume the task should be reatomized by default.
+- The validation context always includes a recovery_posture field:
+  - 'reatomize_required' — validation.decision is failed or manual_review (or execution
+    terminated before validation): workspace was NOT promoted; source tree is unchanged.
+    Use reatomize or manual_review. Never use insert_followup.
+  - 'insert_followup_preferred' — validation.decision=partial: workspace was promoted;
+    validated progress is already in source. Prefer insert_followup.
+- Use validation.decision, validation.summary, validation.validated_scope,
+  validation.missing_scope, validation.blockers, validation.partial_annotations,
+  validation.manual_review_required, validation.followup_validation_required, and
+  validation.final_task_status as structured signals.
+- If recovery_posture='reatomize_required' (validation.decision=failed or manual_review,
+  or execution terminated before validation):
+  Always use reatomize or manual_review. Never use insert_followup: the workspace was not
+  promoted and there is nothing to follow up on. The replacement task must be
+  self-contained. Incorporate the specific failure reasons from blockers and
+  partial_annotations into the new task's implementation_notes and description so the
+  executor does not repeat the same mistakes.
+- If validation.decision=partial (recovery_posture='insert_followup_preferred'):
+  Prefer insert_followup unless there is strong evidence the task was structurally wrong
+  as one atomic unit. The validated progress is already in the source tree — the follow-up
+  closes only the remaining gap.
+- If validation.decision=partial, use validation.partial_annotations as the primary signal
+  for scoping insert_followup tasks. Each annotation has file_path, issue_summary, and
+  required_action. Annotations tagged [validator_key] (e.g.,
+  '[command_runner_agent_validator] tests failed') represent blockers from individual
+  sub-validators that failed while others succeeded — these are concrete failures the
+  follow-up must address, not speculative gaps. Treat them with the same weight as
+  untagged annotations. If partial_annotations is empty, fall back to missing_scope.
+- If validation.validated_scope shows meaningful partial progress, do not redo it in the
+  follow-up. Express it in out_of_scope of the created task.
+- If validation.missing_scope identifies a concrete remaining gap, scope the follow-up
+  narrowly to close that gap while preserving the original task intent.
+- If validation.blockers describe ambiguity, unsafe state, or unreliable automation,
+  consider manual_review.
+- If validation.manual_review_required=true, do not force aggressive automated recovery
+  without strong contrary evidence.
+- If validation.followup_validation_required=true, do not assume the task should be
+  reatomized by default.
 
 Action semantics:
 - reatomize
   - use when the current task was badly scoped, not executable as one unit, too broad,
     mixed incompatible work, or should be split into better atomic tasks
-  - this action must create replacement atomic tasks
-  - replacement tasks must stay faithful to the original task intent
+  - also use when recovery_posture='reatomize_required' (failed, manual_review, or
+    pre-validation failure) — the task failed completely and nothing was promoted to source
+  - this action must create replacement atomic tasks that are faithful to the original intent
+  - replacement task implementation_notes must incorporate the specific failure context
+    (from blockers, partial_annotations) so the executor does not repeat the same errors
 - insert_followup
-  - use when the original task produced useful progress, but extra atomic work is needed
-    to close a remaining gap
-  - this action must create one or more follow-up atomic tasks
-  - do not use this as a vague catch-all when the original task should really be reatomized
-  - do not use this to change the original task into a different kind of workstream
+  - use only when the original task produced useful progress that was promoted to the
+    canonical source tree (recovery_posture='insert_followup_preferred') and extra atomic
+    work is still needed to close a remaining gap
+  - this action must create one or more concrete follow-up atomic tasks
+  - follow-up task out_of_scope must explicitly exclude the already-validated work
+  - follow-up task implementation_notes must describe what already exists in source and
+    what still needs to be done
+  - do not use as a catch-all when the task should really be reatomized
+  - do not use to change the original task into a different kind of workstream
 - manual_review
   - use when automated recovery is not trustworthy enough
   - do not create new tasks
@@ -153,6 +200,7 @@ Self-check before finalizing:
 - Am I preserving the original task intent?
 - Did I use last_execution_agent_sequence as contextual evidence without overreacting to it?
 - Did I use validation as operational evidence rather than re-litigating the validation?
+- If recovery_posture=reatomize_required (decision=failed, manual_review, or pre-validation failure), am I using reatomize or manual_review — NOT insert_followup?
 - If validation.decision=partial, am I preserving useful partial progress unless there is strong evidence not to?
 - If action=reatomize or action=insert_followup, are created_tasks present and still faithful to the original task objective?
 - If action=manual_review, are created_tasks empty and requires_manual_review=true?

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pydantic import ValidationError
 
 from app.schemas.planner import PlannerOutput
@@ -207,6 +209,73 @@ Task type reminder:
 """.strip()
 
 
+_MAX_ANALYSIS_FILES = 60
+
+
+def _build_evolutionary_context_section(analysis: object) -> str:
+    """Render a condensed codebase-context block for the evolutionary planner prompt."""
+    lines = [
+        "EXISTING CODEBASE CONTEXT:",
+        f"Project summary: {analysis.project_summary}",
+        f"Main technologies: {', '.join(analysis.main_technologies) or 'unknown'}",
+        f"Entry points: {', '.join(analysis.entry_points) or 'none identified'}",
+        f"Total files analysed: {analysis.total_files}",
+        "",
+        "File catalogue (up to 60 files):",
+    ]
+    for fa in analysis.files[:_MAX_ANALYSIS_FILES]:
+        lang = f", {fa.language}" if fa.language else ""
+        lines.append(f"  {fa.path} ({fa.file_type}{lang}): {fa.summary}")
+    return "\n".join(lines)
+
+
+def build_evolutionary_planner_user_prompt(
+    project_name: str,
+    project_description: str,
+    analysis: object,
+) -> str:
+    context_section = _build_evolutionary_context_section(analysis)
+    return f"""
+{context_section}
+
+---
+
+NEW OBJECTIVE:
+Project name: {project_name}
+Project description: {project_description}
+
+Important:
+- Plan the next iteration of work given the existing codebase above.
+- The plan must complement or continue what already exists — do not re-plan work that is already done.
+- If the new objective requires changes to existing components, name those components explicitly.
+- If the existing codebase is incomplete or missing key areas, include tasks to address them.
+- Preserve the real nature of the project instead of forcing it into a narrow implementation-only plan.
+- Do not assume the project is only software unless the description clearly indicates that.
+
+Execution-model reminder:
+- produce high_level tasks only
+- do not produce refined tasks
+- do not produce atomic tasks
+- high_level tasks will later be decomposed directly into atomic tasks
+- therefore each high_level task must be bounded, clear, and decomposition-friendly
+- do not over-shrink tasks into pseudo-atomic items
+
+Executor reminder:
+- do not decide the final executor for high_level tasks
+- stay focused on deliverables and approach, not executor binding
+
+Completeness reminder:
+- before finalizing, check whether the plan is missing any important workstream for this specific kind of project
+- include documentation, onboarding, testing, design, requirements, setup, or other support tasks only when they are genuinely relevant
+- do not force generic task categories if they do not fit the project
+
+Quality reminder:
+- avoid vague buckets like "do implementation"
+- avoid pseudo-atomic tasks like single-file or single-endpoint work
+- make each task meaningful, bounded, and useful for later direct atomic decomposition
+""".strip()
+
+
 def call_planner_model(project_name: str, project_description: str) -> PlannerOutput:
     provider = get_llm_provider()
     strict_schema = to_openai_strict_json_schema(PlannerOutput.model_json_schema())
@@ -214,6 +283,44 @@ def call_planner_model(project_name: str, project_description: str) -> PlannerOu
     first_user_prompt = build_planner_user_prompt(
         project_name=project_name,
         project_description=project_description,
+    )
+
+    raw = provider.generate_structured(
+        system_prompt=PLANNER_SYSTEM_PROMPT,
+        user_prompt=first_user_prompt,
+        schema_name="planner_output",
+        json_schema=strict_schema,
+    )
+
+    try:
+        return PlannerOutput.model_validate(raw)
+    except ValidationError as exc:
+        retry_user_prompt = build_planner_retry_prompt(
+            project_name=project_name,
+            project_description=project_description,
+            validation_error=str(exc),
+        )
+        raw_retry = provider.generate_structured(
+            system_prompt=PLANNER_SYSTEM_PROMPT,
+            user_prompt=retry_user_prompt,
+            schema_name="planner_output",
+            json_schema=strict_schema,
+        )
+        return PlannerOutput.model_validate(raw_retry)
+
+
+def call_evolutionary_planner_model(
+    project_name: str,
+    project_description: str,
+    codebase_analysis: object,
+) -> PlannerOutput:
+    provider = get_llm_provider()
+    strict_schema = to_openai_strict_json_schema(PlannerOutput.model_json_schema())
+
+    first_user_prompt = build_evolutionary_planner_user_prompt(
+        project_name=project_name,
+        project_description=project_description,
+        analysis=codebase_analysis,
     )
 
     raw = provider.generate_structured(

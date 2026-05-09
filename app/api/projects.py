@@ -1,3 +1,5 @@
+import dataclasses
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -6,12 +8,38 @@ from app.models.artifact import Artifact
 from app.models.execution_run import ExecutionRun
 from app.models.project import Project
 from app.models.task import Task
+from app.schemas.analysis_read import CodebaseAnalysisRead
 from app.schemas.artifact import ArtifactRead
 from app.schemas.execution_run import ExecutionRunRead
+from app.schemas.plan_history import PlanHistoryCycleRead
 from app.schemas.project import ProjectCreate, ProjectRead
+from app.schemas.project_start import ProjectStartRequest, ProjectStartResponse
 from app.schemas.task import TaskRead
+from app.services.analysis import CodebaseAnalysisService
+from app.services.plan_history_service import PlanHistoryService
+from app.services.project_start_service import (
+    ActiveTasksError,
+    ProjectNotFoundError,
+    ProjectStartService,
+    SourcePathNotFoundError,
+)
+from app.services.project_storage import ProjectStorageService
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+_start_service = ProjectStartService()
+
+
+@router.post("/start", response_model=ProjectStartResponse)
+def start_project(payload: ProjectStartRequest, db: Session = Depends(get_db)):
+    try:
+        return _start_service.start(db=db, request=payload)
+    except (ProjectNotFoundError, SourcePathNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ActiveTasksError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("", response_model=ProjectRead)
@@ -102,3 +130,26 @@ def list_project_execution_runs(project_id: int, db: Session = Depends(get_db)):
         .order_by(ExecutionRun.id.asc())
         .all()
     )
+
+
+@router.get("/{project_id}/analysis", response_model=CodebaseAnalysisRead)
+def get_project_analysis(project_id: int, db: Session = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    analysis = CodebaseAnalysisService().get_analysis(project_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="No analysis found for this project")
+
+    return dataclasses.asdict(analysis)
+
+
+@router.get("/{project_id}/plan-history", response_model=list[PlanHistoryCycleRead])
+def get_project_plan_history(project_id: int, db: Session = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    paths = ProjectStorageService().get_project_paths(project_id)
+    return PlanHistoryService().get_history(paths.project_meta_dir)

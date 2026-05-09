@@ -124,6 +124,7 @@ def _build_historical_task_selection_base_prompt(
     project_name: str,
     project_description: str,
     project_context_excerpt: str | None = None,
+    codebase_analysis_excerpt: str | None = None,
 ) -> str:
     rules = [
         {
@@ -153,9 +154,17 @@ def _build_historical_task_selection_base_prompt(
         },
     ]
 
+    codebase_section = (
+        f"Codebase structure (static analysis snapshot):\n{codebase_analysis_excerpt}"
+        if codebase_analysis_excerpt
+        else "Codebase structure: No static analysis available."
+    )
+
     return f"""
 Project name: {project_name}
 Project description: {project_description}
+
+{codebase_section}
 
 Current atomic task:
 {json.dumps(_task_to_prompt_payload(current_task), ensure_ascii=False, indent=2)}
@@ -198,6 +207,7 @@ def _build_historical_task_selection_user_prompt(
     project_name: str,
     project_description: str,
     project_context_excerpt: str | None = None,
+    codebase_analysis_excerpt: str | None = None,
 ) -> str:
     return _build_historical_task_selection_base_prompt(
         current_task=current_task,
@@ -205,6 +215,7 @@ def _build_historical_task_selection_user_prompt(
         project_name=project_name,
         project_description=project_description,
         project_context_excerpt=project_context_excerpt,
+        codebase_analysis_excerpt=codebase_analysis_excerpt,
     )
 
 
@@ -306,6 +317,7 @@ class ContextSelectionAgent(BaseSubagent):
             project_name=project.name,
             project_description=project.description or project.name,
             project_context_excerpt=context_input.project_context_excerpt,
+            codebase_analysis_excerpt=context_input.codebase_analysis_excerpt,
         )
 
         raw = self.runtime.generate_structured(

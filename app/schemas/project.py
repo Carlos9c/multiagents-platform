@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -19,5 +21,6 @@ class ProjectRead(BaseModel):
     description: str | None = None
     enable_technical_refinement: bool
     plan_version: int
+    last_planned_at: datetime | None = None
 
     model_config = {"from_attributes": True}

@@ -112,6 +112,7 @@ def make_task(db_session: Session) -> Callable[..., Task]:
         out_of_scope: str | None = None,
         is_blocked: bool = False,
         blocking_reason: str | None = None,
+        is_recovery_task: bool = False,
     ) -> Task:
         task = Task(
             project_id=project_id,
@@ -133,6 +134,7 @@ def make_task(db_session: Session) -> Callable[..., Task]:
             status=status,
             is_blocked=is_blocked,
             blocking_reason=blocking_reason,
+            is_recovery_task=is_recovery_task,
         )
         db_session.add(task)
         db_session.commit()

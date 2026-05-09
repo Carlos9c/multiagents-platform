@@ -5,6 +5,7 @@ from app.models.task import (
     PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
+    TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_FOLLOWED_UP,
     TASK_STATUS_PARTIAL,
@@ -364,3 +365,231 @@ def test_build_recovery_context_entry_keeps_created_task_records_and_open_issue(
     assert len(context.open_issues) == 1
     assert context.open_issues[0].issue_type == "progress_blocked"
     assert context.open_issues[0].source_task_id == source_task.id
+
+
+def test_insert_followup_on_failed_task_is_promoted_to_reatomize(
+    db_session,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_recovery_decision,
+):
+    """
+    A completely failed task has no promotable workspace to follow up on.
+    The service must promote insert_followup → reatomize so the task is
+    re-specified from scratch rather than issued a follow-up that would start
+    from the same empty baseline.
+    """
+    project = make_project()
+
+    parent = make_task(
+        project_id=project.id,
+        title="Parent task",
+        planning_level=PLANNING_LEVEL_HIGH_LEVEL,
+    )
+
+    source_task = make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Completely failed task",
+        description="This task failed in full — nothing was promoted.",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        status=TASK_STATUS_FAILED,
+        sequence_order=1,
+    )
+    run = make_execution_run(
+        task_id=source_task.id,
+        status="failed",
+        failure_type="validation_failed",
+        failure_code="all_validators_failed",
+    )
+
+    # Model incorrectly decided insert_followup for a completely failed task.
+    decision = make_recovery_decision(
+        source_task_id=source_task.id,
+        source_run_id=run.id,
+        action="insert_followup",
+        created_tasks=[
+            {
+                "title": "Re-attempt the failed work",
+                "description": "Follow-up to address everything that failed.",
+                "objective": "Complete the originally intended deliverable.",
+                "implementation_notes": "Fix all blocking issues found in the failure.",
+                "acceptance_criteria": "All validators pass.",
+            }
+        ],
+        still_blocks_progress=True,
+    )
+
+    created_tasks = materialize_recovery_decision(
+        db=db_session,
+        project_id=project.id,
+        decision=decision,
+    )
+
+    db_session.refresh(source_task)
+
+    # Guard promoted insert_followup → reatomize.
+    # Source task must be REATOMIZED (terminal) — not followed_up.
+    assert source_task.status == TASK_STATUS_REATOMIZED
+
+    # Created task carries is_recovery_task=True (reatomize semantics).
+    assert len(created_tasks) == 1
+    reatomized = created_tasks[0]
+    assert reatomized.is_recovery_task is True
+    assert reatomized.followup_depth == 0
+    assert reatomized.status == TASK_STATUS_PENDING
+    assert reatomized.parent_task_id == parent.id
+
+
+def test_insert_followup_on_failed_recovery_task_escalates_to_manual_review(
+    db_session,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_recovery_decision,
+):
+    """
+    When a recovery task (is_recovery_task=True) itself fails and the model
+    issues insert_followup, the guard promotes it to reatomize, then the
+    anti-cascade promotes it further to manual_review — preventing an infinite
+    loop where recovery keeps spawning new tasks that keep failing.
+    """
+    project = make_project()
+
+    parent = make_task(
+        project_id=project.id,
+        title="Parent task",
+        planning_level=PLANNING_LEVEL_HIGH_LEVEL,
+    )
+
+    # A recovery task that has itself failed.
+    source_task = make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Failed recovery task",
+        description="First recovery attempt that also failed.",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        status=TASK_STATUS_FAILED,
+        is_recovery_task=True,  # this is the key — it is already a recovery task
+        sequence_order=2,
+    )
+    run = make_execution_run(
+        task_id=source_task.id,
+        status="failed",
+        failure_type="validation_failed",
+        failure_code="all_validators_failed",
+    )
+
+    decision = make_recovery_decision(
+        source_task_id=source_task.id,
+        source_run_id=run.id,
+        action="insert_followup",
+        created_tasks=[
+            {
+                "title": "Second follow-up attempt",
+                "description": "Yet another attempt at the same failing scope.",
+                "objective": "Complete the work.",
+                "implementation_notes": "Try again.",
+                "acceptance_criteria": "All validators pass.",
+            }
+        ],
+        still_blocks_progress=True,
+    )
+
+    created_tasks = materialize_recovery_decision(
+        db=db_session,
+        project_id=project.id,
+        decision=decision,
+    )
+
+    db_session.refresh(source_task)
+
+    # Chain: insert_followup → reatomize (semantic guard) → manual_review (anti-cascade).
+    # No new tasks created; source task remains in its FAILED state.
+    assert created_tasks == []
+    assert source_task.status == TASK_STATUS_FAILED
+
+
+def test_reatomized_source_allows_parent_to_close_when_recovery_task_completes(
+    db_session,
+    make_project,
+    make_task,
+    make_execution_run,
+    make_recovery_decision,
+):
+    """
+    After reatomization the source task is REATOMIZED (terminal, 'good' in hierarchy logic).
+    When the recovery task subsequently completes, the parent sees all children in
+    {completed, reatomized, followed_up} and consolidates to 'completed'.
+    """
+    from app.services.task_hierarchy_service import consolidate_parent_task_statuses
+
+    project = make_project()
+
+    parent = make_task(
+        project_id=project.id,
+        title="Parent task",
+        planning_level=PLANNING_LEVEL_HIGH_LEVEL,
+    )
+
+    source_task = make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Failed atomic task",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        status=TASK_STATUS_FAILED,
+        sequence_order=1,
+    )
+    run = make_execution_run(
+        task_id=source_task.id,
+        status="failed",
+        failure_type="validation_failed",
+        failure_code="all_validators_failed",
+    )
+
+    decision = make_recovery_decision(
+        source_task_id=source_task.id,
+        source_run_id=run.id,
+        action="reatomize",
+        created_tasks=[
+            {
+                "title": "Re-specified replacement task",
+                "description": "Better-specified replacement for the failed task.",
+                "objective": "Complete the original deliverable correctly.",
+                "implementation_notes": "Fix the enum bug identified in validation.",
+                "acceptance_criteria": "All validators pass.",
+            }
+        ],
+        still_blocks_progress=True,
+    )
+
+    created_tasks = materialize_recovery_decision(
+        db=db_session,
+        project_id=project.id,
+        decision=decision,
+    )
+
+    db_session.refresh(source_task)
+    db_session.refresh(parent)
+
+    assert source_task.status == TASK_STATUS_REATOMIZED
+    assert len(created_tasks) == 1
+    recovery_task = created_tasks[0]
+    assert recovery_task.is_recovery_task is True
+    assert recovery_task.status == TASK_STATUS_PENDING
+
+    # Parent should be pending because the recovery task is still pending.
+    consolidate_parent_task_statuses(db=db_session, parent_task_id=parent.id)
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_PENDING
+
+    # Simulate the recovery task completing successfully.
+    recovery_task.status = TASK_STATUS_COMPLETED
+    db_session.add(recovery_task)
+    db_session.flush()
+
+    # Now all children are {reatomized, completed} → parent closes as completed.
+    consolidate_parent_task_statuses(db=db_session, parent_task_id=parent.id)
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_COMPLETED

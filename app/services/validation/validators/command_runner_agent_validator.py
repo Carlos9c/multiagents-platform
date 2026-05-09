@@ -308,19 +308,21 @@ def _has_resolved_intermediate_failure(command_items: list[Any]) -> bool:
     return any(not _command_succeeded(item) for item in command_items[:-1])
 
 
-_NON_VERIFIABLE_TASK_TYPES = frozenset({
-    "documentation",
-    "planning",
-    "requirements",
-    "review",
-    "onboarding",
-})
+_NON_VERIFIABLE_TASK_TYPES = frozenset(
+    {
+        "documentation",
+        "planning",
+        "requirements",
+        "review",
+        "onboarding",
+    }
+)
 
 
 def _task_is_verifiable_implementation(validation_input: TaskValidationInput) -> bool:
     task_type = (
-        getattr(validation_input.execution_request, "task_type", None) or ""
-    ).strip().lower()
+        (getattr(validation_input.execution_request, "task_type", None) or "").strip().lower()
+    )
     return task_type not in _NON_VERIFIABLE_TASK_TYPES
 
 

@@ -76,7 +76,10 @@ def _derive_parent_status_from_children(children: list[Task]) -> str | None:
     if any(not _is_terminal_status(status) for status in child_statuses):
         return TASK_STATUS_PENDING
 
-    if all(status in {TASK_STATUS_COMPLETED, TASK_STATUS_REATOMIZED, TASK_STATUS_FOLLOWED_UP} for status in child_statuses):
+    if all(
+        status in {TASK_STATUS_COMPLETED, TASK_STATUS_REATOMIZED, TASK_STATUS_FOLLOWED_UP}
+        for status in child_statuses
+    ):
         return TASK_STATUS_COMPLETED
 
     if any(status == TASK_STATUS_FAILED for status in child_statuses):

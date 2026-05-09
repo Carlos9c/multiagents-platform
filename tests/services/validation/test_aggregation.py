@@ -196,7 +196,8 @@ def test_aggregate_validation_results_prioritizes_manual_review_over_partial():
     ]
 
 
-def test_aggregate_validation_results_prioritizes_failed_over_manual_review():
+def test_aggregate_manual_review_wins_over_failed():
+    # manual_review + failed → manual_review always wins (highest priority rule).
     results = [
         _make_result(
             validator_key="code_change_agent_validator",
@@ -216,9 +217,11 @@ def test_aggregate_validation_results_prioritizes_failed_over_manual_review():
 
     aggregation = aggregate_validation_results(validator_results=results)
 
-    assert aggregation.winning_decision == "failed"
-    assert aggregation.final_result.decision == "failed"
+    assert aggregation.winning_decision == "manual_review"
+    assert aggregation.final_result.decision == "manual_review"
     assert aggregation.final_result.final_task_status == "failed"
+    assert aggregation.final_result.manual_review_required is True
+    # Blockers from all validators are still merged in.
     assert "tests failed" in aggregation.final_result.blockers
 
 
@@ -268,7 +271,8 @@ def test_aggregate_validation_results_merges_findings_blockers_artifacts_and_evi
     aggregation = aggregate_validation_results(validator_results=results)
     final_result = aggregation.final_result
 
-    assert final_result.decision == "failed"
+    # partial + failed → partial (not all failed, no manual_review).
+    assert final_result.decision == "partial"
 
     assert final_result.blockers == [
         "shared blocker",
@@ -376,8 +380,111 @@ def test_aggregate_validation_results_builds_summary_from_winning_result():
 
     aggregation = aggregate_validation_results(validator_results=results)
 
+    # completed + failed → partial (mixed result, not all failed).
+    # Primary summary comes from the failed validator (most informative about the gap).
     assert aggregation.final_result.summary == (
-        "Aggregated validation decision is 'failed' based on 2 validator result(s): "
+        "Aggregated validation decision is 'partial' based on 2 validator result(s): "
         "code_change_agent_validator, command_runner_agent_validator. "
         "Primary summary: Verification failed on the main command."
     )
+
+
+def test_aggregate_all_failed_gives_failed():
+    results = [
+        _make_result(
+            validator_key="code_change_agent_validator",
+            decision="failed",
+            summary="Code is completely wrong.",
+            blockers=["wrong implementation"],
+            final_task_status="failed",
+        ),
+        _make_result(
+            validator_key="command_runner_agent_validator",
+            decision="failed",
+            summary="Verification failed hard.",
+            blockers=["all tests failed"],
+            final_task_status="failed",
+        ),
+    ]
+
+    aggregation = aggregate_validation_results(validator_results=results)
+
+    assert aggregation.winning_decision == "failed"
+    assert aggregation.final_result.decision == "failed"
+    assert aggregation.final_result.final_task_status == "failed"
+    assert aggregation.final_result.manual_review_required is False
+    # All failed → no partial_annotations from failed-validator conversion
+    # (that logic only runs when aggregate is partial).
+    assert aggregation.final_result.partial_annotations == []
+
+
+def test_aggregate_completed_and_failed_gives_partial_with_annotations():
+    # When completed + failed mix → aggregate is partial.
+    # Failed validators' blockers must surface as partial_annotations so recovery
+    # tasks know exactly what to fix.
+    results = [
+        _make_result(
+            validator_key="code_change_agent_validator",
+            decision="completed",
+            validated_scope="Files created correctly.",
+            final_task_status="completed",
+        ),
+        _make_result(
+            validator_key="command_runner_agent_validator",
+            decision="failed",
+            summary="Tests failed: 9 of 11 assertions failed.",
+            blockers=["enum member used as string", "missing fixture setup"],
+            final_task_status="failed",
+        ),
+    ]
+
+    aggregation = aggregate_validation_results(validator_results=results)
+
+    assert aggregation.winning_decision == "partial"
+    assert aggregation.final_result.decision == "partial"
+    assert aggregation.final_result.final_task_status == "partial"
+
+    annotations = aggregation.final_result.partial_annotations
+    # Both blockers from the failed validator must become annotations.
+    assert len(annotations) == 2
+    issue_summaries = [a.issue_summary for a in annotations]
+    assert any("enum member used as string" in s for s in issue_summaries)
+    assert any("missing fixture setup" in s for s in issue_summaries)
+    # Annotations carry the source validator key for traceability.
+    assert all("command_runner_agent_validator" in a.issue_summary for a in annotations)
+
+
+def test_aggregate_partial_not_upgraded_to_completed_when_failed_present():
+    # Upgrade partial→completed is suppressed when any validator reported a hard failure,
+    # even if the partial validator has no concrete annotations.
+    results = [
+        _make_result(
+            validator_key="code_change_agent_validator",
+            decision="completed",
+            validated_scope="Code contribution validated.",
+            final_task_status="completed",
+            validated_evidence_ids=["changed_file:0"],
+        ),
+        _make_result(
+            validator_key="command_runner_agent_validator",
+            decision="failed",
+            summary="Command exited with code 1.",
+            blockers=["test suite failed"],
+            final_task_status="failed",
+        ),
+        _make_result(
+            validator_key="extra_validator",
+            decision="partial",
+            summary="Partial code coverage only.",
+            # No partial_annotations — would normally trigger upgrade, but failed blocks it.
+            final_task_status="partial",
+        ),
+    ]
+
+    aggregation = aggregate_validation_results(validator_results=results)
+
+    # Must stay partial — upgrade is blocked by the failed validator.
+    assert aggregation.winning_decision == "partial"
+    assert aggregation.final_result.decision == "partial"
+    assert aggregation.final_result.final_task_status == "partial"
+    assert not any("upgraded to completed" in note for note in aggregation.notes)

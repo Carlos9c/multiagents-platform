@@ -115,7 +115,7 @@ def test_post_batch_allows_failed_task_without_validation_artifact_when_executio
 
     assert result.problematic_run_ids == [run.id]
     assert validation_summary["validation_available"] is False
-    assert validation_summary["recovery_posture"] == "execution_failed_before_validation"
+    assert validation_summary["recovery_posture"] == "reatomize_required"
     assert validation_summary["execution_failure_context"]["run_id"] == run.id
     assert execution_summary["latest_run"]["run_status"] == "failed"
 

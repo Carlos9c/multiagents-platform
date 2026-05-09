@@ -57,3 +57,4 @@ class ContextBuilderResult(BaseModel):
     should_invoke_context_selection_agent: bool
     completed_task_catalog: list[HistoricalTaskCatalogEntry] = Field(default_factory=list)
     project_context_excerpt: str | None = None
+    codebase_analysis_excerpt: str | None = None

@@ -534,11 +534,18 @@ def _verification_would_materially_improve(
 ) -> bool:
     latest_command = _latest_command_execution(resolution_state)
     if latest_command is not None and _command_succeeded(latest_command):
+        # Command already ran and passed — no further verification needed.
         return False
+
+    # Past this point, latest_command is either None (no verification yet) or a
+    # failed command. In both cases, running or re-running verification would
+    # materially improve the evidence for any task type that requires it.
 
     if _is_documentation_like_task(request):
         if _task_explicitly_requests_repo_local_verification(request):
-            return latest_command is None
+            # Explicit verification requested: needed if no command ran, or if
+            # the previous command failed (re-verification after repair).
+            return latest_command is None or not _command_succeeded(latest_command)
 
         if _changed_files_look_documentation_only(resolution_state):
             return False
@@ -547,10 +554,12 @@ def _verification_would_materially_improve(
             return False
 
     if _task_explicitly_requests_repo_local_verification(request):
-        return latest_command is None
+        return latest_command is None or not _command_succeeded(latest_command)
 
     if resolution_state.evidence.changed_files and _is_executable_implementation_like_task(request):
-        return latest_command is None
+        # Re-verification is needed both when no command has run yet and when
+        # the previous command failed (e.g. a repair pass was made after failure).
+        return latest_command is None or not _command_succeeded(latest_command)
 
     return False
 

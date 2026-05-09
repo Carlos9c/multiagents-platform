@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from sqlalchemy.orm import Session
 
@@ -9,8 +10,13 @@ from app.execution_engine.context_selection import (
     HistoricalTaskCatalogEntry,
 )
 from app.models.task import TASK_STATUS_COMPLETED, Task
+from app.services.analysis import CodebaseAnalysisService
 from app.services.execution_runs import get_completion_execution_run_for_task
 from app.services.project_memory_service import build_project_operational_context
+
+logger = logging.getLogger(__name__)
+
+_MAX_CATALOGUE_FILES = 60
 
 
 def _safe_json_loads(raw: str | None) -> list | dict | None:
@@ -62,6 +68,36 @@ def _deserialize_files_read(raw: str | None) -> list[str]:
             paths.append(path.strip())
 
     return _dedupe_preserve_order(paths)
+
+
+def _render_codebase_analysis_excerpt(analysis: object) -> str:
+    lines: list[str] = [
+        f"Project summary: {analysis.project_summary}",
+        f"Main technologies: {', '.join(analysis.main_technologies) or 'unknown'}",
+        f"Entry points: {', '.join(analysis.entry_points) or 'none identified'}",
+        f"Total files: {analysis.total_files}",
+        "",
+        f"File catalogue ({min(analysis.total_files, _MAX_CATALOGUE_FILES)} of {analysis.total_files}):",
+    ]
+    for fa in analysis.files[:_MAX_CATALOGUE_FILES]:
+        lang = f", {fa.language}" if fa.language else ""
+        lines.append(f"  {fa.path} ({fa.file_type}{lang}): {fa.summary}")
+    return "\n".join(lines)
+
+
+def _build_codebase_analysis_excerpt(project_id: int) -> str | None:
+    try:
+        analysis = CodebaseAnalysisService().get_analysis(project_id)
+        if analysis is None:
+            return None
+        return _render_codebase_analysis_excerpt(analysis)
+    except Exception:
+        logger.warning(
+            "codebase_analysis_excerpt_load_failed project_id=%s",
+            project_id,
+            exc_info=True,
+        )
+        return None
 
 
 def _build_project_context_excerpt(project_context) -> str | None:
@@ -166,16 +202,19 @@ def build_context_selection_input(
         project_id=current_task.project_id,
     )
     project_context_excerpt = _build_project_context_excerpt(project_context)
+    codebase_analysis_excerpt = _build_codebase_analysis_excerpt(current_task.project_id)
 
     if not completed_task_catalog:
         return ContextBuilderResult(
             should_invoke_context_selection_agent=False,
             completed_task_catalog=[],
             project_context_excerpt=project_context_excerpt,
+            codebase_analysis_excerpt=codebase_analysis_excerpt,
         )
 
     return ContextBuilderResult(
         should_invoke_context_selection_agent=True,
         completed_task_catalog=completed_task_catalog,
         project_context_excerpt=project_context_excerpt,
+        codebase_analysis_excerpt=codebase_analysis_excerpt,
     )

@@ -33,16 +33,60 @@ class ValidationAggregationResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
-def _decision_rank(decision: str) -> int:
-    if decision == VALIDATION_DECISION_FAILED:
-        return 4
-    if decision == VALIDATION_DECISION_MANUAL_REVIEW:
-        return 3
-    if decision == VALIDATION_DECISION_PARTIAL:
-        return 2
-    if decision == VALIDATION_DECISION_COMPLETED:
-        return 1
-    raise ValidationAggregationError(f"Unknown validation decision: {decision}")
+def _compute_aggregate_decision(results: list[ValidationResult]) -> str:
+    """
+    Compute the aggregate validation decision from individual validator results.
+
+    Priority rules (highest to lowest):
+    1. Any manual_review             → manual_review
+    2. All failed                    → failed
+    3. All completed                 → completed
+    4. Otherwise (mixed, no manual)  → partial
+       This covers: partial+completed, partial+failed, completed+failed, etc.
+    """
+    if any(r.decision == VALIDATION_DECISION_MANUAL_REVIEW for r in results):
+        return VALIDATION_DECISION_MANUAL_REVIEW
+    if all(r.decision == VALIDATION_DECISION_FAILED for r in results):
+        return VALIDATION_DECISION_FAILED
+    if all(r.decision == VALIDATION_DECISION_COMPLETED for r in results):
+        return VALIDATION_DECISION_COMPLETED
+    return VALIDATION_DECISION_PARTIAL
+
+
+def _pick_primary_result(
+    *,
+    aggregate_decision: str,
+    results: list[ValidationResult],
+) -> ValidationResult:
+    """
+    Pick the primary result whose summary and discipline represent the aggregate.
+
+    - manual_review: first manual_review validator.
+    - failed:        first failed validator (all are failed by rule).
+    - completed:     first completed validator (all are completed by rule).
+    - partial:       first partial validator, then first failed (most informative about gaps).
+    """
+    if aggregate_decision == VALIDATION_DECISION_MANUAL_REVIEW:
+        for r in results:
+            if r.decision == VALIDATION_DECISION_MANUAL_REVIEW:
+                return r
+    if aggregate_decision == VALIDATION_DECISION_FAILED:
+        for r in results:
+            if r.decision == VALIDATION_DECISION_FAILED:
+                return r
+    if aggregate_decision == VALIDATION_DECISION_COMPLETED:
+        for r in results:
+            if r.decision == VALIDATION_DECISION_COMPLETED:
+                return r
+    # Partial: prefer a partial validator, then fall back to a failed one (most informative
+    # about what is still missing or broken).
+    for r in results:
+        if r.decision == VALIDATION_DECISION_PARTIAL:
+            return r
+    for r in results:
+        if r.decision == VALIDATION_DECISION_FAILED:
+            return r
+    return results[0]
 
 
 def _map_final_task_status(decision: str) -> str | None:
@@ -109,22 +153,42 @@ def _merge_recommended_next_validator_keys(results: list[ValidationResult]) -> l
     return _unique_strings(merged)
 
 
-def _pick_winning_result(results: list[ValidationResult]) -> ValidationResult:
-    if not results:
-        raise ValidationAggregationError("Cannot aggregate an empty validation result set.")
+def _build_annotations_from_failed_validators(
+    results: list[ValidationResult],
+) -> list[PartialAnnotation]:
+    """
+    Convert failed validators' blockers into PartialAnnotation entries.
 
-    return max(results, key=lambda item: _decision_rank(item.decision))
+    Called when the aggregate decision is 'partial' to ensure recovery tasks
+    receive complete context — not just what was partially correct, but also
+    exactly what failed and needs to be addressed.
+    """
+    annotations: list[PartialAnnotation] = []
+    for result in results:
+        if result.decision == VALIDATION_DECISION_FAILED:
+            for blocker in result.blockers:
+                annotations.append(
+                    PartialAnnotation(
+                        file_path=None,
+                        issue_summary=f"[{result.validator_key}] {blocker}",
+                        required_action=(
+                            "Investigate and resolve the blocking issue reported by the validator."
+                        ),
+                    )
+                )
+    return annotations
 
 
 def _build_aggregate_summary(
     *,
     winning_result: ValidationResult,
+    aggregate_decision: str,
     results: list[ValidationResult],
 ) -> str:
     validator_keys = ", ".join(result.validator_key for result in results)
 
     return (
-        f"Aggregated validation decision is '{winning_result.decision}' based on "
+        f"Aggregated validation decision is '{aggregate_decision}' based on "
         f"{len(results)} validator result(s): {validator_keys}. "
         f"Primary summary: {winning_result.summary}"
     )
@@ -159,16 +223,23 @@ def _should_upgrade_partial_to_completed(
     validator_results: list[ValidationResult],
 ) -> bool:
     """
-    Upgrade partial→completed when partial validators have no concrete annotations.
+    Upgrade partial→completed when partial validators have no concrete annotations
+    and no validator reported a hard failure.
 
     A partial decision is only actionable when at least one partial validator can name
     a specific gap via partial_annotations. Without annotations there is nothing concrete
     for recovery to act on, and a competing completed result (backed by a clean terminal
     test) is a stronger signal than speculative partial reasoning.
+
+    This upgrade is suppressed when any validator reported a hard failure, because
+    failure evidence takes precedence over speculative completion.
     """
     if winning_decision != VALIDATION_DECISION_PARTIAL:
         return False
     if not any(r.decision == VALIDATION_DECISION_COMPLETED for r in validator_results):
+        return False
+    # Never upgrade when a hard failure is present — failure evidence outweighs speculation.
+    if any(r.decision == VALIDATION_DECISION_FAILED for r in validator_results):
         return False
     return not any(
         bool(r.partial_annotations)
@@ -177,17 +248,32 @@ def _should_upgrade_partial_to_completed(
     )
 
 
-def _build_partial_validation_summary(results: list[ValidationResult]) -> str | None:
-    partial_summaries = _unique_strings(
+def _build_partial_validation_summary(
+    results: list[ValidationResult],
+    *,
+    aggregate_decision: str,
+) -> str | None:
+    """
+    Build the partial validation summary from validators that signal incomplete work.
+
+    When the aggregate decision is 'partial', failed validator summaries are included
+    alongside partial ones so that recovery tasks receive full context about what is
+    broken, not only what is partially done.
+    """
+    included_decisions: set[str] = {VALIDATION_DECISION_PARTIAL}
+    if aggregate_decision == VALIDATION_DECISION_PARTIAL:
+        included_decisions.add(VALIDATION_DECISION_FAILED)
+
+    summaries = _unique_strings(
         [
             result.partial_validation_summary or result.summary
             for result in results
-            if result.decision == VALIDATION_DECISION_PARTIAL
+            if result.decision in included_decisions
         ]
     )
-    if not partial_summaries:
+    if not summaries:
         return None
-    return "\n".join(partial_summaries)
+    return "\n".join(summaries)
 
 
 def aggregate_validation_results(
@@ -197,8 +283,11 @@ def aggregate_validation_results(
     if not validator_results:
         raise ValidationAggregationError("Cannot aggregate an empty validation result set.")
 
-    winning_result = _pick_winning_result(validator_results)
-    winning_decision = winning_result.decision
+    winning_decision = _compute_aggregate_decision(validator_results)
+    primary_result = _pick_primary_result(
+        aggregate_decision=winning_decision,
+        results=validator_results,
+    )
 
     upgraded_to_completed = _should_upgrade_partial_to_completed(
         winning_decision=winning_decision,
@@ -208,7 +297,7 @@ def aggregate_validation_results(
         completed_results = [
             r for r in validator_results if r.decision == VALIDATION_DECISION_COMPLETED
         ]
-        winning_result = completed_results[0]
+        primary_result = completed_results[0]
         winning_decision = VALIDATION_DECISION_COMPLETED
 
     followup_validation_required = any(
@@ -219,14 +308,22 @@ def aggregate_validation_results(
         for result in validator_results
     )
 
+    # Partial annotations come from partial validators plus, when the aggregate is partial,
+    # from failed validators' blockers — so recovery tasks receive the full picture.
     aggregated_partial_annotations = _merge_partial_annotations(validator_results)
+    if winning_decision == VALIDATION_DECISION_PARTIAL:
+        aggregated_partial_annotations = (
+            aggregated_partial_annotations
+            + _build_annotations_from_failed_validators(validator_results)
+        )
 
     final_result = ValidationResult(
         validator_key="validation_aggregator",
-        discipline=winning_result.discipline,
+        discipline=primary_result.discipline,
         decision=winning_decision,
         summary=_build_aggregate_summary(
-            winning_result=winning_result,
+            winning_result=primary_result,
+            aggregate_decision=winning_decision,
             results=validator_results,
         ),
         findings=_merge_findings(validator_results),
@@ -240,11 +337,14 @@ def aggregate_validation_results(
         unconsumed_evidence_ids=_merge_unconsumed_evidence_ids(validator_results),
         followup_validation_required=followup_validation_required,
         recommended_next_validator_keys=_merge_recommended_next_validator_keys(validator_results),
-        partial_validation_summary=_build_partial_validation_summary(validator_results),
+        partial_validation_summary=_build_partial_validation_summary(
+            validator_results,
+            aggregate_decision=winning_decision,
+        ),
         partial_annotations=aggregated_partial_annotations,
         metadata={
             "aggregated_validator_count": len(validator_results),
-            "winning_validator_key": winning_result.validator_key,
+            "winning_validator_key": primary_result.validator_key,
             "winning_decision": winning_decision,
             "validator_keys": [result.validator_key for result in validator_results],
             "validator_decisions": {
@@ -255,7 +355,7 @@ def aggregate_validation_results(
 
     notes = [
         f"Winning validation decision: {winning_decision}",
-        f"Winning validator: {winning_result.validator_key}",
+        f"Winning validator: {primary_result.validator_key}",
     ]
     if upgraded_to_completed:
         notes.append(

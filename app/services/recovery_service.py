@@ -56,7 +56,8 @@ def _load_relevant_file_contents_for_recovery(
 ) -> str | None:
     paths = _deserialize_files_read_paths(run.files_read)
     non_test = [
-        p for p in paths
+        p
+        for p in paths
         if "/test" not in p.lower()
         and not p.lower().startswith("test")
         and "\\test" not in p.lower()
@@ -331,9 +332,25 @@ def materialize_recovery_decision(
 
     _ensure_source_task_is_recoverable(source_task)
 
+    effective_action = decision.action
+
+    # Semantic guard: a completely failed task produced no promotable workspace — there is
+    # nothing to follow up on. insert_followup on a failed task would start from the same
+    # empty baseline as the original and is likely to fail again for identical reasons.
+    # Promote to reatomize so the objective is re-specified cleanly using the failure context.
+    # This runs before the anti-cascade check so that, if the failed task is itself a recovery
+    # task, the anti-cascade below catches the promoted reatomize and escalates to manual_review.
+    if source_task.status == TASK_STATUS_FAILED and effective_action == "insert_followup":
+        logger.warning(
+            "recovery_failed_task_followup_promoted task_id=%s source_run_id=%s — "
+            "failed tasks have no partial progress to follow up; promoting insert_followup → reatomize",
+            source_task.id,
+            decision.source_run_id,
+        )
+        effective_action = "reatomize"
+
     # Anti-cascade: tasks created by a previous reatomization cannot be reatomized again.
     # The system has already tried to refine this scope once; escalate to manual review.
-    effective_action = decision.action
     if source_task.is_recovery_task and effective_action == "reatomize":
         logger.warning(
             "recovery_anti_cascade task_id=%s source_run_id=%s — recovery task cannot be "

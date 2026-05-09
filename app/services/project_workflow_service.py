@@ -18,13 +18,14 @@ from app.schemas.workflow import (
     ProjectWorkflowResult,
     WorkflowIterationSummary,
 )
+from app.services.analysis import CodebaseAnalysisService
 from app.services.artifacts import create_artifact
 from app.services.atomic_task_generator import generate_atomic_tasks
 from app.services.execution_plan_service import (
     generate_execution_plan,
     persist_execution_plan,
 )
-from app.services.planner import generate_project_plan
+from app.services.planner import generate_project_plan, generate_project_plan_with_analysis
 from app.services.post_batch_service import (
     PostBatchServiceError,
     process_batch_after_execution,
@@ -160,7 +161,11 @@ def _run_planner_if_needed(db: Session, project_id: int) -> bool:
     if _has_tasks_at_level(db, project_id, PLANNING_LEVEL_HIGH_LEVEL):
         return True
 
-    generate_project_plan(db=db, project_id=project_id)
+    analysis = CodebaseAnalysisService().get_analysis(project_id)
+    if analysis is not None:
+        generate_project_plan_with_analysis(db=db, project_id=project_id, analysis=analysis)
+    else:
+        generate_project_plan(db=db, project_id=project_id)
     return True
 
 

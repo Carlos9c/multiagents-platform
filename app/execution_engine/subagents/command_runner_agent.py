@@ -495,7 +495,8 @@ def _build_command_planning_constraint_retry_prompt(
         inspection_plan=inspection_plan,
         inspected_files=inspected_files,
     )
-    return f"""Your previous command plan was rejected because it violated a hard execution constraint.
+    return (
+        f"""Your previous command plan was rejected because it violated a hard execution constraint.
 
 Constraint violation:
 {constraint_error}
@@ -509,6 +510,7 @@ Correction rules:
 - Prefer narrow commands that are already supported by the repository layout (e.g. a test runner, a compiler check, a lint tool invocation).
 
 {base}""".strip()
+    )
 
 
 def _resolve_command_cwd(run_dir: Path, cwd_relative_path: str) -> Path:

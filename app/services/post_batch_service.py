@@ -249,6 +249,7 @@ def _build_recovery_oriented_validation_summary(
 ) -> dict[str, Any]:
     payload = _parse_validation_artifact_payload(validation_artifact)
 
+    decision = payload.get("decision")
     return {
         "artifact_id": validation_artifact.id,
         "artifact_type": validation_artifact.artifact_type,
@@ -256,7 +257,21 @@ def _build_recovery_oriented_validation_summary(
         "validator_key": payload.get("validator_key"),
         "discipline": payload.get("discipline"),
         "validation_mode": payload.get("validation_mode"),
-        "decision": payload.get("decision"),
+        "decision": decision,
+        # recovery_posture gives the recovery model an explicit action hint based on the
+        # aggregate validation decision, removing ambiguity about which action to choose.
+        # 'reatomize_required': the task failed completely — no partial progress was preserved
+        #   in the canonical source tree. insert_followup must not be used.
+        # 'insert_followup_preferred': the task produced useful partial progress worth building on.
+        # manual_review has the same workspace semantics as failed: the workspace was NOT
+        # promoted. Include it in the reatomize_required check so the recovery model receives
+        # the correct posture hint regardless of which of the two non-promotion decisions
+        # the validator returned.
+        "recovery_posture": (
+            "reatomize_required"
+            if decision in {"failed", "manual_review"}
+            else "insert_followup_preferred"
+        ),
         "summary": payload.get("summary"),
         "validated_scope": payload.get("validated_scope"),
         "missing_scope": payload.get("missing_scope"),
@@ -358,7 +373,9 @@ def _build_execution_failure_validation_context_summary(
         "task_id": task.id,
         "task_status": task.status,
         "validation_available": False,
-        "recovery_posture": "execution_failed_before_validation",
+        # Execution failed before validation could run — workspace was never promoted.
+        # Semantics are identical to failed: reatomize_required.
+        "recovery_posture": "reatomize_required",
         "reason": (
             "Execution terminated before validation started. Recovery must reason primarily "
             "from execution evidence for this task."
