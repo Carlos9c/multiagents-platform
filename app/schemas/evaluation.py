@@ -158,6 +158,42 @@ class StageEvaluationOutput(BaseModel):
         self.key_risks = [item.strip() for item in self.key_risks if item and item.strip()]
         self.notes = [item.strip() for item in self.notes if item and item.strip()]
 
+        # Derive recommended_next_action from source-of-truth fields so the LLM
+        # never needs to get this cross-field constraint right on its own.
+        if self.decision == "stage_completed":
+            self.recommended_next_action = "close_stage"
+        elif self.manual_review_required:
+            self.recommended_next_action = "manual_review"
+        elif self.replan.required and self.replan.level == "high_level":
+            self.recommended_next_action = "replan_remaining_work"
+        elif (
+            self.followup_atomic_tasks_required
+            or self.recovery_strategy in {"reatomize_failed_tasks", "insert_followup_atomic_tasks"}
+            or (self.replan.required and self.replan.level == "atomic")
+        ):
+            self.recommended_next_action = "resequence_remaining_batches"
+        else:
+            self.recommended_next_action = "continue_current_plan"
+
+        # Auto-fix plan_change_scope to be consistent with derived action.
+        if self.recommended_next_action in {"close_stage", "continue_current_plan"}:
+            self.plan_change_scope = "none"
+        elif self.recommended_next_action == "replan_remaining_work":
+            self.plan_change_scope = "high_level_replan"
+        elif self.recommended_next_action == "resequence_remaining_batches":
+            if self.plan_change_scope not in {"local_resequencing", "remaining_plan_rebuild"}:
+                self.plan_change_scope = "local_resequencing"
+
+        # Auto-fix remaining_plan_still_valid to be consistent with derived action.
+        if self.recommended_next_action == "replan_remaining_work":
+            self.remaining_plan_still_valid = False
+        elif self.recommended_next_action in {
+            "close_stage",
+            "continue_current_plan",
+            "resequence_remaining_batches",
+        }:
+            self.remaining_plan_still_valid = True
+
         if self.followup_atomic_tasks_required and not self.followup_atomic_tasks_reason:
             raise ValueError(
                 "followup_atomic_tasks_reason is required when followup_atomic_tasks_required is true."
@@ -248,11 +284,6 @@ class StageEvaluationOutput(BaseModel):
                 raise ValueError(
                     "decision='stage_incomplete' cannot set project_stage_closed=true."
                 )
-
-        if self.recommended_next_action is not None and not self.recommended_next_action_reason:
-            raise ValueError(
-                "recommended_next_action_reason is required when recommended_next_action is set."
-            )
 
         if self.recommended_next_action == "close_stage":
             if self.decision != "stage_completed" or not self.project_stage_closed:

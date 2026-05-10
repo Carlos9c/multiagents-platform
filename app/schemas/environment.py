@@ -5,6 +5,11 @@ from pydantic import BaseModel, Field
 RuntimeType = Literal["python_venv", "node_npm", "rust_cargo"]
 
 
+class EnvVar(BaseModel):
+    key: str = Field(min_length=1, description="Environment variable name.")
+    value: str = Field(description="Environment variable value.")
+
+
 class LLMPinnedDependency(BaseModel):
     name: str = Field(
         min_length=1,
@@ -34,8 +39,8 @@ class RuntimeEnvironmentPlanOutput(BaseModel):
         ),
     )
     dependencies: list[LLMPinnedDependency]
-    environment_variables: dict[str, str] = Field(
-        default_factory=dict,
+    environment_variables: list[EnvVar] = Field(
+        default_factory=list,
         description="Additional environment variables to set in the container.",
     )
     planning_rationale: str = Field(

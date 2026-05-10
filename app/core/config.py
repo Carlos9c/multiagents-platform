@@ -7,7 +7,6 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 class Settings(BaseSettings):
     database_url: str
-    redis_url: str
     app_env: str = "dev"
 
     llm_provider: str = "openai"

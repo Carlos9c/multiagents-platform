@@ -235,7 +235,21 @@ class DockerDriver(BaseEnvironmentDriver):
         try:
             container = client.containers.get(session.container_id)
             container.stop(timeout=10)
-            container.remove()
+            try:
+                # force=True handles the case where stop() timed out and the
+                # container is still technically running.
+                container.remove(force=True)
+            except docker.errors.APIError as remove_exc:
+                # 409 with "already in progress" means Docker's own --rm cleanup
+                # is racing with us — the container will be gone momentarily.
+                if remove_exc.status_code == 409 and "already in progress" in str(remove_exc):
+                    logger.info(
+                        "docker_driver_container_removal_in_progress project_id=%s container_id=%s",
+                        session.project_id,
+                        session.container_id,
+                    )
+                else:
+                    raise
             logger.info(
                 "docker_driver_session_stopped project_id=%s container_id=%s",
                 session.project_id,

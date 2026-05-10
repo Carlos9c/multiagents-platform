@@ -262,34 +262,30 @@ What to optimize for:
 
 def build_stage_evaluation_retry_prompt(
     *,
-    project_name: str,
+    original_user_prompt: str,
     validation_error: str,
 ) -> str:
     return f"""
-Project name: {project_name}
-
-Your previous output was invalid.
+Your previous output was invalid. Correct it and return valid JSON matching the schema.
 
 Validation error:
 {validation_error}
-
-You must correct the output and return valid JSON matching the schema.
 
 Critical corrections:
 - do not use refined as a replan level
 - only valid replan levels are atomic and high_level
 - do not use retry_batch
-- keep decision, project_stage_closed, manual_review_required, recovery_strategy, replan, and recommended_next_action fully consistent
-- keep plan_change_scope, remaining_plan_still_valid, new_recovery_tasks_blocking, and single_task_tail_risk consistent with the recommended action
+- keep decision, project_stage_closed, manual_review_required, recovery_strategy, and replan fully consistent
 - do not set stage_completed unless the stage is truly closed
 - do not request replan_from_high_level unless replan.required=true and replan.level=high_level
 - do not request insert_followup_atomic_tasks unless followup_atomic_tasks_required=true
 - do not request manual_review unless manual_review_required=true
-- do not use replan_remaining_work unless replan.required=true and replan.level=high_level
-- do not use continue_current_plan together with follow-up tasks, replanning, or manual review
 - prefer the narrowest sufficient recovery action
 - do not escalate a local recoverable context-selection failure to manual review unless the evidence clearly requires it
 - return only JSON matching the schema
+
+Original evaluation context:
+{original_user_prompt}
 """.strip()
 
 
@@ -337,7 +333,7 @@ def call_stage_evaluation_model(
         return StageEvaluationOutput.model_validate(raw)
     except ValidationError as exc:
         retry_user_prompt = build_stage_evaluation_retry_prompt(
-            project_name=project_name,
+            original_user_prompt=first_user_prompt,
             validation_error=str(exc),
         )
 

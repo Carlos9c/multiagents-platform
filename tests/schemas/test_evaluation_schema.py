@@ -69,38 +69,44 @@ def test_continue_current_plan_is_valid_with_none_scope_and_valid_remaining_plan
     assert output.remaining_plan_still_valid is True
 
 
-def test_continue_current_plan_rejects_followup_tasks_required():
-    with pytest.raises(ValidationError, match="continue_current_plan"):
-        StageEvaluationOutput.model_validate(
-            _base_output(
-                followup_atomic_tasks_required=True,
-                followup_atomic_tasks_reason="A new follow-up task is required.",
-            )
+def test_continue_current_plan_with_followup_tasks_derives_resequence():
+    output = StageEvaluationOutput.model_validate(
+        _base_output(
+            followup_atomic_tasks_required=True,
+            followup_atomic_tasks_reason="A new follow-up task is required.",
+            recommended_next_action="continue_current_plan",
         )
+    )
+    assert output.recommended_next_action == "resequence_remaining_batches"
+    assert output.plan_change_scope == "local_resequencing"
+    assert output.remaining_plan_still_valid is True
 
 
-def test_continue_current_plan_rejects_replan_required():
-    with pytest.raises(ValidationError, match="continue_current_plan"):
-        StageEvaluationOutput.model_validate(
-            _base_output(
-                replan=EvaluationReplanInstruction(
-                    required=True,
-                    level="atomic",
-                    reason="Atomic replanning was requested.",
-                    target_task_ids=[1],
-                )
-            )
+def test_continue_current_plan_with_replan_derives_resequence():
+    output = StageEvaluationOutput.model_validate(
+        _base_output(
+            replan=EvaluationReplanInstruction(
+                required=True,
+                level="atomic",
+                reason="Atomic replanning was requested.",
+                target_task_ids=[1],
+            ),
+            recommended_next_action="continue_current_plan",
         )
+    )
+    assert output.recommended_next_action == "resequence_remaining_batches"
+    assert output.plan_change_scope == "local_resequencing"
 
 
-def test_continue_current_plan_rejects_manual_review_required():
-    with pytest.raises(ValidationError, match="continue_current_plan"):
-        StageEvaluationOutput.model_validate(
-            _base_output(
-                manual_review_required=True,
-                manual_review_reason="A human should inspect the result.",
-            )
+def test_continue_current_plan_with_manual_review_derives_manual_review():
+    output = StageEvaluationOutput.model_validate(
+        _base_output(
+            manual_review_required=True,
+            manual_review_reason="A human should inspect the result.",
+            recommended_next_action="continue_current_plan",
         )
+    )
+    assert output.recommended_next_action == "manual_review"
 
 
 def test_resequence_remaining_batches_is_valid_with_local_resequencing_scope():
@@ -155,40 +161,43 @@ def test_resequence_remaining_batches_is_valid_with_remaining_plan_rebuild_scope
     assert output.plan_change_scope == "remaining_plan_rebuild"
 
 
-def test_resequence_remaining_batches_rejects_high_level_replan():
-    with pytest.raises(ValidationError):
-        StageEvaluationOutput.model_validate(
-            _base_output(
-                recovery_strategy="replan_from_high_level",
-                recovery_reason="The high-level plan is no longer adequate.",
-                recommended_next_action="resequence_remaining_batches",
-                recommended_next_action_reason="This should fail because it conflicts with high-level replanning.",
-                plan_change_scope="local_resequencing",
-                remaining_plan_still_valid=False,
-                replan=EvaluationReplanInstruction(
-                    required=True,
-                    level="high_level",
-                    reason="High-level replanning is required.",
-                    target_task_ids=[10],
-                ),
-            )
+def test_high_level_replan_overrides_resequence_action():
+    output = StageEvaluationOutput.model_validate(
+        _base_output(
+            recovery_strategy="replan_from_high_level",
+            recovery_reason="The high-level plan is no longer adequate.",
+            recommended_next_action="resequence_remaining_batches",
+            recommended_next_action_reason="Contradictory — high_level replan takes priority.",
+            plan_change_scope="local_resequencing",
+            remaining_plan_still_valid=False,
+            replan=EvaluationReplanInstruction(
+                required=True,
+                level="high_level",
+                reason="High-level replanning is required.",
+                target_task_ids=[10],
+            ),
         )
+    )
+    assert output.recommended_next_action == "replan_remaining_work"
+    assert output.plan_change_scope == "high_level_replan"
+    assert output.remaining_plan_still_valid is False
 
 
-def test_resequence_remaining_batches_rejects_none_scope():
-    with pytest.raises(ValidationError, match="plan_change_scope"):
-        StageEvaluationOutput.model_validate(
-            _base_output(
-                recovery_strategy="insert_followup_atomic_tasks",
-                recovery_reason="A local follow-up task was created.",
-                followup_atomic_tasks_required=True,
-                followup_atomic_tasks_reason="A local follow-up task exists.",
-                recommended_next_action="resequence_remaining_batches",
-                recommended_next_action_reason="The work should be regrouped.",
-                plan_change_scope="none",
-                remaining_plan_still_valid=True,
-            )
+def test_resequence_remaining_batches_auto_fixes_none_scope():
+    output = StageEvaluationOutput.model_validate(
+        _base_output(
+            recovery_strategy="insert_followup_atomic_tasks",
+            recovery_reason="A local follow-up task was created.",
+            followup_atomic_tasks_required=True,
+            followup_atomic_tasks_reason="A local follow-up task exists.",
+            recommended_next_action="resequence_remaining_batches",
+            recommended_next_action_reason="The work should be regrouped.",
+            plan_change_scope="none",
+            remaining_plan_still_valid=True,
         )
+    )
+    assert output.recommended_next_action == "resequence_remaining_batches"
+    assert output.plan_change_scope == "local_resequencing"
 
 
 def test_replan_remaining_work_is_valid_only_with_high_level_replan_scope():
@@ -218,44 +227,44 @@ def test_replan_remaining_work_is_valid_only_with_high_level_replan_scope():
     assert output.remaining_plan_still_valid is False
 
 
-def test_replan_remaining_work_rejects_valid_remaining_plan():
-    with pytest.raises(ValidationError, match="remaining_plan_still_valid"):
-        StageEvaluationOutput.model_validate(
-            _base_output(
-                recovery_strategy="replan_from_high_level",
-                recovery_reason="The remaining work is no longer represented correctly.",
-                recommended_next_action="replan_remaining_work",
-                recommended_next_action_reason="A structural change invalidates the remaining plan.",
-                plan_change_scope="high_level_replan",
-                remaining_plan_still_valid=True,
-                replan=EvaluationReplanInstruction(
-                    required=True,
-                    level="high_level",
-                    reason="High-level replanning is required.",
-                    target_task_ids=[20],
-                ),
-            )
+def test_replan_remaining_work_auto_fixes_remaining_plan_still_valid():
+    output = StageEvaluationOutput.model_validate(
+        _base_output(
+            recovery_strategy="replan_from_high_level",
+            recovery_reason="The remaining work is no longer represented correctly.",
+            recommended_next_action="replan_remaining_work",
+            recommended_next_action_reason="A structural change invalidates the remaining plan.",
+            plan_change_scope="high_level_replan",
+            remaining_plan_still_valid=True,
+            replan=EvaluationReplanInstruction(
+                required=True,
+                level="high_level",
+                reason="High-level replanning is required.",
+                target_task_ids=[20],
+            ),
         )
+    )
+    assert output.remaining_plan_still_valid is False
 
 
-def test_replan_remaining_work_rejects_non_high_level_scope():
-    with pytest.raises(ValidationError, match="high_level_replan"):
-        StageEvaluationOutput.model_validate(
-            _base_output(
-                recovery_strategy="replan_from_high_level",
-                recovery_reason="The remaining work is structurally invalid.",
-                recommended_next_action="replan_remaining_work",
-                recommended_next_action_reason="A structural change invalidates the remaining plan.",
-                plan_change_scope="remaining_plan_rebuild",
-                remaining_plan_still_valid=False,
-                replan=EvaluationReplanInstruction(
-                    required=True,
-                    level="high_level",
-                    reason="High-level replanning is required.",
-                    target_task_ids=[30],
-                ),
-            )
+def test_replan_remaining_work_auto_fixes_plan_change_scope():
+    output = StageEvaluationOutput.model_validate(
+        _base_output(
+            recovery_strategy="replan_from_high_level",
+            recovery_reason="The remaining work is structurally invalid.",
+            recommended_next_action="replan_remaining_work",
+            recommended_next_action_reason="A structural change invalidates the remaining plan.",
+            plan_change_scope="remaining_plan_rebuild",
+            remaining_plan_still_valid=False,
+            replan=EvaluationReplanInstruction(
+                required=True,
+                level="high_level",
+                reason="High-level replanning is required.",
+                target_task_ids=[30],
+            ),
         )
+    )
+    assert output.plan_change_scope == "high_level_replan"
 
 
 def test_stage_completed_allows_only_close_stage_or_none():
@@ -283,21 +292,22 @@ def test_stage_completed_allows_only_close_stage_or_none():
     assert output.recommended_next_action == "close_stage"
 
 
-def test_stage_completed_rejects_resequence_next_action():
-    with pytest.raises(ValidationError, match="stage_completed"):
-        StageEvaluationOutput.model_validate(
-            _base_output(
-                decision="stage_completed",
-                decision_summary="The stage goals are fully satisfied and the stage can be closed safely.",
-                stage_goals_satisfied=True,
-                project_stage_closed=True,
-                recommended_next_action="resequence_remaining_batches",
-                recommended_next_action_reason="This should fail because the stage is already complete.",
-                recovery_strategy="none",
-                plan_change_scope="local_resequencing",
-                remaining_plan_still_valid=True,
-            )
+def test_stage_completed_with_resequence_derives_close_stage():
+    output = StageEvaluationOutput.model_validate(
+        _base_output(
+            decision="stage_completed",
+            decision_summary="The stage goals are fully satisfied and the stage can be closed safely.",
+            stage_goals_satisfied=True,
+            project_stage_closed=True,
+            recommended_next_action="resequence_remaining_batches",
+            recommended_next_action_reason="Contradictory — stage_completed overrides.",
+            recovery_strategy="none",
+            plan_change_scope="local_resequencing",
+            remaining_plan_still_valid=True,
         )
+    )
+    assert output.recommended_next_action == "close_stage"
+    assert output.plan_change_scope == "none"
 
 
 def test_stage_completed_rejects_followup_tasks():

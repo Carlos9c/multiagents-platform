@@ -62,7 +62,7 @@ def plan_runtime_environment(
             )
             for dep in output.dependencies
         ],
-        environment_variables=output.environment_variables,
+        environment_variables={ev.key: ev.value for ev in output.environment_variables},
         change_log=[
             SpecChange(
                 change_type="initial",

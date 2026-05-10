@@ -29,7 +29,7 @@ def _make_plan_output(**overrides) -> dict:
                 "purpose": "ML model training",
             }
         ],
-        "environment_variables": {},
+        "environment_variables": [],
         "planning_rationale": "Project requires XGBoost for machine learning tasks.",
     }
     base.update(overrides)

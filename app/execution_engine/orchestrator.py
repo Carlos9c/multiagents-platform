@@ -1494,12 +1494,18 @@ class ExecutionOrchestrator:
         return (
             ExecutionResult(
                 task_id=active_request.task_id,
-                decision=EXECUTION_DECISION_FAILED,
-                summary="Execution budget exceeded before a valid finish decision.",
-                details="The orchestrator loop exceeded max_steps.",
+                decision=EXECUTION_DECISION_COMPLETED,
+                summary="Execution budget exceeded; forwarding accumulated work to validation.",
+                details=(
+                    "The orchestrator loop exceeded max_steps. "
+                    "Partial work is forwarded to validation for assessment."
+                ),
                 remaining_scope=active_request.task_description or active_request.task_title,
-                blockers_found=["max_steps exceeded"],
-                validation_notes=["Execution orchestrator exceeded its budget."],
+                blockers_found=[],
+                validation_notes=[
+                    "Execution budget (max_steps) exceeded. "
+                    "Validator should assess partial completion and determine if follow-up work is needed."
+                ],
                 execution_agent_sequence=list(executed_subagents),
                 evidence=resolution_state.evidence,
             ),
