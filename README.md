@@ -2,7 +2,41 @@
 
 Sistema de orquestación multi-agente para la ejecución autónoma de tareas de desarrollo. Ejecuta tareas atómicas con validación estructurada, trazabilidad de evidencia y recuperación determinista.
 
-**Stack:** FastAPI · SQLAlchemy 2.0 · PostgreSQL · OpenAI structured outputs · Redis
+**Stack:** FastAPI · SQLAlchemy 2.0 · PostgreSQL · OpenAI structured outputs · Docker
+
+---
+
+## Estado del proyecto
+
+### Lo que está implementado y funcionando
+
+El sistema es capaz de ejecutar un proyecto de software de extremo a extremo de forma autónoma:
+
+1. **Pipeline de planificación completo** — descomposición en tres niveles: `high_level` → `refined` (opcional) → `atomic`, más generación del plan de ejecución secuenciado en batches con checkpoints.
+
+2. **Motor de ejecución orquestado** — loop de decisión en dos fases (discovery → execution) con tres subagentes (`context_selection_agent`, `code_change_agent`, `command_runner_agent`), gestión de presupuesto (`max_steps`, `max_agent_calls`, `max_repair_attempts`) y trazabilidad completa de evidencia.
+
+3. **Sistema de validación modular** — routing dinámico de validadores, validador de código con rendering especializado, y agregación determinista con prioridad `failed > manual_review > partial > completed`.
+
+4. **Pipeline post-batch completo** — evaluación de stage con LLM, recovery (reatomize / insert_followup / manual_review), decisión de intención post-batch, compiler de asignación de recovery, y mutación viva del plan (patch, resequence, replan).
+
+5. **Sistema de entorno Docker** — planificación del entorno de ejecución con LLM, bootstrapping de contenedores Docker, validación del entorno (smoke test + repair), y gestión del ciclo de vida de sesiones. Soporta `python_slim`, con soporte declarado para `node_npm` y `rust_cargo`.
+
+6. **Workflow completo por iteraciones** — el `ProjectWorkflowService` ejecuta iteraciones hasta cerrar el stage, con guards contra agotamiento del plan, reapertura de finalización, y límite de iteraciones configurable.
+
+### Cambios recientes significativos
+
+- **Budget exhaustion → COMPLETED**: cuando el orquestador agota `max_steps`, el resultado se marca `completed` en lugar de `failed`, enviando el trabajo acumulado a validación para salvaguardar el trabajo parcial.
+- **`StageEvaluationOutput` derivación determinista**: `recommended_next_action`, `plan_change_scope` y `remaining_plan_still_valid` se derivan automáticamente de los campos fuente de verdad, eliminando una clase entera de errores de validación por salidas contradictorias del LLM.
+- **Docker stop 409 race condition**: el sistema maneja correctamente el caso donde Docker elimina el contenedor automáticamente (`--rm`) antes de que `stop_session` llame a `remove()`.
+- **`EnvVar` model para variables de entorno**: reemplaza `dict[str, str]` en `RuntimeEnvironmentPlanOutput` para cumplir con el subconjunto estricto de JSON Schema de OpenAI Structured Outputs.
+- **Redis eliminado**: la dependencia de Redis era legacy y nunca se usó en el código. Se eliminó de config y `.env`.
+
+### Números actuales
+
+- **426 tests unitarios** — todos passing
+- **12 tests de integración** (Docker) — se ejecutan con `-m integration`
+- **0 failures** en CI
 
 ---
 
@@ -19,6 +53,7 @@ ProjectWorkflowService.run_workflow()
   └── [iteración por batch]
         ├── [5] TaskExecutionService × N tasks
         │     ├── ExecutionRun creado
+        │     ├── EnvironmentBootstrapper → Docker session
         │     ├── OrchestratedExecutionEngine
         │     │     → Orchestrator loop (discovery → execution)
         │     │         → context_selection_agent
@@ -82,10 +117,52 @@ Construye un `ExecutionPlan` con batches secuenciados a partir de las tareas at�
 | `ExecutionPlan` | Plan completo: `execution_batches`, `checkpoints`, `ready_task_ids`, `blocked_task_ids`, `inferred_dependencies` |
 | `ExecutionBatch` | Grupo de tareas: `batch_id`, `batch_index`, `task_ids`, `checkpoint_id`, `is_patch_batch`, `anchor_batch_index`, `patch_index` |
 | `CheckpointDefinition` | Punto de evaluación: `checkpoint_id`, `after_batch_id`, `evaluation_focus` (lista de `CheckpointEvaluationFocus`) |
-| `CheckpointEvaluationFocus` | Literal: `architecture_alignment`, `functional_coverage`, `artifact_consistency`, `task_completion_quality`, `dependency_validation`, `risk_control`, `stage_closure` |
 | `ProjectExecutionContext` | Contexto del proyecto inyectado en el plan y en el LLM |
 | `CandidateAtomicTask` | Snapshot de tarea atómica como input al secuenciador |
 | `ExecutionStateSummary` | Estado de ejecución actual: tareas completadas, pendientes, fallidas |
+
+---
+
+## Runtime Environment System (`app/services/environment/`)
+
+Sistema de entorno de ejecución basado en Docker. Se activa para tareas que requieren ejecución real de código.
+
+### Flujo
+
+```
+EnvironmentPlanner   → RuntimeSpec (image, dependencies, env vars)
+EnvironmentBootstrapper
+  → pull imagen Docker
+  → arrancar contenedor
+  → instalar dependencias
+  → smoke test
+  → (si falla) repair via LLM → retry
+EnvironmentSession   → proxy para comandos en el contenedor
+stop_session()       → detener y eliminar contenedor
+```
+
+### Componentes
+
+| Archivo | Rol |
+|---|---|
+| `planner.py` | Llama al LLM para producir `RuntimeEnvironmentPlanOutput` y lo convierte en `RuntimeSpec` |
+| `bootstrapper.py` | Arranca el contenedor, instala dependencias, valida con smoke test, repara si falla |
+| `docker_driver.py` | Wrapper sobre la SDK de Docker: pull, run, exec, stop/remove |
+| `validator.py` | Ejecuta el smoke test y decide si el entorno está listo |
+| `session_store.py` | Persiste y recupera `EnvironmentSession` activas por proyecto |
+| `registry.py` | Registry de drivers por `RuntimeType` |
+| `contracts.py` | Tipos compartidos: `RuntimeSpec`, `EnvironmentSession`, `EnvironmentCommandResult` |
+
+### Tipos clave
+
+| Tipo | Descripción |
+|---|---|
+| `RuntimeSpec` | Especificación del entorno: `runtime_type`, `image`, `dependencies`, `environment_variables` |
+| `EnvironmentSession` | Sesión activa: `project_id`, `container_id`, `project_root`, `runtime_type` |
+| `RuntimeEnvironmentPlanOutput` | Output del LLM: imagen, dependencias, vars de entorno (lista de `EnvVar`) |
+| `EnvVar` | Par `key`/`value` para variables de entorno (compatible con OpenAI Structured Outputs) |
+
+Runtimes soportados: `python_slim` (implementado y probado), `node_npm` y `rust_cargo` (declarados en tipos, drivers pendientes).
 
 ---
 
@@ -104,6 +181,7 @@ Loop de decisión en dos fases fijas:
 - `invalid` = error del LLM; consume budget pero no rompe el flujo
 - `reject` = salida válida (tarea rechazada estructuralmente)
 - `finish` requiere evidencia acumulada para ser válido
+- **Budget exhaustion**: si se agota `max_steps`, el resultado se marca `COMPLETED` (no `FAILED`) para enviar el trabajo parcial a validación
 
 **Presupuesto (`app/execution_engine/budget.py`):**
 
@@ -130,14 +208,6 @@ class LoopBudget:
 | `ExecutionRequest` | Input al engine: task metadata, `ProjectExecutionContext`, `HistoricalExecutionContext` |
 | `ExecutionResult` | Output: `decision` (completed\|partial\|failed\|rejected), `evidence`, `execution_agent_sequence` |
 | `ExecutionEvidence` | Evidencia estructurada: `changed_files`, `commands_run`, `notes` |
-
-**Excepciones (`app/execution_engine/base.py`):**
-
-| Excepción | Significado |
-|---|---|
-| `ExecutionEngineError` | Error no recuperable |
-| `ExecutionEngineTransientError` | Error transitorio (reintentable) |
-| `ExecutionEngineRejectedError` | Tarea rechazada por el engine |
 
 ### Subagentes
 
@@ -206,12 +276,11 @@ Llama al LLM (`call_stage_evaluation_model`) para evaluar el outcome del batch.
 | Tipo | Valores |
 |---|---|
 | `StageEvaluationDecision` | `stage_completed`, `stage_incomplete`, `manual_review_required` |
-| `BatchOutcome` | `successful`, `partial`, `failed`, `blocked` |
-| `PlanChangeScope` | `none`, `local_resequence`, `full_replan` |
-| `RecommendedNextAction` | `continue`, `resequence`, `replan`, `close`, `manual_review` |
-| `RecoveryStrategy` | Estrategia de recovery sugerida por el evaluador |
+| `RecommendedNextAction` | `close_stage`, `continue_current_plan`, `resequence_remaining_batches`, `replan_remaining_work`, `manual_review` |
+| `PlanChangeScope` | `none`, `local_resequencing`, `remaining_plan_rebuild`, `high_level_replan` |
+| `RecoveryStrategy` | `none`, `reatomize_failed_tasks`, `insert_followup_atomic_tasks`, `replan_from_high_level`, `manual_review` |
 
-`StageEvaluationOutput` incluye: `decision`, `batch_outcome`, `plan_change_scope`, `recommended_next_action`, `recovery_strategy`, `new_recovery_tasks_blocking`, `notes`.
+`StageEvaluationOutput` deriva automáticamente `recommended_next_action`, `plan_change_scope` y `remaining_plan_still_valid` desde los campos fuente de verdad del modelo. El LLM no puede producir combinaciones contradictorias.
 
 ### 2. Recovery Service (`app/services/recovery_service.py`)
 
@@ -229,27 +298,23 @@ Materializa las decisiones de recovery sobre tareas fallidas/parciales.
 
 **Efectos por acción:**
 
-| Acción | Status tarea fuente | `is_recovery_task` | Notas |
-|---|---|---|---|
-| `reatomize` | `reatomized` | `True` | Guard anti-cascada: no se puede reatomizar una tarea `is_recovery_task=True` |
-| `insert_followup` | `followed_up` | `False` | Tarea fuente marcada terminal; scope residual delegado |
-| `manual_review` | sin cambio (`partial`) | — | No crea tareas |
+| Acción | Status tarea fuente | `is_recovery_task` |
+|---|---|---|
+| `reatomize` | `reatomized` | `True` |
+| `insert_followup` | `followed_up` | `False` |
+| `manual_review` | sin cambio (`partial`) | — |
 
-**Guards de recovery (`materialize_recovery_decision`):**
+**Guards de recovery:**
 
-| Guard | Condición de disparo | Efecto |
+| Guard | Condición | Efecto |
 |---|---|---|
 | `recovery_anti_cascade` | `is_recovery_task=True` + acción `reatomize` | Fuerza `manual_review` |
 | `recovery_followup_depth_cap` | `followup_depth >= 2` + acción `insert_followup` | Fuerza `manual_review` |
-| `recovery_repeated_failure_cap` | ≥ 1 sibling recovery ya fallado/partial + acción `insert_followup` | Fuerza `manual_review` |
-
-**`RecoveryContext`** acumula a través del pipeline: `recovery_decisions`, `recovery_created_tasks`, `open_issues`.
+| `recovery_repeated_failure_cap` | ≥ 1 sibling recovery fallado/partial + `insert_followup` | Fuerza `manual_review` |
 
 ### 3. Post-Batch Decision Service (`app/services/post_batch_decision_service.py`)
 
 Traduce las señales del evaluador y el contexto de recovery en un `ResolvedPostBatchIntent` canónico.
-
-**`ResolvedPostBatchIntent` (`app/schemas/post_batch_intent.py`):**
 
 | Campo | Tipo | Descripción |
 |---|---|---|
@@ -258,44 +323,26 @@ Traduce las señales del evaluador y el contexto de recovery en un `ResolvedPost
 | `remaining_plan_still_valid` | `bool` | Si el plan restante sigue siendo válido |
 | `has_new_recovery_tasks` | `bool` | Si se crearon tareas de recovery |
 | `requires_plan_mutation` | `bool` | Si el plan debe ser mutado |
-| `requires_all_new_tasks_assigned` | `bool` | Si todas las tareas nuevas deben quedar asignadas |
 | `can_continue_after_application` | `bool` | Si se puede continuar tras la mutación |
 | `should_close_stage` | `bool` | Si el stage debe cerrarse |
-| `reopened_finalization` | `bool` | Si se reabrió la finalización |
-| `decision_signals` | `list[str]` | Señales que llevaron a esta decisión |
 
 ### 4. Recovery Assignment Compiler (`app/services/recovery_assignment_compiler_service.py`)
 
-Cuando `intent_type="assign"`, compila una propuesta de asignación de clusters en el plan activo.
-
-Llama al LLM (`call_recovery_assignment_model`) para obtener `RecoveryAssignmentOutput` y lo compila en `CompiledClusterAssignment`:
-
-**Tipos clave en `app/schemas/recovery_assignment.py`:**
-
-| Tipo | Valores |
-|---|---|
-| `AssignmentImpactType` | `isolated_gap`, `sequential_dependency`, `parallel_opportunity`, `blocking_dependency`, `optional_enhancement` |
-| `AssignmentPlacementRelation` | `before_next_useful_progress`, `before_first_consumer_batch`, `after_anchor_batch`, `end_of_plan` |
-| `BatchAssignmentMode` | `new_patch_batch`, `attach_to_existing_batch` |
-| `IntrabatchPlacementMode` | `prepend`, `append`, `after_anchor_task`, `before_anchor_task` |
-
-Si el compiler no puede asignar todos los clusters, emite `requires_replan=True` y el pipeline escala a replan.
+Cuando `intent_type="assign"`, compila una propuesta de asignación de clusters en el plan activo vía LLM. Si no puede asignar todos los clusters emite `requires_replan=True` y el pipeline escala a replan.
 
 ### 5. Live Plan Mutation Service (`app/services/live_plan_mutation_service.py`)
 
 Aplica la mutación final al plan basándose en el intent resuelto.
-
-**`LivePlanMutationKind`:**
 
 | Kind | Cuándo |
 |---|---|
 | `none` | Intent `continue`, `manual_review` o `close` |
 | `assignment` | Tareas de recovery asignadas via compiler |
 | `resequence_patch` | Patch batch insertado inmediatamente tras el anchor |
-| `resequence_deferred` | Resequence sin recovery tasks — no se produce patch |
+| `resequence_deferred` | Resequence sin recovery tasks |
 | `escalated_to_replan` | Plan completo inválido; se requiere replanning |
 
-**Lógica de escalado defensivo:** si `resequence_deferred` llega con recovery tasks pendientes de asignar (`requires_all_new_tasks_assigned=True`), el sistema escala automáticamente a un intent `assign` en lugar de crashear. Previene la pérdida permanente de tareas de recovery.
+**Escalado defensivo:** si `resequence_deferred` llega con recovery tasks pendientes de asignar, el sistema escala automáticamente a `assign` en lugar de crashear.
 
 ---
 
@@ -303,18 +350,14 @@ Aplica la mutación final al plan basándose en el intent resuelto.
 
 Inserta patch batches en el plan activo sin replanificar.
 
-- `insert_patch_batch_after_batch()` — inserta un batch de recovery tras el anchor batch; usa `model_construct` para el plan provisional (evita validación Pydantic prematura durante la inserción)
+- `insert_patch_batch_after_batch()` — usa `model_construct` para evitar validación Pydantic prematura durante la inserción
 - `normalize_execution_plan_terminal_invariants()` — garantiza `stage_closure` en el checkpoint final, reindexación correcta de batches, y unicidad de checkpoint IDs
-
-**Invariante:** el checkpoint del batch final siempre incluye `stage_closure` en `evaluation_focus`.
 
 ---
 
 ## Project Workflow Service (`app/services/project_workflow_service.py`)
 
 Orquesta el pipeline completo de un proyecto, iteración por iteración.
-
-**Flujo de iteraciones:**
 
 ```
 while batches pendientes:
@@ -330,18 +373,9 @@ while batches pendientes:
 ```
 
 **Guards:**
-
-- **Plan exhaustion:** si no quedan batches pero el workflow no cerró, se detecta como agotamiento del plan y se escala
+- **Plan exhaustion:** si no quedan batches pero el workflow no cerró, se escala
 - **Finalization reopening:** si un batch de cierre produce recovery, la finalización se reabre con `reopened_finalization=True`
-- **Iteration limit:** límite configurable de iteraciones por proyecto para prevenir loops infinitos
-
-**Traza de iteraciones (`app/schemas/workflow.py`):**
-
-| Tipo | Descripción |
-|---|---|
-| `WorkflowIterationSummary` | Resumen de una iteración: batch_id, intent, mutation_kind, decision_signals |
-| `ProjectWorkflowResult` | Resultado final con todas las `WorkflowIterationSummary` y el estado del plan |
-| `WorkflowIterationTrace` | Artefacto persistido por batch con el detalle de cada iteración |
+- **Iteration limit:** límite configurable para prevenir loops infinitos
 
 ---
 
@@ -349,16 +383,12 @@ while batches pendientes:
 
 Construye el `ProjectOperationalContext` que se inyecta como contexto a los LLM calls.
 
-**`app/schemas/project_memory.py`:**
-
 | Tipo | Descripción |
 |---|---|
 | `ProjectOperationalContext` | Snapshot completo del estado del proyecto para el LLM |
 | `ProjectMemoryTaskSummary` | Resumen de una tarea completada: title, outcome, evidence snapshot |
 | `ProjectMemoryDecisionSignal` | Señal de decisión registrada: signal_type, batch_id, notes |
 | `ProjectMemoryPathSignal` | Señal de path: rutas creadas/modificadas con su propósito inferido |
-
-Este contexto alimenta a `context_selection_agent` y como parte del `ExecutionRequest`.
 
 ---
 
@@ -374,19 +404,7 @@ project/
 │   └── run/         # árbol efímero (source + workspace fusionados); eliminado tras el run
 ```
 
-La promoción fusiona el overlay workspace sobre source. El directorio `run` siempre se elimina al finalizar, independientemente del resultado.
-
-**Project Storage Service (`app/services/project_storage.py`):**
-
-Gestiona el layout de directorios bajo `AGENTS_PROJECTS_ROOT/{project_id}/`:
-
-```
-{project_id}/
-├── source/          # código canónico del proyecto
-├── artifacts/       # artifacts JSON por run
-├── executions/      # workspaces por run
-└── domain_data/     # datos de dominio del proyecto (input externo)
-```
+La promoción fusiona el overlay workspace sobre source. El directorio `run` siempre se elimina al finalizar.
 
 ---
 
@@ -397,73 +415,17 @@ Todos los llamados LLM usan **OpenAI structured outputs** (respuestas constreñi
 | Archivo | Rol |
 |---|---|
 | `base.py` | Interfaz abstracta `BaseLLMProvider` |
-| `openai_provider.py` | Implementación con structured outputs via `response_format` |
+| `openai_provider.py` | Implementación con structured outputs via `response_format`; reintentos en timeout (2s, 4s) |
 | `factory.py` | Retorna el provider configurado según env vars |
-| `schema_utils.py` | Convierte schemas Pydantic a JSON schema estricto compatible con OpenAI |
+| `schema_utils.py` | Convierte schemas Pydantic al subconjunto estricto de JSON Schema de OpenAI: `additionalProperties: false`, elimina `"default"`, hace todos los campos `required` |
 
 Modelo por defecto: `gpt-5.1` (configurable via `OPENAI_MODEL`).
-
-Cada servicio que llama al LLM tiene su propio **client** (`*_client.py`) que encapsula el schema de input/output y la llamada al provider.
 
 ---
 
 ## Modelos de datos
 
-### Project
-
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `id` | int | PK |
-| `name` | str | Nombre del proyecto |
-| `description` | str | Descripción del goal |
-| `enable_technical_refinement` | bool | Activa la fase de refinamiento técnico (nivel intermedio) |
-| `plan_version` | int | Versión actual del plan de ejecución |
-
-### Task
-
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `id` | int | PK |
-| `project_id` | int | FK a Project |
-| `parent_task_id` | int \| None | FK a Task padre |
-| `title` | str | Título de la tarea |
-| `planning_level` | str | `high_level`, `refined`, `atomic` |
-| `executor_type` | str | `pending_engine_routing`, etc. |
-| `status` | str | Ver tabla de statuses |
-| `is_recovery_task` | bool | Si fue creada por recovery (bloquea reatomize en cascada) |
-| `followup_depth` | int | Profundidad en la cadena de followup (0 = tarea original) |
-| `is_blocked` | bool | Bloqueo manual |
-| `blocking_reason` | str \| None | Razón del bloqueo |
-| `sequence_order` | int \| None | Orden de secuencia dentro del padre |
-| `implementation_steps` | list | Pasos de implementación |
-| `tests_required` | list | Criterios de verificación |
-| `acceptance_criteria` | str | Criterios de aceptación |
-
-### ExecutionRun
-
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `id` | int | PK |
-| `task_id` | int | FK a Task |
-| `status` | str | `pending`, `running`, `succeeded`, `failed`, `partial` |
-| `failure_type` | str \| None | Clasificación del fallo: `execution_error`, `validation_failed`, etc. |
-| `failure_code` | str \| None | Código programático del fallo |
-| `validation_notes` | str \| None | Feedback del validador |
-| `completed_scope` | str \| None | Alcance completado (para runs parciales) |
-| `remaining_scope` | str \| None | Alcance pendiente (para runs parciales) |
-
-### Artifact
-
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `id` | int | PK |
-| `project_id` | int | FK a Project |
-| `task_id` | int \| None | FK a Task (null para artifacts de plan) |
-| `artifact_type` | str | Ver tabla de tipos |
-| `content` | str | JSON serializado |
-| `created_by` | str | Servicio creador |
-
-**Statuses de tarea:**
+### Task statuses
 
 ```
 pending → running → awaiting_validation → completed
@@ -475,46 +437,20 @@ pending → running → awaiting_validation → completed
 
 `TERMINAL_TASK_STATUSES = {partial, completed, failed, reatomized, followed_up}`
 
----
+### Tipos de artifacts
 
-## Task Hierarchy Service (`app/services/task_hierarchy_service.py`)
-
-Propagación determinista del status de padres a partir del status de sus hijos.
-
-**Reglas de consolidación:**
-
-| Condición en hijos | Status del padre |
+| Tipo | Creador |
 |---|---|
-| Todos ∈ `{completed, reatomized, followed_up}` | `completed` |
-| Alguno en `failed`, sin hijos `pending` ni `partial` | `failed` |
-| Alguno en `partial` | `partial` |
-| Sin condición de cierre | sin cambio |
-
-**Task Hierarchy Reconciliation Service (`app/services/task_hierarchy_reconciliation_service.py`):**
-
-Dado un conjunto de `affected_task_ids` (hijos modificados), recolecta los IDs de padres únicos y propaga el status hacia arriba. Usa `db.rollback()` si falla algún paso para garantizar atomicidad.
-
----
-
-## Tipos de artifacts
-
-| Tipo | Creador | Descripción |
-|---|---|---|
-| `project_plan` | `planner` | Output del planner: lista de high-level tasks |
-| `technical_refinement` | `technical_task_refiner` | Output del refinamiento técnico |
-| `atomic_task_generation` | `atomic_task_generator` | Output de la generación atómica |
-| `execution_plan` | `execution_plan_service` | Plan de ejecución secuenciado |
-| `execution_plan_patch` | `execution_plan_patch_service` | Plan mutado con patch batch |
-| `execution_engine_context` | engine | Contexto LLM enviado al engine |
-| `execution_engine_result` | engine | Output crudo del engine |
-| `validation_result` | validation service | Resultado de validación por validador y agregado |
-| `recovery_decision` | `recovery_service` | Decisión de recovery tomada por tarea |
-| `recovery_assignment_input` | `live_plan_mutation_service` | Input al assignment compiler |
-| `recovery_assignment_output` | `live_plan_mutation_service` | Output del assignment LLM |
-| `recovery_assignment_compiled_plan` | `live_plan_mutation_service` | Plan compilado de asignación |
-| `evaluation_decision` | `evaluation_service` | Output del evaluador de stage |
-| `post_batch_result` | `post_batch_service` | Resultado completo del post-batch pipeline |
-| `workflow_batch_trace` | `project_workflow_service` | Traza de iteración por batch |
+| `project_plan` | `planner` |
+| `technical_refinement` | `technical_task_refiner` |
+| `atomic_task_generation` | `atomic_task_generator` |
+| `execution_plan` | `execution_plan_service` |
+| `execution_plan_patch` | `execution_plan_patch_service` |
+| `validation_result` | validation service |
+| `recovery_decision` | `recovery_service` |
+| `evaluation_decision` | `evaluation_service` |
+| `post_batch_result` | `post_batch_service` |
+| `workflow_batch_trace` | `project_workflow_service` |
 
 ---
 
@@ -533,8 +469,6 @@ Dado un conjunto de `affected_task_ids` (hijos modificados), recolecta los IDs d
 | `GET` | `/projects/{project_id}/artifacts` | Artifacts del proyecto |
 | `GET` | `/projects/{project_id}/execution_runs` | Runs de ejecución del proyecto |
 
-Sesión por request via FastAPI dependency injection (`app/api/deps.py`). Migrations via Alembic (`alembic/`).
-
 ---
 
 ## Configuración
@@ -543,7 +477,6 @@ Variables requeridas en `.env`:
 
 ```
 DATABASE_URL=postgresql+psycopg2://...
-REDIS_URL=redis://...
 OPENAI_API_KEY=...
 AGENTS_PROJECTS_ROOT=...
 ```
@@ -554,11 +487,11 @@ Variables opcionales clave:
 OPENAI_MODEL=gpt-5.1
 EXECUTION_ENGINE_BACKEND=orchestrated
 EXECUTION_ENGINE_MAX_STEPS=8
-EXECUTION_ENGINE_MAX_AGENT_CALLS=6
+EXECUTION_ENGINE_MAX_AGENT_CALLS=8
+EXECUTION_ENGINE_MAX_TOOL_CALLS=12
+EXECUTION_ENGINE_MAX_COMMAND_RUNS=4
 EXECUTION_ENGINE_MAX_REPAIR_ATTEMPTS=2
 ```
-
-Configuración cargada desde `.env` via Pydantic Settings (`app/core/config.py`).
 
 ---
 
@@ -568,10 +501,15 @@ Configuración cargada desde `.env` via Pydantic Settings (`app/core/config.py`)
 # Setup
 poetry install --no-root
 
-# Tests
-poetry run pytest -q                                          # todos
-poetry run pytest tests/services/test_recovery_service.py -v # un archivo
-poetry run pytest tests/services/test_recovery_service.py::test_name -v  # un test
+# Tests unitarios
+poetry run pytest -q
+
+# Tests de integración (requiere Docker)
+poetry run pytest -m integration -v
+
+# Un archivo / un test
+poetry run pytest tests/services/test_recovery_service.py -v
+poetry run pytest tests/services/test_recovery_service.py::test_name -v
 
 # Lint y formato
 poetry run ruff check .          # lint
@@ -592,7 +530,7 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**239 tests — todos passing.**
+**426 tests unitarios + 12 tests de integración — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
@@ -608,64 +546,8 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 | Project workflow | `test_project_workflow_service.py` |
 | Workspace runtime | `test_local_workspace_runtime.py` |
 | Execution plan service | `test_execution_plan_service.py` |
+| Environment (integración) | `tests/integration/test_environment_integration.py` |
 | API | `test_projects.py` |
-
----
-
-## Cambios recientes
-
-### Retry de timeouts LLM (`services/llm/openai_provider.py`)
-
-`APITimeoutError` se incluye ahora en el loop de reintentos del provider, junto con `InternalServerError` (5xx). El sistema reintenta hasta 2 veces (esperas de 2s y 4s) antes de propagar el error. Antes, un timeout transitorio propagaba directamente como fallo de tarea, desencadenando recovery innecesaria y consumiendo iteraciones del workflow. Con este fix, los timeouts transitorios se absorben a nivel de infraestructura sin afectar al estado de la tarea.
-
-### Contexto de archivos para tareas de recovery
-
-Las tareas de recovery (`is_recovery_task=True` o `followup_depth > 0`) ejecutan en contexto degradado: el `context_selection_agent` tiende a seleccionar las mismas tareas históricas que fallaron, sin acceso directo a los archivos que deberían editar.
-
-**Tres mejoras implementadas:**
-
-1. **Sibling file hints** (`request_adapter.py`): `_load_recovery_source_file_hints` recopila los `files_read` de los runs hermanos fallados/parciales y los inyecta como `preloaded_dependency_files`. Los archivos de las dependencias de los runs fallados llegan al `code_change_agent` sin pasar por el selector de contexto.
-
-2. **Enriquecimiento del modelo de recovery** (`recovery_service.py`, `recovery_client.py`): el prompt de `call_recovery_model` incluye el contenido de hasta 3 archivos fuente no-test leídos durante el run fallado. El decisor tiene visibilidad de la API real antes de proponer qué tareas crear.
-
-3. **Anti-repetición cap** (`recovery_service.py`): `recovery_repeated_failure_cap` escala a `manual_review` cuando hay ≥ 1 sibling recovery ya fallado/parcial (antes el umbral era ≥ 2). La cadena de followups queda acotada a: tarea original → un followup → `manual_review`.
-
-### Campo `followup_depth` en Task
-
-Nuevo campo `followup_depth: int` en el modelo `Task` (migración Alembic `d4e5f6a7b8c9`). Registra la profundidad de la tarea en su cadena de followup (0 = tarea original, 1 = primer followup, etc.).
-
-`recovery_followup_depth_cap`: si `followup_depth >= 2` y la acción propuesta es `insert_followup`, el sistema fuerza `manual_review`. El cap evita cadenas de micro-followups que agotan el presupuesto de iteraciones del workflow.
-
-### Reparación de ceguera contextual en `code_change_agent` (`subagents/code_change_agent.py`)
-
-En los pases de reparación (repair passes), el agente solo tenía acceso a los archivos del contexto histórico seleccionado, no a los archivos que él mismo había escrito en intentos anteriores del mismo run. El resultado era que el agente reconstruía el contenido de los archivos de memoria, acumulando drift respecto al estado real del workspace.
-
-**Fix:** nuevo section "Current workspace state" en el prompt de `code_change_agent`. Antes de construir el related file context, se cargan los contenidos actuales de todos los archivos presentes en `state.evidence.changed_files` desde el overlay del workspace. El parámetro `exclude_paths` evita duplicar ese contenido en la sección "Related file content". Los pases de reparación ahora parten del estado real, no de una reconstrucción especulativa.
-
-### Corrección de robustez en live plan mutation
-
-**Bug en producción:** el post-batch lanzaba HTTP 400 con `"Post-batch intent required assignment of all new recovery tasks, but no patched execution plan was produced"`.
-
-**Causa raíz:** `_should_run_immediate_resequence_patch` solo producía un patch cuando `new_recovery_tasks_blocking=True`. Las otras condiciones que disparan un intent `resequence` caían en `resequence_deferred` con `patched_execution_plan=None`, haciendo explotar el guard de "all tasks must be assigned".
-
-**Fix en dos capas:**
-
-1. **Eliminación del gate** (`live_plan_mutation_service.py`): `_should_run_immediate_resequence_patch` ahora siempre produce un patch inmediato cuando existen recovery tasks bajo un intent `resequence`. El flag `new_recovery_tasks_blocking` es advisory, no un gate de obligación.
-
-2. **Escalado defensivo** (`post_batch_service.py`): si el path llega a `resequence_deferred` con recovery tasks pendientes de asignar, el sistema escala automáticamente a un intent `assign` en lugar de crashear. Self-healing que previene la pérdida permanente de tareas de recovery.
-
-### Corrección de validación prematura en patch de plan
-
-`insert_patch_batch_after_batch` construía el plan provisional via `ExecutionPlan(...)` con validación Pydantic completa. En planes de un solo batch, el patch batch insertado se convierte en el batch final sin `stage_closure`, disparando el validator antes de que la normalización pueda corregirlo.
-
-Fix: `model_construct` para el plan provisional. La normalización produce el plan final válido con `stage_closure` garantizado.
-
-### Status `followed_up` — estado terminal de followup
-
-La acción `insert_followup` del sistema de recovery transiciona la tarea fuente al status `followed_up` en lugar de dejarla en `partial`. Cierra el path que dejaba tareas en estado ambiguo indefinidamente.
-
-- `TASK_STATUS_FOLLOWED_UP = "followed_up"` añadido a `TERMINAL_TASK_STATUSES` y `VALID_TASK_STATUSES`
-- Lógica de cierre de padre: padre → `completed` cuando todos los hijos ∈ `{completed, reatomized, followed_up}`
 
 ---
 
@@ -673,39 +555,39 @@ La acción `insert_followup` del sistema de recovery transiciona la tarea fuente
 
 ### Alta prioridad
 
-**1. Precisión del validador en decisiones parciales**
-El `command_runner_agent_validator` puede declarar `partial` incluso cuando el terminal test tiene exit_code=0, si el LLM detecta scope no cubierto en los criterios de aceptación. Esta sobre-generación de decisiones parciales alimenta cadenas de followups que terminan en `recovery_followup_depth_cap`. El fix en `_normalize_llm_output_for_terminal_success` ya eleva a `completed` cuando el terminal test es limpio y la tarea parece implementación ejecutable, pero la lista de markers de `_task_looks_like_executable_implementation` es incompleta (no cubre persistence, storage, data). Ampliar esa lista o relajar el criterio de normalización para tareas con tests pasando.
+**1. Soporte multi-stage**
+El sistema actual ejecuta un único stage por proyecto. Para soportar proyectos reales con múltiples stages secuenciales (ej. "backend" → "frontend" → "integración"), el `ProjectWorkflowService` necesita un loop externo que cierre el stage actual, genere el siguiente, y reutilice el contexto acumulado. Las bases ya están: `project_stage_closed`, `stage_goal`, y la memoria de proyecto (`ProjectOperationalContext`) son stage-aware.
 
-**2. Test de integración del escalado defensivo `resequence_deferred → assign`**
-El path de fallback introducido en el fix de robustez no tiene cobertura de test directa. Añadir un test en `test_post_batch_service.py` que monkeypatchee `mutate_live_plan` para devolver `resequence_deferred` con recovery tasks y verifique que el escalado a `assign` se ejecuta y produce un plan válido.
+**2. Drivers de entorno para Node.js y Rust**
+`node_npm` y `rust_cargo` están declarados en los tipos pero sus drivers no están implementados. Añadir `NodeNpmDriver` y `RustCargoDriver` siguiendo el patrón de `DockerDriver`, con sus smoke tests y comandos de instalación correspondientes.
 
 **3. Observabilidad estructurada del pipeline completo**
-El sistema ya emite `logger.warning` en cada guard de recovery y en el escalado defensivo. Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`) de forma consistente en todo el pipeline para facilitar correlación en producción sin necesidad de leer artifacts.
+Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`) en todo el pipeline para facilitar correlación en producción sin necesidad de leer artifacts.
 
 ### Media prioridad
 
-**4. Optimización del tamaño de prompt en `code_change_agent`**
-La inyección del workspace state puede generar prompts de 70-80k caracteres en proyectos con historial extenso, aumentando la probabilidad de timeout. Añadir un presupuesto de caracteres configurable para las secciones de contenido de archivos (workspace state + related file context), truncando por tamaño antes de insertar en el prompt.
+**4. API de monitorización del workflow**
+El endpoint `/workflow/projects/{project_id}/run` es síncrono y bloquea hasta el cierre del stage. Añadir endpoints de consulta de estado (`GET /workflow/projects/{project_id}/status`) y un mecanismo de ejecución asíncrona (tarea background + polling o WebSocket) para workflows de larga duración.
 
-**5. Enriquecimiento de `StageEvaluationInput` con datos de run**
+**5. Precisión del validador en decisiones parciales**
+El `command_runner_agent_validator` puede declarar `partial` incluso cuando los tests pasan, si detecta scope no cubierto en los criterios de aceptación. Ampliar la lista de markers en `_task_looks_like_executable_implementation` (persistence, storage, data) o relajar el criterio de normalización para tareas con exit_code=0.
+
+**6. Optimización del tamaño de prompt en `code_change_agent`**
+La inyección del workspace state puede generar prompts de 70-80k caracteres en proyectos con historial extenso. Añadir un presupuesto de caracteres configurable para las secciones de contenido de archivos, truncando por tamaño antes de insertar en el prompt.
+
+**7. Enriquecimiento de `StageEvaluationInput` con datos de run**
 El `evaluation_service` juzga el outcome de un batch pero no tiene acceso al estado de los runs individuales. Añadir un resumen de run-level a la entrada del evaluador para producir evaluaciones más precisas en batches con mezcla de éxito parcial y fallo.
-
-**6. Test explícito del caso single-batch con patch**
-El fix de `model_construct` cubre un escenario real: plan de un solo batch donde el patch batch se convierte en el final. Añadir test en `test_execution_plan_patch_service.py` que ejercite este path directamente.
-
-**7. Telemetría estructurada en recovery assignment compiler**
-`compile_recovery_assignment_plan` escala a `requires_replan=True` sin exponer exactamente qué cluster falló y por qué. Añadir notas estructuradas (cluster_id, razón del fallo) antes del escalado para simplificar el debugging de replans inesperados.
 
 ### Baja prioridad
 
-**8. Contexto estructural del repositorio en `context_selection_agent`**
-El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto seleccionado.
+**8. Tests end-to-end con engine real**
+Los tests actuales cubren servicios individuales con mocks. Añadir tests de integración que ejerciten el flujo completo desde `execute_task_sync` hasta la reconciliación de jerarquía, con un engine real pero LLM mockeado a nivel de provider.
 
 **9. Métricas de ejecución por proyecto**
 Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de timeout retries. Datos útiles para ajustar parámetros de orquestación y detectar proyectos problemáticos antes de que agoten el iteration limit.
 
-**10. Tests end-to-end con engine real**
-Los tests actuales cubren servicios individuales con mocks. Añadir tests de integración que ejerciten el flujo completo desde `execute_task_sync` hasta la reconciliación de jerarquía, con un engine real pero LLM mockeado a nivel de provider.
+**10. Contexto estructural del repositorio en `context_selection_agent`**
+El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto seleccionado.
 
 ---
 
@@ -713,7 +595,7 @@ Los tests actuales cubren servicios individuales con mocks. Añadir tests de int
 
 | Área | Invariante |
 |---|---|
-| Ejecución | `finish` requiere evidencia; `reject` es salida válida; loops solo si hay gap real |
+| Ejecución | `finish` requiere evidencia; `reject` es salida válida; budget exhaustion → `completed` para salvaguardar trabajo parcial |
 | Validación | Validadores independientes entre sí; agregación determinista |
 | Persistencia | 1 run → 1 artifact; artifact contiene la verdad final |
 | Workspace | Aislamiento total entre runs; `run/` siempre eliminado; promoción controlada |
@@ -721,3 +603,4 @@ Los tests actuales cubren servicios individuales con mocks. Añadir tests de int
 | Recovery | `is_recovery_task=True` bloquea `reatomize`; `followup_depth >= 2` bloquea `insert_followup`; ≥1 sibling recovery fallado bloquea nuevo followup |
 | Jerarquía | Propagación determinista; rollback si falla algún paso; sin efectos parciales sobre padres |
 | Descomposición | `MAX_ATOMIC_TASKS_PER_PARENT = 8`; `MAX_IMPLEMENTATION_STEPS_PER_ATOMIC = 20` |
+| Entorno | Smoke test obligatorio antes de usar el contenedor; repair automático con LLM ante fallo de bootstrap |
