@@ -15,6 +15,7 @@ ARTIFACTS_DIRNAME = "artifacts"
 EXECUTIONS_DIRNAME = "executions"
 DOMAIN_DATA_DIRNAME = "domain_data"
 SOURCE_DIRNAME = "source"
+ENVIRONMENT_DIRNAME = "environment"
 
 
 class ProjectStorageError(Exception):
@@ -30,6 +31,7 @@ class ProjectStoragePaths:
     executions_dir: Path
     domain_data_dir: Path
     source_dir: Path
+    env_dir: Path
 
 
 class ProjectStorageService:
@@ -73,6 +75,7 @@ class ProjectStorageService:
             executions_dir=project_root / EXECUTIONS_DIRNAME,
             domain_data_dir=domain_data_dir,
             source_dir=source_dir,
+            env_dir=project_root / ENVIRONMENT_DIRNAME,
         )
 
     def ensure_project_storage(self, project_id: int) -> ProjectStoragePaths:
@@ -84,6 +87,7 @@ class ProjectStorageService:
         paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
         paths.executions_dir.mkdir(parents=True, exist_ok=True)
         paths.domain_data_dir.mkdir(parents=True, exist_ok=True)
+        paths.env_dir.mkdir(parents=True, exist_ok=True)
 
         self._recover_source_dir_if_needed(paths.source_dir)
 

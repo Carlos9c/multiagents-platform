@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -24,5 +24,9 @@ class Project(Base):
     )
     last_planned_at: Mapped[datetime | None] = mapped_column(
         DateTime,
+        nullable=True,
+    )
+    runtime_spec: Mapped[dict | None] = mapped_column(
+        JSON,
         nullable=True,
     )

@@ -1,4 +1,5 @@
 import json
+import logging
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -21,6 +22,14 @@ from app.schemas.workflow import (
 from app.services.analysis import CodebaseAnalysisService
 from app.services.artifacts import create_artifact
 from app.services.atomic_task_generator import generate_atomic_tasks
+from app.services.environment.bootstrapper import EnvironmentBootstrapper
+from app.services.environment.contracts import (
+    EnvironmentBootstrapError,
+    EnvironmentValidationError,
+    RuntimeSpec,
+)
+from app.services.environment.planner import plan_runtime_environment
+from app.services.environment.validator import EnvironmentValidator
 from app.services.execution_plan_service import (
     generate_execution_plan,
     persist_execution_plan,
@@ -39,6 +48,8 @@ from app.services.task_execution_service import (
     execute_task_sync,
 )
 from app.services.technical_task_refiner import refine_high_level_task
+
+logger = logging.getLogger(__name__)
 
 
 class ProjectWorkflowServiceError(Exception):
@@ -688,6 +699,64 @@ def _run_execution_iteration(
     )
 
 
+def _get_atomic_tasks(db: Session, project_id: int) -> list[Task]:
+    return (
+        db.query(Task)
+        .filter(
+            Task.project_id == project_id,
+            Task.planning_level == PLANNING_LEVEL_ATOMIC,
+        )
+        .order_by(Task.id.asc())
+        .all()
+    )
+
+
+def _build_environment_manual_review_result(
+    project_id: int,
+    planning_completed: bool,
+    refinement_completed: bool,
+    atomic_generation_completed: bool,
+    reason: str,
+) -> ProjectWorkflowResult:
+    return ProjectWorkflowResult(
+        project_id=project_id,
+        status="awaiting_manual_review",
+        planning_completed=planning_completed,
+        refinement_completed=refinement_completed,
+        atomic_generation_completed=atomic_generation_completed,
+        execution_plan_generated=False,
+        plan_version=None,
+        completed_batches=[],
+        blocked_batches=[],
+        iterations=[
+            WorkflowIterationSummary(
+                iteration_number=1,
+                plan_version=1,
+                starting_plan_version=1,
+                ending_plan_version=1,
+                batch_ids_processed=[],
+                blocked_batch_ids_after_iteration=[],
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=False,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
+                requires_manual_review=True,
+                reopened_finalization=False,
+                used_patched_plan=False,
+                decision_signals=["environment_setup_failed"],
+                notes=reason,
+            )
+        ],
+        manual_review_required=True,
+        final_stage_closed=False,
+        notes=reason,
+    )
+
+
 def run_project_workflow(
     db: Session,
     project_id: int,
@@ -715,6 +784,69 @@ def run_project_workflow(
         raise ProjectWorkflowServiceError(
             "Workflow could not produce or detect atomic tasks after planning/decomposition."
         )
+
+    # --- Runtime environment phases ---
+    atomic_tasks = _get_atomic_tasks(db=db, project_id=project_id)
+    runtime_spec: RuntimeSpec | None = None
+    bootstrapper = EnvironmentBootstrapper()
+
+    try:
+        runtime_spec = plan_runtime_environment(
+            db=db,
+            project_id=project_id,
+            atomic_tasks=atomic_tasks,
+        )
+        logger.info(
+            "workflow_environment_planned project_id=%s runtime_type=%s",
+            project_id,
+            runtime_spec.runtime_type,
+        )
+    except Exception as exc:
+        logger.exception(
+            "workflow_environment_planning_failed project_id=%s error=%s",
+            project_id,
+            str(exc),
+        )
+        raise ProjectWorkflowServiceError(f"Runtime environment planning failed: {exc}") from exc
+
+    try:
+        bootstrapper.bootstrap(project_id=project_id, spec=runtime_spec)
+        logger.info("workflow_environment_bootstrapped project_id=%s", project_id)
+    except EnvironmentBootstrapError as exc:
+        logger.warning(
+            "workflow_environment_bootstrap_failed project_id=%s error=%s",
+            project_id,
+            str(exc),
+        )
+        return _build_environment_manual_review_result(
+            project_id=project_id,
+            planning_completed=planning_completed,
+            refinement_completed=refinement_completed,
+            atomic_generation_completed=atomic_generation_completed,
+            reason=f"Environment bootstrap failed and requires manual review: {exc}",
+        )
+
+    try:
+        runtime_spec = EnvironmentValidator().validate(
+            project_id=project_id,
+            spec=runtime_spec,
+        )
+        logger.info("workflow_environment_validated project_id=%s", project_id)
+    except EnvironmentValidationError as exc:
+        logger.warning(
+            "workflow_environment_validation_failed project_id=%s error=%s",
+            project_id,
+            str(exc),
+        )
+        bootstrapper.teardown(project_id=project_id)
+        return _build_environment_manual_review_result(
+            project_id=project_id,
+            planning_completed=planning_completed,
+            refinement_completed=refinement_completed,
+            atomic_generation_completed=atomic_generation_completed,
+            reason=f"Environment validation failed and requires manual review: {exc}",
+        )
+    # --- End of environment phases ---
 
     iterations: list[WorkflowIterationSummary] = []
     completed_batches: list[str] = []
@@ -918,6 +1050,8 @@ def run_project_workflow(
         notes = "Project workflow ended without explicit closure. Technical refinement was " + (
             "enabled." if enable_technical_refinement else "bypassed."
         )
+
+    bootstrapper.teardown(project_id=project_id)
 
     return ProjectWorkflowResult(
         project_id=project_id,

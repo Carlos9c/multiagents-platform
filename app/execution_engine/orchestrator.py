@@ -1350,6 +1350,36 @@ class ExecutionOrchestrator:
                     state=resolution_state,
                 )
                 resolution_state.mark_step_completed(step.id)
+
+                if resolution_state.needs_dependency_signal:
+                    _append_trace_notes_to_evidence(resolution_state)
+                    return (
+                        ExecutionResult(
+                            task_id=active_request.task_id,
+                            decision=EXECUTION_DECISION_FAILED,
+                            summary=(
+                                f"Task requires an unavailable dependency: "
+                                f"{resolution_state.needs_dependency_signal}"
+                            ),
+                            details=(
+                                "A subagent signalled that the current runtime spec is missing "
+                                "a required package. The task is routed to manual review for "
+                                "package approval."
+                            ),
+                            remaining_scope=active_request.task_description
+                            or active_request.task_title,
+                            blockers_found=[
+                                f"NEEDS_DEPENDENCY:{resolution_state.needs_dependency_signal}"
+                            ],
+                            validation_notes=[
+                                "needs_dependency_signal raised — manual review required for package approval."
+                            ],
+                            execution_agent_sequence=list(executed_subagents),
+                            evidence=resolution_state.evidence,
+                        ),
+                        active_request,
+                    )
+
                 _advance_phase_after_step(
                     resolution_state,
                     decision=decision,

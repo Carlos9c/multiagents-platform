@@ -95,6 +95,17 @@ Decision policy:
 - First decide what minimal coherent artifact slice is needed.
 - Then ensure the returned files form one consistent repository state.
 - Optimize for correctness, coherence, and fit with the repo, not for novelty.
+
+Dependency policy:
+- The runtime environment section of the prompt lists the packages that are installed.
+- Write code that uses only packages available in the runtime spec.
+- If completing the task correctly requires a package that is NOT listed in the runtime spec,
+  do NOT attempt a workaround. Instead, return an empty files list and set needs_dependency
+  to a concise description of the missing package and why it is required (e.g.
+  "xgboost>=2.0 — required for gradient boosting model training as specified in the task").
+  This routes the task to manual review for package approval.
+- If no runtime spec is provided, write code using only the standard library or packages
+  that are universally available for the language.
 """.strip()
 
 
@@ -160,6 +171,31 @@ def _candidate_file_exists(
         )
         is not None
     )
+
+
+def _format_runtime_spec_context(runtime_spec: dict | None) -> str:
+    if not runtime_spec:
+        return "[no runtime environment spec available]"
+    runtime_type = runtime_spec.get("runtime_type", "unknown")
+    image = runtime_spec.get("image", "unknown")
+    deps = runtime_spec.get("dependencies", [])
+    dep_lines = [
+        f"  - {d.get('name', '?')}=={d.get('version', '?')}"
+        + (f"[{','.join(d['extras'])}]" if d.get("extras") else "")
+        for d in deps
+    ]
+    env_vars = runtime_spec.get("environment_variables", {})
+    lines = [
+        f"runtime_type: {runtime_type}",
+        f"image: {image}",
+        "installed_packages:" if dep_lines else "installed_packages: []",
+    ]
+    lines.extend(dep_lines)
+    if env_vars:
+        lines.append("environment_variables:")
+        for k, v in env_vars.items():
+            lines.append(f"  {k}={v}")
+    return "\n".join(lines)
 
 
 def _format_evidence_notes_for_prompt(state: ResolutionState) -> list[str]:
@@ -405,6 +441,7 @@ def _build_user_prompt(
     project_context_summary = _build_project_context_summary(request)
     historical_context_summary = _build_historical_context_summary(request)
     evidence_notes = _format_evidence_notes_for_prompt(state)
+    runtime_spec_context = _format_runtime_spec_context(request.context.runtime_spec)
 
     prompt = f"""
 Task:
@@ -427,6 +464,9 @@ Current subagent step:
 - step_title: {step.title}
 - step_instructions: {step.instructions}
 - target_paths: {step.target_paths}
+
+Runtime environment:
+{runtime_spec_context}
 
 Project context:
 {project_context_summary}
@@ -589,6 +629,20 @@ class CodeChangeAgent(BaseSubagent):
             step.id,
             len(materialization.files),
         )
+
+        if materialization.needs_dependency:
+            logger.warning(
+                "code_change_agent_needs_dependency task_id=%s step_id=%s reason=%s",
+                request.task_id,
+                step.id,
+                materialization.needs_dependency,
+            )
+            state.set_needs_dependency_signal(materialization.needs_dependency)
+            state.evidence.add_note(
+                message=f"needs_dependency: {materialization.needs_dependency}",
+                producer=self.name,
+            )
+            return state
 
         _validate_generated_files(
             workspace_root=request.context.workspace_path,

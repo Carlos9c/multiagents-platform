@@ -1,5 +1,6 @@
 import json
 import types
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,6 +15,35 @@ from app.services.project_workflow_service import (
     ProjectWorkflowServiceError,
     run_project_workflow,
 )
+
+
+@pytest.fixture(autouse=True)
+def _patch_environment_phases():
+    """Patch environment planning/bootstrapping so workflow tests stay unit-level."""
+    fake_spec = MagicMock()
+
+    with (
+        patch(
+            "app.services.project_workflow_service.plan_runtime_environment",
+            return_value=fake_spec,
+        ),
+        patch(
+            "app.services.project_workflow_service.EnvironmentBootstrapper",
+        ) as mock_bootstrapper_cls,
+        patch(
+            "app.services.project_workflow_service.EnvironmentValidator",
+        ) as mock_validator_cls,
+    ):
+        mock_bootstrapper = MagicMock()
+        mock_bootstrapper.bootstrap.return_value = MagicMock()
+        mock_bootstrapper.teardown.return_value = None
+        mock_bootstrapper_cls.return_value = mock_bootstrapper
+
+        mock_validator = MagicMock()
+        mock_validator.validate.return_value = fake_spec
+        mock_validator_cls.return_value = mock_validator
+
+        yield
 
 
 def _post_batch_result(
