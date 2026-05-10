@@ -86,3 +86,4 @@ class FileMaterializationResult(BaseModel):
     files: list[MaterializedFile] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    needs_dependency: str | None = None

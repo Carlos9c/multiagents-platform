@@ -15,6 +15,8 @@ from app.execution_engine.subagents.base import BaseSubagent, SubagentRejectedSt
 from app.execution_engine.tools.command_tool import CommandToolError, run_command
 from app.execution_engine.tools.file_reader_tool import read_text_file
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
+from app.services.environment.registry import get_driver_registry
+from app.services.environment.session_store import get_session_store
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_storage import ProjectStorageService
@@ -81,6 +83,26 @@ Planning policy:
 - Prefer commands supported by the files and configuration actually present in the run tree.
 - If the executable verification path is ambiguous, choose verification_not_applicable rather than guessing.
 """.strip()
+
+
+def _format_runtime_spec_for_prompt(runtime_spec: dict | None) -> str:
+    if not runtime_spec:
+        return "[no runtime environment spec — commands run locally]"
+    runtime_type = runtime_spec.get("runtime_type", "unknown")
+    image = runtime_spec.get("image", "unknown")
+    deps = runtime_spec.get("dependencies", [])
+    dep_lines = [
+        f"  - {d.get('name', '?')}=={d.get('version', '?')}"
+        + (f"[{','.join(d['extras'])}]" if d.get("extras") else "")
+        for d in deps
+    ]
+    lines = [
+        f"runtime_type: {runtime_type} (commands run inside Docker container)",
+        f"image: {image}",
+        "installed_packages:" if dep_lines else "installed_packages: []",
+    ]
+    lines.extend(dep_lines)
+    return "\n".join(lines)
 
 
 class CommandInspectionPlan(BaseModel):
@@ -222,6 +244,8 @@ def _build_file_selection_prompt(
     commands = [item.model_dump(mode="json") for item in state.evidence.commands]
     notes = [item.message for item in state.evidence.notes if item.message]
 
+    runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
+
     return f"""
 Task:
 - task_id: {request.task_id}
@@ -233,6 +257,9 @@ Task:
 - out_of_scope: {request.out_of_scope}
 - tests_required: {request.tests_required}
 - executor_type: {request.executor_type}
+
+Runtime environment:
+{runtime_spec_context}
 
 Command-step context:
 - step_id: {step.id}
@@ -357,6 +384,7 @@ def _build_command_planning_prompt(
     files_read = [item.model_dump(mode="json") for item in state.evidence.files_read]
     commands = [item.model_dump(mode="json") for item in state.evidence.commands]
     notes = [item.message for item in state.evidence.notes if item.message]
+    runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
 
     return f"""
 Task:
@@ -369,6 +397,9 @@ Task:
 - out_of_scope: {request.out_of_scope}
 - tests_required: {request.tests_required}
 - executor_type: {request.executor_type}
+
+Runtime environment:
+{runtime_spec_context}
 
 Command-step context:
 - step_id: {step.id}
@@ -828,10 +859,20 @@ class CommandRunnerAgent(BaseSubagent):
 
             command_cwd = _resolve_command_cwd(run_dir, plan.cwd_relative_path)
 
-            result = run_command(
-                command=plan.command,
-                cwd=str(command_cwd),
-            )
+            docker_session = get_session_store().get_session(request.project_id)
+            if docker_session is not None:
+                driver = get_driver_registry().get_driver(docker_session.runtime_type)
+                docker_result = driver.run_command(docker_session, plan.command, command_cwd)
+                result_command = plan.command
+                result_exit_code = docker_result.exit_code
+                result_stdout = docker_result.stdout
+                result_stderr = docker_result.stderr
+            else:
+                local_result = run_command(command=plan.command, cwd=str(command_cwd))
+                result_command = local_result.command
+                result_exit_code = local_result.exit_code
+                result_stdout = local_result.stdout
+                result_stderr = local_result.stderr
 
         except WorkspaceRuntimeError as exc:
             raise SubagentRejectedStepError(
@@ -855,13 +896,13 @@ class CommandRunnerAgent(BaseSubagent):
                     exc_info=True,
                 )
 
-        timed_out = result.exit_code == 124
-        exit_code_matched_expectation = result.exit_code in plan.expected_exit_codes
+        timed_out = result_exit_code == 124
+        exit_code_matched_expectation = result_exit_code in plan.expected_exit_codes
 
         logger.info(
             "command_runner_agent_command_result task_id=%s exit_code=%s timed_out=%s matched=%s",
             request.task_id,
-            result.exit_code,
+            result_exit_code,
             timed_out,
             exit_code_matched_expectation,
         )
@@ -870,23 +911,23 @@ class CommandRunnerAgent(BaseSubagent):
             "Command timed out."
             if timed_out
             else (
-                f"Command finished with exit_code={result.exit_code}, "
+                f"Command finished with exit_code={result_exit_code}, "
                 f"which matched expected_exit_codes={plan.expected_exit_codes}."
                 if exit_code_matched_expectation
                 else (
-                    f"Command finished with exit_code={result.exit_code}, "
+                    f"Command finished with exit_code={result_exit_code}, "
                     f"which did not match expected_exit_codes={plan.expected_exit_codes}."
                 )
             )
         )
 
         state.evidence.add_command_execution(
-            command=result.command,
+            command=result_command,
             producer=self.name,
             cwd=plan.cwd_relative_path,
-            exit_code=result.exit_code,
-            stdout=result.stdout,
-            stderr=result.stderr,
+            exit_code=result_exit_code,
+            stdout=result_stdout,
+            stderr=result_stderr,
             timed_out=timed_out,
             verification_goal=plan.verification_goal,
             rationale=plan.rationale,
@@ -898,7 +939,7 @@ class CommandRunnerAgent(BaseSubagent):
         state.evidence.add_note(
             message=(
                 f"Command planned and executed from '{plan.cwd_relative_path}': "
-                f"{plan.command} (exit_code={result.exit_code})"
+                f"{plan.command} (exit_code={result_exit_code})"
             ),
             producer=self.name,
         )
@@ -913,10 +954,10 @@ class CommandRunnerAgent(BaseSubagent):
             )
 
         if not exit_code_matched_expectation:
-            state.add_risk_flags([f"command_exit_code_unexpected:{result.exit_code}"])
+            state.add_risk_flags([f"command_exit_code_unexpected:{result_exit_code}"])
             state.evidence.add_note(
                 message=(
-                    f"Observed exit_code={result.exit_code} did not match "
+                    f"Observed exit_code={result_exit_code} did not match "
                     f"expected_exit_codes={plan.expected_exit_codes} for command '{plan.command}'."
                 ),
                 producer=self.name,

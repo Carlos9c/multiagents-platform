@@ -34,6 +34,7 @@ class ResolutionState(BaseModel):
 
     orchestrator_trace: OrchestratorTrace | None = None
     evidence: ExecutionEvidence = Field(default_factory=ExecutionEvidence)
+    needs_dependency_signal: str | None = None
 
     def replace_execution_request(self, request: ExecutionRequest) -> None:
         self.execution_request = request
@@ -59,6 +60,9 @@ class ResolutionState(BaseModel):
         for risk in risks:
             if risk not in self.risk_flags:
                 self.risk_flags.append(risk)
+
+    def set_needs_dependency_signal(self, reason: str) -> None:
+        self.needs_dependency_signal = reason
 
     def increment_materialization_attempts(self) -> None:
         self.materialization_attempt_count += 1

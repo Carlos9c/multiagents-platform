@@ -14,6 +14,7 @@ from app.execution_engine.contracts import (
     RelatedTaskSummary,
 )
 from app.models.execution_run import ExecutionRun
+from app.models.project import Project
 from app.models.task import TASK_STATUS_FAILED, TASK_STATUS_PARTIAL, Task
 from app.services.execution_runs import get_execution_run
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
@@ -360,6 +361,9 @@ def build_placeholder_execution_request(
         for other in sibling_tasks
     ]
 
+    project = db.get(Project, task.project_id)
+    runtime_spec = project.runtime_spec if project else None
+
     context = ProjectExecutionContext(
         project_id=task.project_id,
         source_path=str(project_paths.source_dir),
@@ -367,6 +371,7 @@ def build_placeholder_execution_request(
         relevant_files=[],
         key_decisions=[],
         related_tasks=related_tasks,
+        runtime_spec=runtime_spec,
     )
 
     return ExecutionRequest(
@@ -432,6 +437,7 @@ def adapt_execution_request(
         key_decisions=_build_key_decisions(project_context),
         related_tasks=_build_related_tasks(project_context, request.task_id),
         preloaded_dependency_files=preloaded_dependency_files,
+        runtime_spec=request.context.runtime_spec,
     )
 
     return request.model_copy(
