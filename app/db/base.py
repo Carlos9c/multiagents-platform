@@ -9,3 +9,4 @@ from app.models import project  # noqa
 from app.models import task  # noqa
 from app.models import execution_run  # noqa
 from app.models import artifact  # noqa
+from app.models import conversation  # noqa

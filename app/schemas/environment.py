@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-RuntimeType = Literal["python_venv", "node_npm", "rust_cargo"]
+RuntimeType = Literal["python_venv", "node_npm", "rust_cargo", "java_maven"]
 
 
 class EnvVar(BaseModel):

@@ -12,7 +12,7 @@ from app.schemas.analysis_read import CodebaseAnalysisRead
 from app.schemas.artifact import ArtifactRead
 from app.schemas.execution_run import ExecutionRunRead
 from app.schemas.plan_history import PlanHistoryCycleRead
-from app.schemas.project import ProjectCreate, ProjectRead
+from app.schemas.project import ProjectCreate, ProjectRead, ProjectUpdate
 from app.schemas.project_start import ProjectStartRequest, ProjectStartResponse
 from app.schemas.task import TaskRead
 from app.services.analysis import CodebaseAnalysisService
@@ -59,6 +59,20 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
 @router.get("", response_model=list[ProjectRead])
 def list_projects(db: Session = Depends(get_db)):
     return db.query(Project).order_by(Project.id.asc()).all()
+
+
+@router.patch("/{project_id}", response_model=ProjectRead)
+def update_project(project_id: int, payload: ProjectUpdate, db: Session = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if payload.name is not None:
+        project.name = payload.name
+    if payload.description is not None:
+        project.description = payload.description
+    db.commit()
+    db.refresh(project)
+    return project
 
 
 @router.get("/{project_id}", response_model=ProjectRead)

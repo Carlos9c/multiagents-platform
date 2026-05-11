@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi (>=0.135.1,<0.136.0)",
     "uvicorn (>=0.42.0,<0.43.0)",
+    "websockets (>=14.0,<15.0)",
     "sqlalchemy (>=2.0.48,<3.0.0)",
     "psycopg2-binary (>=2.9.11,<3.0.0)",
     "alembic (>=1.18.4,<2.0.0)",

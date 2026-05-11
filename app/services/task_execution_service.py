@@ -33,6 +33,7 @@ from app.models.task import (
     EXECUTION_ENGINE,
     PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_ATOMIC,
+    TASK_STATUS_AWAITING_REVIEW,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_PARTIAL,
@@ -509,8 +510,11 @@ def _resolve_final_task_status(
     if validation_decision == "partial":
         return TASK_STATUS_PARTIAL
 
-    if validation_decision in {"failed", "manual_review"}:
+    if validation_decision == "failed":
         return TASK_STATUS_FAILED
+
+    if validation_decision == "manual_review":
+        return TASK_STATUS_AWAITING_REVIEW
 
     raise TaskExecutionServiceError(f"Unsupported validation decision '{validation_decision}'.")
 
@@ -559,6 +563,7 @@ def _assert_validation_post_conditions(
         TASK_STATUS_COMPLETED,
         TASK_STATUS_PARTIAL,
         TASK_STATUS_FAILED,
+        TASK_STATUS_AWAITING_REVIEW,
     }:
         raise TaskExecutionServiceError(
             "Invariant violation: validation_result artifact exists but task is not in a terminal state."

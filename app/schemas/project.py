@@ -15,6 +15,11 @@ class ProjectCreate(BaseModel):
     )
 
 
+class ProjectUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
 class ProjectRead(BaseModel):
     id: int
     name: str

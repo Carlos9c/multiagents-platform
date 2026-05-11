@@ -13,6 +13,13 @@ class ProjectStartRequest(BaseModel):
     source_path: str | None = None
     project_id: int | None = None
     manual_update: bool = True
+    use_existing_source: bool = Field(
+        default=False,
+        description=(
+            "When True with project_id, skips source import and reuses the existing "
+            "source_dir with cached analysis. Used for disruptive-change restarts."
+        ),
+    )
 
 
 class ProjectStartResponse(BaseModel):

@@ -79,8 +79,11 @@ class ProjectStartService:
     def _validate_request(self, request: ProjectStartRequest) -> None:
         if request.project_id is None and not request.name:
             raise ValueError("name is required when creating a new project")
-        if request.project_id is not None and request.source_path is None:
-            raise ValueError("source_path is required when project_id is provided")
+        if request.project_id is not None and request.source_path is None and not request.use_existing_source:
+            raise ValueError(
+                "source_path is required when project_id is provided "
+                "(or set use_existing_source=True to reuse the existing source_dir)"
+            )
         if request.source_path is not None:
             resolved = Path(request.source_path).expanduser().resolve()
             if not resolved.exists():
@@ -137,19 +140,23 @@ class ProjectStartService:
 
         paths = self._storage.ensure_project_storage(project.id)
 
-        # Import always for continuation scenarios
-        self._import.import_source(project.id, request.source_path)  # type: ignore[arg-type]
-
         analysis: CodebaseAnalysis | None
         analysis_performed = False
 
-        if request.manual_update:
-            # Scenario 4: re-analyze
-            analysis = self._analysis.analyze(project.id, request.source_path)  # type: ignore[arg-type]
-            analysis_performed = True
-        else:
-            # Scenario 3: reuse existing analysis
+        if request.use_existing_source:
+            # Scenario 6: disruptive restart — source_dir is already canonical, reuse cached analysis
             analysis = self._analysis.get_analysis(project.id)
+        else:
+            # Import always for standard continuation scenarios
+            self._import.import_source(project.id, request.source_path)  # type: ignore[arg-type]
+
+            if request.manual_update:
+                # Scenario 4: re-analyze
+                analysis = self._analysis.analyze(project.id, request.source_path)  # type: ignore[arg-type]
+                analysis_performed = True
+            else:
+                # Scenario 3: reuse existing analysis
+                analysis = self._analysis.get_analysis(project.id)
 
         if analysis is not None:
             planner_output = call_evolutionary_planner_model(

@@ -15,7 +15,7 @@ sufficient execution environment needed to implement and verify all of them.
 Return ONLY JSON matching the provided schema.
 
 Core mission:
-- Determine ONE primary runtime for the project (python_venv, node_npm, or rust_cargo).
+- Determine ONE primary runtime for the project (python_venv, node_npm, rust_cargo, or java_maven).
 - Choose an appropriate official Docker image as the base.
 - List all packages required, both for implementation and for running tests.
 - Assign exact pinned versions to every package (format: x.y.z). No ranges. No "latest".
@@ -25,12 +25,14 @@ Runtime selection rules:
 - If the project is primarily Python (ML, data, web with Flask/FastAPI, scripting), use python_venv.
 - If the project is primarily JavaScript/TypeScript (Node apps, React, Express), use node_npm.
 - If the project is primarily Rust, use rust_cargo.
+- If the project is primarily Java (Spring Boot, Spring MVC, Maven-based, JPA, Hibernate), use java_maven.
 - If multiple languages are involved, choose the primary runtime based on what the core logic uses.
 
 Docker image selection rules:
 - For python_venv: use "python:3.12-slim" unless the project explicitly requires a different version.
 - For node_npm: use "node:20-slim" unless the project explicitly requires a different version.
 - For rust_cargo: use "rust:1.78-slim" unless the project explicitly requires a different version.
+- For java_maven: use "public.ecr.aws/docker/library/maven:3.9-eclipse-temurin-21" unless the project explicitly requires a different Java version. This image is sourced from Amazon ECR Public (AWS CloudFront CDN) to avoid Cloudflare R2 connectivity issues.
 - Always prefer slim variants for smaller image size.
 - Only deviate from defaults when there is concrete evidence in the task descriptions.
 
@@ -93,7 +95,7 @@ Atomic tasks to support:
 {formatted_tasks}
 
 Planning instructions:
-- Determine the runtime (python_venv, node_npm, or rust_cargo) that can implement ALL tasks above.
+- Determine the runtime (python_venv, node_npm, rust_cargo, or java_maven) that can implement ALL tasks above.
 - Choose an appropriate Docker image as the base.
 - List every package required to implement and test all tasks.
 - Pin every package to an exact version (x.y.z). No ranges.
@@ -118,7 +120,7 @@ Validation error:
 You must correct your output and return valid JSON matching the schema.
 
 Key rules:
-- runtime_type must be exactly "python_venv", "node_npm", or "rust_cargo".
+- runtime_type must be exactly "python_venv", "node_npm", "rust_cargo", or "java_maven".
 - image must be a valid Docker image name (e.g. "python:3.12-slim").
 - Every dependency version must be an exact x.y.z string.
 - planning_rationale must not be empty.

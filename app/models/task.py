@@ -1,4 +1,6 @@
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -10,11 +12,13 @@ PLANNING_LEVEL_ATOMIC = "atomic"
 TASK_STATUS_PENDING = "pending"
 TASK_STATUS_RUNNING = "running"
 TASK_STATUS_AWAITING_VALIDATION = "awaiting_validation"
+TASK_STATUS_AWAITING_REVIEW = "awaiting_review"
 TASK_STATUS_PARTIAL = "partial"
 TASK_STATUS_COMPLETED = "completed"
 TASK_STATUS_FAILED = "failed"
 TASK_STATUS_REATOMIZED = "reatomized"
 TASK_STATUS_FOLLOWED_UP = "followed_up"
+TASK_STATUS_SUPERSEDED = "superseded"
 
 TERMINAL_TASK_STATUSES = {
     TASK_STATUS_PARTIAL,
@@ -22,6 +26,7 @@ TERMINAL_TASK_STATUSES = {
     TASK_STATUS_FAILED,
     TASK_STATUS_REATOMIZED,
     TASK_STATUS_FOLLOWED_UP,
+    TASK_STATUS_SUPERSEDED,
 }
 
 # executor_type sigue existiendo como contrato de dominio de alto nivel.
@@ -41,11 +46,13 @@ VALID_TASK_STATUSES = {
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
     TASK_STATUS_AWAITING_VALIDATION,
+    TASK_STATUS_AWAITING_REVIEW,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_REATOMIZED,
     TASK_STATUS_FOLLOWED_UP,
+    TASK_STATUS_SUPERSEDED,
 }
 
 VALID_EXECUTOR_TYPES = {
@@ -163,6 +170,17 @@ class Task(Base):
     )
 
     followup_depth: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+
+    revised_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
+
+    review_attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0,

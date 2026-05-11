@@ -8,6 +8,7 @@ import docker.errors
 
 from app.services.environment.base_driver import BaseEnvironmentDriver
 from app.services.environment.contracts import (
+    EnvironmentBootstrapError,
     EnvironmentCommandResult,
     EnvironmentSession,
     RuntimeSpec,
@@ -22,6 +23,7 @@ LOCK_FILE_NAMES: dict[str, str] = {
     "python_venv": "requirements.lock",
     "node_npm": "package.lock",
     "rust_cargo": "cargo.lock",
+    "java_maven": "maven.lock",
 }
 
 
@@ -43,6 +45,10 @@ def _build_install_command(spec: RuntimeSpec) -> str:
         pkgs = [f"{dep.name}@{dep.version}" for dep in spec.dependencies]
         return f"npm install --save-exact {' '.join(pkgs)}"
 
+    if spec.runtime_type == "java_maven":
+        # Maven dependencies are declared in pom.xml by the code agents; no bootstrap install needed.
+        return ""
+
     return ""
 
 
@@ -51,6 +57,8 @@ def _build_lock_command(spec: RuntimeSpec) -> str:
         return "pip freeze"
     if spec.runtime_type == "node_npm":
         return "npm list --json --depth=0"
+    if spec.runtime_type == "java_maven":
+        return "mvn --version"
     return "echo '{}'"
 
 
@@ -71,7 +79,29 @@ def _build_smoke_test_command(spec: RuntimeSpec) -> str:
     if spec.runtime_type == "rust_cargo":
         return "cargo --version"
 
+    if spec.runtime_type == "java_maven":
+        return "mvn --version && java --version"
+
     return "echo ok"
+
+
+_PROXY_ERROR_HINT = (
+    "This looks like a proxy/firewall issue: Docker Desktop's containerd snapshotter "
+    "is trying to download image blobs via a direct HTTPS connection that is blocked.\n"
+    "Fix: open Docker Desktop → Settings → Resources → Proxies, enable 'Manual proxy "
+    "configuration', and enter your corporate HTTPS proxy (e.g. http://proxy.corp:8080).\n"
+    "Then restart Docker Desktop and retry."
+)
+
+
+def _raise_pull_error(image: str, error_text: str) -> None:
+    if "no HTTPS proxy" in error_text or "direct connection" in error_text or "dial tcp" in error_text:
+        detail = f"{error_text}\n\n{_PROXY_ERROR_HINT}"
+    else:
+        detail = f"{error_text}\nTry running manually: docker pull {image}"
+    raise EnvironmentBootstrapError(
+        f"Failed to pull Docker image {image!r}: {detail}"
+    )
 
 
 class DockerDriver(BaseEnvironmentDriver):
@@ -111,9 +141,27 @@ class DockerDriver(BaseEnvironmentDriver):
     def _ensure_image(self, client: docker.DockerClient, image: str) -> None:
         try:
             client.images.get(image)
+            return
         except docker.errors.ImageNotFound:
-            logger.info("docker_driver_pulling_image image=%s", image)
-            client.images.pull(image)
+            pass
+
+        logger.info("docker_driver_pulling_image image=%s", image)
+        # Use low-level streaming pull: the high-level images.pull() has a known issue on
+        # Windows Docker named pipes where it silently ignores pull errors and then raises
+        # ImageNotFound from self.get() at the end, giving a misleading trace.
+        for event in client.api.pull(image, stream=True, decode=True):
+            if "error" in event:
+                error_text = event["error"].strip()
+                _raise_pull_error(image, error_text)
+
+        try:
+            client.images.get(image)
+        except docker.errors.ImageNotFound as exc:
+            raise EnvironmentBootstrapError(
+                f"Docker image {image!r} is not available after pull attempt.\n"
+                f"Ensure Docker Desktop has internet access and try:\n"
+                f"  docker pull {image}"
+            ) from exc
 
     def start_session(
         self,

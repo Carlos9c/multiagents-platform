@@ -84,7 +84,7 @@ class OpenAIProvider(LLMProvider):
                 schema_name,
             )
 
-            _max_provider_retries = 3
+            _max_provider_retries = 5
             for _attempt in range(_max_provider_retries):
                 try:
                     response = self.client.responses.create(
@@ -111,7 +111,7 @@ class OpenAIProvider(LLMProvider):
                     break
                 except APITimeoutError:
                     if _attempt < _max_provider_retries - 1:
-                        _wait = 2**_attempt
+                        _wait = 2 * (2**_attempt)  # 2, 4, 8, 16 s
                         logger.warning(
                             "llm_timeout_retry provider=openai model=%s schema=%s attempt=%s/%s wait_s=%s",
                             self.model,
@@ -130,7 +130,7 @@ class OpenAIProvider(LLMProvider):
                         and _status >= 500
                         and _attempt < _max_provider_retries - 1
                     ):
-                        _wait = 2**_attempt
+                        _wait = 2 * (2**_attempt)  # 2, 4, 8, 16 s
                         logger.warning(
                             "llm_http_5xx_retry provider=openai model=%s schema=%s status=%s attempt=%s/%s wait_s=%s",
                             self.model,

@@ -93,6 +93,12 @@ Self-check before finalizing each atomic task:
 - Would post-execution validation be able to inspect repo/workspace evidence?
 - Is this task free from hidden manual/external work?
 - Is splitting truly necessary, or am I over-fragmenting?
+
+Language rule:
+- Detect the language of the parent task description.
+- Generate ALL output fields (title, proposed_solution, implementation_steps, tests_required, acceptance_criteria, technical_constraints) in that same language.
+- If the parent task is in Spanish, respond entirely in Spanish.
+- If in English, respond in English. Never mix languages within a single response.
 """.strip()
 
 

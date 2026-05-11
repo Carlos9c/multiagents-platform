@@ -121,6 +121,12 @@ Output constraints:
 - Return between 4 and 10 tasks.
 - The task mix must be context-appropriate for the project type.
 - The final plan should feel complete enough to begin direct atomic decomposition without forcing irrelevant workstreams.
+
+Language rule:
+- Detect the language of the project description.
+- Generate ALL output fields (title, description, summary, objective, implementation_notes, technical_constraints, out_of_scope, acceptance_criteria) in that same language.
+- If the project description is in Spanish, respond entirely in Spanish.
+- If in English, respond in English. Never mix languages within a single response.
 """.strip()
 
 

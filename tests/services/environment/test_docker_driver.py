@@ -10,6 +10,7 @@ from app.services.environment.contracts import (
     PinnedDependency,
     RuntimeSpec,
 )
+from app.services.environment.contracts import EnvironmentBootstrapError
 from app.services.environment.docker_driver import (
     DockerDriver,
     _build_install_command,
@@ -50,6 +51,15 @@ def spec_empty() -> RuntimeSpec:
     return RuntimeSpec(
         runtime_type="python_venv",
         image="python:3.12-slim",
+        dependencies=[],
+    )
+
+
+@pytest.fixture()
+def spec_java() -> RuntimeSpec:
+    return RuntimeSpec(
+        runtime_type="java_maven",
+        image="public.ecr.aws/docker/library/maven:3.9-eclipse-temurin-21",
         dependencies=[],
     )
 
@@ -136,6 +146,21 @@ def test_build_smoke_test_command_node(spec_node: RuntimeSpec) -> None:
     assert "express" in cmd
 
 
+def test_build_install_command_java(spec_java: RuntimeSpec) -> None:
+    cmd = _build_install_command(spec_java)
+    assert cmd == ""
+
+
+def test_build_lock_command_java(spec_java: RuntimeSpec) -> None:
+    assert _build_lock_command(spec_java) == "mvn --version"
+
+
+def test_build_smoke_test_command_java(spec_java: RuntimeSpec) -> None:
+    cmd = _build_smoke_test_command(spec_java)
+    assert "mvn" in cmd
+    assert "java" in cmd
+
+
 # ---------------------------------------------------------------------------
 # EnvironmentSession.host_to_container_path
 # ---------------------------------------------------------------------------
@@ -180,7 +205,12 @@ def test_start_session_pulls_missing_image(
     tmp_path: Path,
     spec_python: RuntimeSpec,
 ) -> None:
-    mock_docker_client.images.get.side_effect = Exception("ImageNotFound")
+    # First images.get raises (not local), second succeeds (after pull)
+    mock_docker_client.images.get.side_effect = [
+        Exception("ImageNotFound"),
+        MagicMock(),
+    ]
+    mock_docker_client.api.pull.return_value = []  # successful pull, no error events
     mock_container = MagicMock()
     mock_container.id = "xyz"
     mock_docker_client.containers.run.return_value = mock_container
@@ -189,7 +219,35 @@ def test_start_session_pulls_missing_image(
     driver._client = mock_docker_client
 
     driver.start_session(project_id=2, project_root=tmp_path, spec=spec_python)
-    mock_docker_client.images.pull.assert_called_once_with("python:3.12-slim")
+    mock_docker_client.api.pull.assert_called_once_with(
+        "python:3.12-slim", stream=True, decode=True
+    )
+
+
+def test_ensure_image_pull_event_error_raises_bootstrap_error(
+    mock_docker_client: MagicMock,
+) -> None:
+    mock_docker_client.images.get.side_effect = Exception("ImageNotFound")
+    mock_docker_client.api.pull.return_value = [{"error": "pull access denied"}]
+
+    driver = DockerDriver()
+    driver._client = mock_docker_client
+
+    with pytest.raises(EnvironmentBootstrapError, match="pull access denied"):
+        driver._ensure_image(mock_docker_client, "some:image")
+
+
+def test_ensure_image_not_available_after_pull_raises_bootstrap_error(
+    mock_docker_client: MagicMock,
+) -> None:
+    mock_docker_client.images.get.side_effect = Exception("ImageNotFound")
+    mock_docker_client.api.pull.return_value = []  # no error events in stream
+
+    driver = DockerDriver()
+    driver._client = mock_docker_client
+
+    with pytest.raises(EnvironmentBootstrapError, match="not available after pull"):
+        driver._ensure_image(mock_docker_client, "some:image")
 
 
 # ---------------------------------------------------------------------------
