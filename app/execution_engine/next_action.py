@@ -13,6 +13,7 @@ VALID_SUBAGENT_NAMES = {
     "context_selection_agent",
     "code_change_agent",
     "command_runner_agent",
+    "document_writer_agent",
 }
 
 

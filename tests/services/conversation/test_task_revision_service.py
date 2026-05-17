@@ -1,6 +1,5 @@
 """Tests for task_revision_service."""
 
-import pytest
 from sqlalchemy.orm import Session
 
 from app.models.task import TASK_STATUS_COMPLETED, TASK_STATUS_PENDING, Task

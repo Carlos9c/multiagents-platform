@@ -7,6 +7,9 @@ from app.services.validation.validators.code_change_agent_validator import (
 from app.services.validation.validators.command_runner_agent_validator import (
     CommandRunnerAgentValidator,
 )
+from app.services.validation.validators.document_writer_agent_validator import (
+    DocumentWriterAgentValidator,
+)
 
 
 class ValidationRegistryError(Exception):
@@ -18,6 +21,7 @@ class ValidationRegistry:
         resolved_validators = validators or [
             CodeChangeAgentValidator(),
             CommandRunnerAgentValidator(),
+            DocumentWriterAgentValidator(),
         ]
 
         self._validators_by_key: dict[str, BaseTaskValidator] = {}

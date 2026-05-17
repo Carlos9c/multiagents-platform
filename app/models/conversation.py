@@ -27,6 +27,7 @@ CONVERSATION_PHASE_GATHERING = "gathering_requirements"
 CONVERSATION_PHASE_READY = "ready_to_start"
 CONVERSATION_PHASE_EXECUTING = "executing"
 CONVERSATION_PHASE_AWAITING_REVIEW = "awaiting_review"
+CONVERSATION_PHASE_PAUSED = "paused"
 CONVERSATION_PHASE_COMPLETED = "completed"
 
 VALID_CONVERSATION_PHASES = {
@@ -34,8 +35,13 @@ VALID_CONVERSATION_PHASES = {
     CONVERSATION_PHASE_READY,
     CONVERSATION_PHASE_EXECUTING,
     CONVERSATION_PHASE_AWAITING_REVIEW,
+    CONVERSATION_PHASE_PAUSED,
     CONVERSATION_PHASE_COMPLETED,
 }
+
+# Sub-phases within AWAITING_REVIEW
+REVIEW_SUBPHASE_GATHERING = "gathering"
+REVIEW_SUBPHASE_AWAITING_CONFIRMATION = "awaiting_confirmation"
 
 
 class Conversation(Base):
@@ -68,12 +74,25 @@ class Conversation(Base):
         default=CONVERSATION_PHASE_GATHERING,
     )
 
-    # Accumulated attempts within the current review episode (max 3 for AWAITING_REVIEW)
+    # Accumulated turn count within the current review episode (informational only).
     review_episode_attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0,
     )
+
+    # Sub-phase within AWAITING_REVIEW: "gathering" | "awaiting_confirmation"
+    review_subphase: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Clarification text stored when the review evaluator reaches "ready_to_confirm".
+    # Passed to resume_after_review() once the user confirms the proposed plan.
+    pending_clarification_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # For project-level review episodes (review_task_id=None): stores the original failure
+    # reason (env error, iteration limit, etc.) that anchors the review. Persists across
+    # gathering → confirmation round-trips, unlike pending_clarification_summary which is
+    # overwritten when the proposed plan is stored.
+    review_failure_context: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Living requirements document built during GATHERING_REQUIREMENTS phase.
     # Becomes project.description when the agent decides it has enough context.

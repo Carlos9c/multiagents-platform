@@ -10,7 +10,6 @@ from app.execution_engine import (
     ExecutionEngineError,
     ExecutionEngineRejectedError,
     ExecutionEngineTransientError,
-    get_execution_engine,
 )
 from app.execution_engine.contracts import (
     EXECUTION_DECISION_COMPLETED,
@@ -18,6 +17,7 @@ from app.execution_engine.contracts import (
     EXECUTION_DECISION_PARTIAL,
     EXECUTION_DECISION_REJECTED,
 )
+from app.execution_engine.factory import get_engine_for_executor_type
 from app.execution_engine.request_adapter import build_placeholder_execution_request
 from app.models.artifact import Artifact
 from app.models.execution_run import (
@@ -29,6 +29,7 @@ from app.models.execution_run import (
     ExecutionRun,
 )
 from app.models.task import (
+    DOCUMENTATION_ENGINE,
     EXECUTABLE_TASK_STATUSES,
     EXECUTION_ENGINE,
     PENDING_ENGINE_ROUTING_EXECUTOR,
@@ -67,7 +68,7 @@ from app.services.validation.service import (
 logger = logging.getLogger(__name__)
 
 
-SUPPORTED_EXECUTORS = {EXECUTION_ENGINE}
+SUPPORTED_EXECUTORS = {EXECUTION_ENGINE, DOCUMENTATION_ENGINE}
 VALIDATION_RESULT_ARTIFACT_TYPE = "validation_result"
 VALIDATION_RESULT_ARTIFACT_CREATED_BY = "task_execution_service"
 
@@ -683,6 +684,17 @@ def _validate_after_execution(
             validation_result_final_task_status=validation_result.final_task_status,
         )
 
+        # Overwrite the orchestrator-level notes that mark_execution_run_succeeded() wrote
+        # with the validator's own findings so _get_task_validation_notes() surfaces the real
+        # failure reason to Aria during the review episode.
+        if validation_result.summary:
+            execution_run.validation_notes = validation_result.summary
+        if validation_result.blockers:
+            execution_run.blockers_found = "; ".join(validation_result.blockers)
+        if validation_result.missing_scope:
+            execution_run.remaining_scope = validation_result.missing_scope
+        db.flush()
+
         _persist_validation_result_artifact(
             db=db,
             task=task,
@@ -905,7 +917,7 @@ def execute_existing_run_sync(db: Session, run_id: int) -> SyncTaskExecutionResu
             execution_request.context.source_path,
         )
 
-        execution_engine = get_execution_engine(db)
+        execution_engine = get_engine_for_executor_type(resolved_executor_type)
         logger.info(
             "execution_engine_selected task_id=%s run_id=%s backend=%s",
             task.id,

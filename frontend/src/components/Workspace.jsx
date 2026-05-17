@@ -144,7 +144,7 @@ export function Workspace({ projectId, initialSourcePath = '', initialManualUpda
     !!projectName.trim() &&
     !isStarting
   )
-  const canClear = phase === 'gathering_requirements' || phase === 'ready_to_start'
+  const canClear = true
 
   const handleDescriptionChange = (val) => {
     setDescription(val)
@@ -183,7 +183,7 @@ export function Workspace({ projectId, initialSourcePath = '', initialManualUpda
           className="btn btn-ghost btn-sm"
           onClick={onBack}
           disabled={!canClear}
-          title={canClear ? 'Volver al selector de proyectos' : 'No se puede cancelar mientras el proyecto está en curso'}
+          title="Volver al selector de proyectos"
         >
           ✕ Cancelar
         </button>

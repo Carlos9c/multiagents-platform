@@ -89,7 +89,8 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                 name="code_change_agent",
                 role=(
                     "Implements the task by deciding which repository files to create or modify "
-                    "and materializing full final contents in the execution workspace."
+                    "and materializing full final contents in the execution workspace. "
+                    "Handles source code, tests, scripts, and configuration files."
                 ),
                 uses_tools=[
                     "list_workspace_files",
@@ -104,17 +105,18 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                     "Writes full final file content for create/modify operations.",
                     "Uses snapshots to support rollback on failure.",
                     "Produces repository-local candidate changes that later verification can inspect when verification is materially useful.",
-                    "Handles code, tests, documentation, specifications, and other file-based deliverables.",
+                    "Handles source code, tests, scripts, and configuration files.",
                 ],
                 limits=[
                     "Does not validate task completion.",
                     "Does not decide final external acceptance.",
                     "Must write only inside the execution workspace root.",
                     "Must preserve operation integrity: modify for existing files, create for new files.",
+                    "Should not be used for tasks whose primary deliverable is a documentation or design artifact — use document_writer_agent instead.",
                 ],
                 usage_guidance=[
-                    "Use when the next useful progress is to create or modify repository files.",
-                    "Use when the task still needs implementation, tests, documentation, specifications, or other file-based deliverables.",
+                    "Use when the task requires creating or modifying source code, tests, scripts, or configuration files.",
+                    "Do not use for tasks whose deliverable is a documentation or design artifact — route those to document_writer_agent.",
                     "Do not use when the current best next step is context recovery or operational verification.",
                 ],
             ),
@@ -161,6 +163,44 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                     "Do not use just because files changed.",
                     "Usually skip this subagent for documentation, requirements, and specification work unless the task explicitly asks for a repository-local executable check.",
                     "Prefer one narrow verification step with clear value for downstream validation.",
+                ],
+            ),
+            SubagentCapability(
+                name="document_writer_agent",
+                role=(
+                    "Produces documentation and design artifacts by deciding which files to "
+                    "create or modify and materializing their full final contents. "
+                    "Handles README, architecture docs, ADRs, API specs, design documents, "
+                    "onboarding guides, specification files, and diagram-as-code files. "
+                    "May include code snippets inside those documents as examples."
+                ),
+                uses_tools=[
+                    "list_workspace_files",
+                    "read_text_file",
+                    "capture_file_snapshot",
+                    "restore_file_snapshot",
+                    "write_text_file",
+                ],
+                strengths=[
+                    "Produces complete, substantive text artifacts in any plain-text format.",
+                    "Derives content from task description, objective, and technical constraints.",
+                    "Respects existing documentation style and structure in the repository.",
+                    "Supports Markdown, YAML, JSON, RST, AsciiDoc, PlantUML, Mermaid, and others.",
+                    "Uses snapshots to support rollback on write failure.",
+                    "Can embed code snippets inside documentation files as examples or API references.",
+                ],
+                limits=[
+                    "Does not produce source code files meant to be executed or imported.",
+                    "Does not execute commands.",
+                    "Does not validate final completion — that is handled by the validator.",
+                    "Must write only inside the execution workspace root.",
+                    "Must preserve operation integrity: modify for existing files, create for new files.",
+                ],
+                usage_guidance=[
+                    "Use for tasks whose primary deliverable is a documentation or design artifact.",
+                    "Use for README, architecture docs, ADRs, API specs, onboarding guides, design notes, specification files.",
+                    "Do not use for tasks whose deliverable is a source code file, test file, or configuration file meant to be executed or imported — route those to code_change_agent.",
+                    "Ensure content is derived from the task context, not invented.",
                 ],
             ),
         ],

@@ -24,6 +24,7 @@ LOCK_FILE_NAMES: dict[str, str] = {
     "node_npm": "package.lock",
     "rust_cargo": "cargo.lock",
     "java_maven": "maven.lock",
+    "android_gradle": "gradle.lock",
 }
 
 
@@ -49,6 +50,10 @@ def _build_install_command(spec: RuntimeSpec) -> str:
         # Maven dependencies are declared in pom.xml by the code agents; no bootstrap install needed.
         return ""
 
+    if spec.runtime_type == "android_gradle":
+        # Gradle dependencies are declared in build.gradle by code agents; no pre-install needed.
+        return ""
+
     return ""
 
 
@@ -59,6 +64,9 @@ def _build_lock_command(spec: RuntimeSpec) -> str:
         return "npm list --json --depth=0"
     if spec.runtime_type == "java_maven":
         return "mvn --version"
+    if spec.runtime_type == "android_gradle":
+        # Android projects use the Gradle wrapper (./gradlew); no system-level lock needed.
+        return "java -version"
     return "echo '{}'"
 
 
@@ -81,6 +89,10 @@ def _build_smoke_test_command(spec: RuntimeSpec) -> str:
 
     if spec.runtime_type == "java_maven":
         return "mvn --version && java --version"
+
+    if spec.runtime_type == "android_gradle":
+        # Verify Java and ANDROID_HOME only — Android projects use ./gradlew, not a system gradle.
+        return "java -version && echo $ANDROID_HOME"
 
     return "echo ok"
 
@@ -215,7 +227,13 @@ class DockerDriver(BaseEnvironmentDriver):
         client = self._get_client()
         container = client.containers.get(session.container_id)
         container_cwd = session.host_to_container_path(cwd.resolve())
-        full_command = ["sh", "-c", f"cd {container_cwd} && {command}"]
+        if session.runtime_type == "android_gradle":
+            # Use bash login shell so any profile-based PATH extensions (e.g. jenv shims)
+            # are active. `sh` is sufficient for most runtimes, but Android build scripts
+            # often depend on bash features and login-shell initialisation.
+            full_command = ["bash", "-lc", f"cd {container_cwd} && {command}"]
+        else:
+            full_command = ["sh", "-c", f"cd {container_cwd} && {command}"]
 
         logger.debug(
             "docker_driver_exec project_id=%s command=%s cwd=%s",

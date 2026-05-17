@@ -2,7 +2,6 @@ from pydantic import ValidationError
 
 from app.schemas.evaluation import StageEvaluationOutput
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 STAGE_EVALUATION_SYSTEM_PROMPT = """
 You evaluate whether the CURRENT PROJECT STAGE should be closed, continue as planned, be resequenced, be replanned, or require manual review.
@@ -305,8 +304,6 @@ def call_stage_evaluation_model(
     additional_context: str = "",
 ) -> StageEvaluationOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(StageEvaluationOutput.model_json_schema())
-
     first_user_prompt = build_stage_evaluation_user_prompt(
         project_name=project_name,
         project_description=project_description,
@@ -326,7 +323,7 @@ def call_stage_evaluation_model(
         system_prompt=STAGE_EVALUATION_SYSTEM_PROMPT,
         user_prompt=first_user_prompt,
         schema_name="stage_evaluation_output",
-        json_schema=strict_schema,
+        json_schema=StageEvaluationOutput.model_json_schema(),
     )
 
     try:
@@ -341,7 +338,7 @@ def call_stage_evaluation_model(
             system_prompt=STAGE_EVALUATION_SYSTEM_PROMPT,
             user_prompt=retry_user_prompt,
             schema_name="stage_evaluation_output",
-            json_schema=strict_schema,
+            json_schema=StageEvaluationOutput.model_json_schema(),
         )
 
         return StageEvaluationOutput.model_validate(raw_retry)

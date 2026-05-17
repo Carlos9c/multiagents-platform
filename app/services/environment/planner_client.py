@@ -4,7 +4,6 @@ from pydantic import ValidationError
 
 from app.schemas.environment import RuntimeEnvironmentPlanOutput, RuntimeSpecRepairOutput
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 ENVIRONMENT_PLANNER_SYSTEM_PROMPT = """
 You are a runtime environment planning agent.
@@ -15,7 +14,7 @@ sufficient execution environment needed to implement and verify all of them.
 Return ONLY JSON matching the provided schema.
 
 Core mission:
-- Determine ONE primary runtime for the project (python_venv, node_npm, rust_cargo, or java_maven).
+- Determine ONE primary runtime for the project (python_venv, node_npm, rust_cargo, java_maven, or android_gradle).
 - Choose an appropriate official Docker image as the base.
 - List all packages required, both for implementation and for running tests.
 - Assign exact pinned versions to every package (format: x.y.z). No ranges. No "latest".
@@ -26,6 +25,8 @@ Runtime selection rules:
 - If the project is primarily JavaScript/TypeScript (Node apps, React, Express), use node_npm.
 - If the project is primarily Rust, use rust_cargo.
 - If the project is primarily Java (Spring Boot, Spring MVC, Maven-based, JPA, Hibernate), use java_maven.
+- If the project is an Android mobile application (uses Kotlin or Java with Android SDK, Gradle, Room, Jetpack, etc.), use android_gradle. Do NOT use java_maven for Android projects.
+- iOS projects require macOS/Xcode and cannot be built in Docker; if the project is iOS-only, use android_gradle for shared Kotlin Multiplatform code, otherwise note the limitation in planning_rationale.
 - If multiple languages are involved, choose the primary runtime based on what the core logic uses.
 
 Docker image selection rules:
@@ -33,6 +34,7 @@ Docker image selection rules:
 - For node_npm: use "node:20-slim" unless the project explicitly requires a different version.
 - For rust_cargo: use "rust:1.78-slim" unless the project explicitly requires a different version.
 - For java_maven: use "public.ecr.aws/docker/library/maven:3.9-eclipse-temurin-21" unless the project explicitly requires a different Java version. This image is sourced from Amazon ECR Public (AWS CloudFront CDN) to avoid Cloudflare R2 connectivity issues.
+- For android_gradle: use "mingc/android-build-box:1.26.0". This image includes JDK 17, Android SDK (API 21–34), Android build-tools, Gradle, and NDK. It supports building standard Android apps with Gradle without any additional SDK installation.
 - Always prefer slim variants for smaller image size.
 - Only deviate from defaults when there is concrete evidence in the task descriptions.
 
@@ -95,7 +97,7 @@ Atomic tasks to support:
 {formatted_tasks}
 
 Planning instructions:
-- Determine the runtime (python_venv, node_npm, rust_cargo, or java_maven) that can implement ALL tasks above.
+- Determine the runtime (python_venv, node_npm, rust_cargo, java_maven, or android_gradle) that can implement ALL tasks above.
 - Choose an appropriate Docker image as the base.
 - List every package required to implement and test all tasks.
 - Pin every package to an exact version (x.y.z). No ranges.
@@ -120,7 +122,7 @@ Validation error:
 You must correct your output and return valid JSON matching the schema.
 
 Key rules:
-- runtime_type must be exactly "python_venv", "node_npm", "rust_cargo", or "java_maven".
+- runtime_type must be exactly "python_venv", "node_npm", "rust_cargo", "java_maven", or "android_gradle".
 - image must be a valid Docker image name (e.g. "python:3.12-slim").
 - Every dependency version must be an exact x.y.z string.
 - planning_rationale must not be empty.
@@ -178,8 +180,6 @@ def call_environment_planner(
     atomic_tasks: list[dict],
 ) -> RuntimeEnvironmentPlanOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(RuntimeEnvironmentPlanOutput.model_json_schema())
-
     user_prompt = build_environment_planner_user_prompt(
         project_name=project_name,
         project_description=project_description,
@@ -190,7 +190,7 @@ def call_environment_planner(
         system_prompt=ENVIRONMENT_PLANNER_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         schema_name="runtime_environment_plan",
-        json_schema=strict_schema,
+        json_schema=RuntimeEnvironmentPlanOutput.model_json_schema(),
     )
 
     try:
@@ -206,7 +206,7 @@ def call_environment_planner(
             system_prompt=ENVIRONMENT_PLANNER_SYSTEM_PROMPT,
             user_prompt=retry_prompt,
             schema_name="runtime_environment_plan",
-            json_schema=strict_schema,
+            json_schema=RuntimeEnvironmentPlanOutput.model_json_schema(),
         )
         return RuntimeEnvironmentPlanOutput.model_validate(raw_retry)
 
@@ -217,8 +217,6 @@ def call_environment_repair(
     error_output: str,
 ) -> RuntimeSpecRepairOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(RuntimeSpecRepairOutput.model_json_schema())
-
     user_prompt = build_environment_repair_user_prompt(
         spec_dict=spec_dict,
         smoke_test_command=smoke_test_command,
@@ -229,7 +227,7 @@ def call_environment_repair(
         system_prompt=ENVIRONMENT_REPAIR_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         schema_name="runtime_spec_repair",
-        json_schema=strict_schema,
+        json_schema=RuntimeSpecRepairOutput.model_json_schema(),
     )
 
     try:

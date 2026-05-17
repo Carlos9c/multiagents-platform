@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app.core.config import settings
 from app.execution_engine.capabilities import get_subagent_capability
 from app.execution_engine.contracts import EvidenceItem
 from app.models.task import (
@@ -12,7 +13,6 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
 )
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 from app.services.validation.base import BaseTaskValidator
 from app.services.validation.contracts import (
     PartialAnnotation,
@@ -71,6 +71,7 @@ Critical rules:
 - If the verification clearly contradicts the task objective or claimed success, choose failed.
 - A failed intermediate verification attempt that is later clearly repaired by subsequent repository changes and a later successful verification should usually NOT remain partial if the terminal verification evidence is clean and materially covers the task objective.
 - Prefer the terminal/latest successful verification state over intermediate failed attempts when the later evidence clearly supersedes the earlier failure.
+- IMPORTANT: The "terminal success supersedes earlier failures" rule applies ONLY when the terminal successful command directly verifies the task objective (e.g., runs the test suite, builds the project, executes the acceptance-criteria command). Setup commands (chmod +x, mkdir, cp, mv, apt-get, pip install, etc.) are infrastructure prep steps — a successful chmod or mkdir does NOT verify the task objective and does NOT supersede earlier test failures. Only a command whose verification_goal is about running or confirming the task acceptance criteria can act as terminal verification.
 
 Default-to-completed rule (burden of proof):
 - When the terminal verification command succeeded (exit_code=0) and its verification_goal
@@ -318,6 +319,29 @@ _NON_VERIFIABLE_TASK_TYPES = frozenset(
     }
 )
 
+_SETUP_ONLY_COMMAND_PREFIXES: tuple[str, ...] = (
+    "chmod ",
+    "mkdir ",
+    "cp ",
+    "mv ",
+    "ln ",
+    "touch ",
+    "export ",
+    "apt ",
+    "apt-get ",
+    "pip install",
+    "npm install",
+    "yarn install",
+    "bundle install",
+    "brew install",
+)
+
+
+def _command_item_is_setup_only(command_item: Any) -> bool:
+    """Return True when command_item is infrastructure prep, not objective verification."""
+    cmd = (getattr(command_item, "command", "") or "").strip().lower()
+    return any(cmd.startswith(prefix) for prefix in _SETUP_ONLY_COMMAND_PREFIXES)
+
 
 def _task_is_verifiable_implementation(validation_input: TaskValidationInput) -> bool:
     task_type = (
@@ -342,6 +366,13 @@ def _normalize_llm_output_for_terminal_success(
         return llm_output
 
     latest = command_items[-1]
+
+    # Setup commands (chmod +x, mkdir, cp, etc.) prepare for verification but do NOT
+    # verify the task objective. Do not elevate to completed when the terminal "success"
+    # was an infrastructure prep step rather than the acceptance-criteria test itself.
+    if _command_item_is_setup_only(latest):
+        return llm_output
+
     resolved_intermediate_failure = _has_resolved_intermediate_failure(command_items)
 
     latest_goal = getattr(latest, "verification_goal", "") or "Repository-local verification"
@@ -552,11 +583,10 @@ class CommandRunnerAgentValidator(BaseTaskValidator):
         command_items = _get_command_evidence_items(validation_input)
         command_history = _build_command_history_summary(command_items)
 
-        provider = get_llm_provider()
-        strict_schema = to_openai_strict_json_schema(
-            CommandRunnerAgentValidationLLMOutput.model_json_schema()
+        provider = get_llm_provider(
+            model=settings.validator_model,
+            provider=settings.validator_provider,
         )
-
         user_prompt = _build_user_prompt(
             validation_input=validation_input,
             producer_items=producer_items,
@@ -569,7 +599,7 @@ class CommandRunnerAgentValidator(BaseTaskValidator):
             system_prompt=COMMAND_RUNNER_AGENT_VALIDATOR_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             schema_name="command_runner_agent_validator_output",
-            json_schema=strict_schema,
+            json_schema=CommandRunnerAgentValidationLLMOutput.model_json_schema(),
         )
 
         try:

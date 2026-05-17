@@ -7,7 +7,6 @@ from pydantic import BaseModel
 
 from app.services.analysis.base import BaseFileAnalyzer, FileAnalysis, FileInput
 from app.services.llm.base import LLMProvider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -204,13 +203,12 @@ class TextFileAnalyzer(BaseFileAnalyzer):
             return "[could not read file]"
 
     def _call_llm(self, batch: list[tuple[str, str]]) -> list[FileAnalysis]:
-        strict_schema = to_openai_strict_json_schema(_BatchOutput.model_json_schema())
         try:
             raw: dict[str, Any] = self._llm.generate_structured(
                 system_prompt=_SYSTEM_PROMPT,
                 user_prompt=_build_user_prompt(batch),
                 schema_name="batch_analysis_output",
-                json_schema=strict_schema,
+                json_schema=_BatchOutput.model_json_schema(),
             )
             output = _BatchOutput.model_validate(raw)
         except Exception as exc:

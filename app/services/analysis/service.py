@@ -20,7 +20,6 @@ from app.services.analysis.base import (
 from app.services.analysis.registry import FileAnalyzerRegistry
 from app.services.llm.base import LLMProvider
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 from app.services.project_storage import ProjectStorageService
 
 logger = logging.getLogger(__name__)
@@ -178,13 +177,12 @@ class CodebaseAnalysisService:
         file_analyses: list[FileAnalysis],
         source_path: str,
     ) -> tuple[str, list[str], list[str]]:
-        strict_schema = to_openai_strict_json_schema(_ProjectSummaryOutput.model_json_schema())
         try:
             raw: dict[str, Any] = self._llm.generate_structured(
                 system_prompt=_SUMMARY_SYSTEM_PROMPT,
                 user_prompt=_build_summary_user_prompt(file_analyses, source_path),
                 schema_name="project_summary_output",
-                json_schema=strict_schema,
+                json_schema=_ProjectSummaryOutput.model_json_schema(),
             )
             out = _ProjectSummaryOutput.model_validate(raw)
             return out.project_summary, out.main_technologies, out.entry_points

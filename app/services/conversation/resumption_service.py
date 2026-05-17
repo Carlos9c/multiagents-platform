@@ -8,16 +8,19 @@ Impact Assessment Agent and leaves the project ready for execution to continue.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
 from sqlalchemy.orm import Session
 
+from app.models.execution_run import ExecutionRun
 from app.models.task import (
     EXECUTION_ENGINE,
     PLANNING_LEVEL_ATOMIC,
     TASK_STATUS_AWAITING_REVIEW,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
     TERMINAL_TASK_STATUSES,
     Task,
@@ -26,6 +29,7 @@ from app.schemas.project_start import ProjectStartRequest
 from app.services.conversation.impact_assessment_agent import (
     BlockedTaskInfo,
     CompletedTaskSummary,
+    EnvironmentDependency,
     ImpactAssessmentInput,
     NewTaskSpec,
     PendingTaskSummary,
@@ -82,9 +86,13 @@ def resume_after_review(
     blocked_task = db.get(Task, blocked_task_id)
     if blocked_task is None:
         raise ResumptionError(f"Task {blocked_task_id} not found")
-    if blocked_task.status != TASK_STATUS_AWAITING_REVIEW:
+    # Accept awaiting_review (normal path) and failed/partial (when the validator marks the
+    # task FAILED instead of AWAITING_REVIEW but manual review was still required).
+    _RESUMABLE_STATUSES = {TASK_STATUS_AWAITING_REVIEW, TASK_STATUS_FAILED, TASK_STATUS_PARTIAL}
+    if blocked_task.status not in _RESUMABLE_STATUSES:
         raise ResumptionError(
-            f"Task {blocked_task_id} is not in awaiting_review state (status={blocked_task.status})"
+            f"Task {blocked_task_id} cannot be resumed (status={blocked_task.status}). "
+            f"Expected one of: {', '.join(sorted(_RESUMABLE_STATUSES))}"
         )
 
     project_goal = updated_project_goal or (
@@ -100,20 +108,25 @@ def resume_after_review(
 
     completed, pending = _collect_task_summaries(db, project_id, blocked_task_id)
 
+    validation_notes = _get_validation_notes(db, blocked_task_id)
+
     assessment_input = ImpactAssessmentInput(
         project_goal=effective_goal,
         user_clarification=user_clarification,
         blocked_task=BlockedTaskInfo(
-            task_id=blocked_task.task_id if hasattr(blocked_task, "task_id") else blocked_task.id,
+            task_id=blocked_task.id,
             title=blocked_task.title,
             description=blocked_task.description,
-            validation_notes=None,
+            validation_notes=validation_notes,
         ),
         completed_tasks=completed,
         pending_tasks=pending,
     )
 
     assessment = assess_impact(assessment_input)
+
+    if assessment.environment_changes:
+        _apply_environment_delta(db, project, assessment.environment_changes)
 
     logger.info(
         "resumption_scope_determined project_id=%s blocked_task_id=%s scope=%s",
@@ -437,3 +450,87 @@ def _embed_clarification(task: Task, clarification: str) -> None:
     existing = task.description or ""
     task.description = existing + _CLARIFICATION_HEADER + clarification.strip()
     task.revised_at = datetime.now(timezone.utc)
+
+
+def _get_validation_notes(db: Session, task_id: int) -> str | None:
+    """Build a validation_notes string from the latest ExecutionRun for this task."""
+    last_run = (
+        db.query(ExecutionRun)
+        .filter(ExecutionRun.task_id == task_id)
+        .order_by(ExecutionRun.id.desc())
+        .first()
+    )
+    if last_run is None:
+        return None
+    parts = [
+        last_run.validation_notes,
+        last_run.blockers_found,
+        last_run.error_message,
+    ]
+    combined = " | ".join(p for p in parts if p)
+    return combined or None
+
+
+def _apply_environment_delta(
+    db: Session,
+    project: object,
+    env_changes: list[EnvironmentDependency],
+) -> None:
+    """
+    Update project.runtime_spec with new dependencies and eagerly rebuild
+    the Docker environment so failures surface before the task is retried.
+    """
+    from app.services.environment.bootstrapper import EnvironmentBootstrapper
+    from app.services.environment.contracts import PinnedDependency, RuntimeSpec
+
+    if not getattr(project, "runtime_spec", None):
+        logger.warning(
+            "env_delta_skipped project_id=%s reason=no_runtime_spec",
+            project.id,  # type: ignore[attr-defined]
+        )
+        return
+
+    try:
+        spec = RuntimeSpec.model_validate_json(project.runtime_spec)  # type: ignore[attr-defined]
+    except Exception as exc:
+        logger.warning(
+            "env_delta_skipped project_id=%s reason=parse_error error=%s",
+            project.id,  # type: ignore[attr-defined]
+            exc,
+        )
+        return
+
+    existing_names = {d.name.lower() for d in spec.dependencies}
+    added: list[str] = []
+    for dep in env_changes:
+        if dep.package_name.lower() not in existing_names:
+            spec.dependencies.append(
+                PinnedDependency(
+                    name=dep.package_name,
+                    version=dep.version_constraint or "*",
+                )
+            )
+            existing_names.add(dep.package_name.lower())
+            added.append(dep.package_name)
+
+    if not added:
+        return  # nothing new to install
+
+    project.runtime_spec = spec.model_dump_json()  # type: ignore[attr-defined]
+    db.add(project)  # type: ignore[arg-type]
+    db.flush()
+
+    bootstrapper = EnvironmentBootstrapper()
+    bootstrapper.teardown(project.id)  # type: ignore[attr-defined]
+
+    try:
+        bootstrapper.bootstrap(project_id=project.id, spec=spec)  # type: ignore[attr-defined]
+        logger.info(
+            "env_delta_applied project_id=%s added=%s",
+            project.id,  # type: ignore[attr-defined]
+            added,
+        )
+    except Exception as exc:
+        raise ResumptionError(
+            f"Failed to rebuild environment after adding {added}: {exc}"
+        ) from exc

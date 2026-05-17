@@ -6,7 +6,6 @@ from app.models.artifact import Artifact
 from app.models.project import Project
 from app.models.task import (
     EXECUTION_ENGINE,
-    PENDING_ENGINE_ROUTING_EXECUTOR,
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
     PLANNING_LEVEL_REFINED,
@@ -233,7 +232,7 @@ def generate_atomic_tasks(
             priority=atomic.priority,
             task_type=atomic.task_type,
             planning_level=PLANNING_LEVEL_ATOMIC,
-            executor_type=PENDING_ENGINE_ROUTING_EXECUTOR,
+            executor_type=EXECUTION_ENGINE,
             sequence_order=index,
             status="pending",
             is_blocked=False,

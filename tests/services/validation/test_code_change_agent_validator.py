@@ -247,7 +247,7 @@ def test_code_change_agent_validator_builds_prompt_with_context_and_evidence_fil
     provider = _CapturingProvider(_successful_llm_payload())
     monkeypatch.setattr(
         "app.services.validation.validators.code_change_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     result = CodeChangeAgentValidator().validate(validation_input)
@@ -315,7 +315,7 @@ def test_code_change_agent_validator_prefers_workspace_content_over_source_conte
     provider = _CapturingProvider(_successful_llm_payload())
     monkeypatch.setattr(
         "app.services.validation.validators.code_change_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     CodeChangeAgentValidator().validate(validation_input)
@@ -368,7 +368,7 @@ def test_code_change_agent_validator_validated_evidence_ids_include_only_code_ch
     provider = _CapturingProvider(_successful_llm_payload())
     monkeypatch.setattr(
         "app.services.validation.validators.code_change_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     result = CodeChangeAgentValidator().validate(validation_input)
@@ -421,7 +421,7 @@ def test_code_change_agent_validator_maps_llm_decision_to_canonical_result(
     provider = _CapturingProvider(_successful_llm_payload(decision=decision))
     monkeypatch.setattr(
         "app.services.validation.validators.code_change_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     result = CodeChangeAgentValidator().validate(validation_input)
@@ -456,7 +456,7 @@ def test_code_change_agent_validator_includes_missing_files_in_prompt_without_cr
     provider = _CapturingProvider(_successful_llm_payload(decision="manual_review"))
     monkeypatch.setattr(
         "app.services.validation.validators.code_change_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     result = CodeChangeAgentValidator().validate(validation_input)
@@ -502,7 +502,7 @@ def test_code_change_agent_validator_raises_on_invalid_llm_output(
     )
     monkeypatch.setattr(
         "app.services.validation.validators.code_change_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     with pytest.raises(CodeChangeAgentValidatorError):

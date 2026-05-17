@@ -6,11 +6,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.services.environment.contracts import (
+    EnvironmentBootstrapError,
     EnvironmentSession,
     PinnedDependency,
     RuntimeSpec,
 )
-from app.services.environment.contracts import EnvironmentBootstrapError
 from app.services.environment.docker_driver import (
     DockerDriver,
     _build_install_command,

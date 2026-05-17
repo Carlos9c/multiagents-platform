@@ -2,7 +2,6 @@ from pydantic import ValidationError
 
 from app.schemas.execution_plan import ExecutionPlan, ExecutionPlanGenerationInput
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 EXECUTION_SEQUENCER_SYSTEM_PROMPT = """
 You are a senior execution sequencing agent.
@@ -41,6 +40,12 @@ Dependency rules:
 - Infer dependencies when one task plausibly needs outputs, context, or completed prerequisites from another.
 - Mark blocked tasks explicitly when they should not yet be executed.
 - ready_task_ids should only include tasks that are safe to begin immediately.
+
+Hard ordering rule for setup_first tasks:
+- Each candidate task carries an ordering_hint field: "setup_first", "depends_on_setup", or "standard".
+- Tasks with ordering_hint="setup_first" establish project infrastructure (build system, scaffold, tooling). They MUST be placed in earlier batches than any task with ordering_hint="depends_on_setup".
+- NEVER place a "depends_on_setup" task in the same batch as or an earlier batch than a "setup_first" task.
+- If no "setup_first" tasks exist the hint has no effect — sequence normally.
 
 Output rules:
 - Return ONLY valid JSON.
@@ -95,6 +100,7 @@ Important corrections:
 - inferred_dependencies must be meaningful and justified
 - explicitly include uncertainties where dependency inference is not fully certain
 - the final checkpoint must include "stage_closure" in evaluation_focus
+- tasks with ordering_hint="setup_first" MUST appear in earlier batches than tasks with ordering_hint="depends_on_setup"
 
 Execution sequencing input:
 {sequencing_input.model_dump_json(indent=2)}
@@ -147,15 +153,13 @@ def call_execution_sequencer_model(
     sequencing_input: ExecutionPlanGenerationInput,
 ) -> ExecutionPlan:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(ExecutionPlan.model_json_schema())
-
     first_user_prompt = build_execution_sequencer_user_prompt(sequencing_input)
 
     raw = provider.generate_structured(
         system_prompt=EXECUTION_SEQUENCER_SYSTEM_PROMPT,
         user_prompt=first_user_prompt,
         schema_name="execution_plan",
-        json_schema=strict_schema,
+        json_schema=ExecutionPlan.model_json_schema(),
     )
     raw = _ensure_final_checkpoint_stage_closure(raw)
 
@@ -171,7 +175,7 @@ def call_execution_sequencer_model(
             system_prompt=EXECUTION_SEQUENCER_SYSTEM_PROMPT,
             user_prompt=retry_user_prompt,
             schema_name="execution_plan",
-            json_schema=strict_schema,
+            json_schema=ExecutionPlan.model_json_schema(),
         )
         raw_retry = _ensure_final_checkpoint_stage_closure(raw_retry)
 

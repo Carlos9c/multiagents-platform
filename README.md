@@ -10,22 +10,35 @@ Sistema de orquestación multi-agente para la ejecución autónoma de tareas de 
 
 ### Lo que está implementado y funcionando
 
-El sistema es capaz de ejecutar un proyecto de software de extremo a extremo de forma autónoma:
+El sistema es capaz de gestionar un proyecto de software de extremo a extremo de forma autónoma, desde la conversación inicial con el usuario hasta la entrega de los artefactos generados:
 
 1. **Pipeline de planificación completo** — descomposición en tres niveles: `high_level` → `refined` (opcional) → `atomic`, más generación del plan de ejecución secuenciado en batches con checkpoints.
 
 2. **Motor de ejecución orquestado** — loop de decisión en dos fases (discovery → execution) con tres subagentes (`context_selection_agent`, `code_change_agent`, `command_runner_agent`), gestión de presupuesto (`max_steps`, `max_agent_calls`, `max_repair_attempts`) y trazabilidad completa de evidencia.
 
-3. **Sistema de validación modular** — routing dinámico de validadores, validador de código con rendering especializado, y agregación determinista con prioridad `failed > manual_review > partial > completed`.
+3. **Sistema de validación modular** — routing dinámico de validadores, validador de código con rendering especializado, y agregación determinista con prioridad `failed > manual_review > partial > completed`. Cada validador puede enrutarse a un modelo LLM independiente via `VALIDATOR_MODEL` / `VALIDATOR_PROVIDER`.
 
 4. **Pipeline post-batch completo** — evaluación de stage con LLM, recovery (reatomize / insert_followup / manual_review), decisión de intención post-batch, compiler de asignación de recovery, y mutación viva del plan (patch, resequence, replan).
 
-5. **Sistema de entorno Docker** — planificación del entorno de ejecución con LLM, bootstrapping de contenedores Docker, validación del entorno (smoke test + repair), y gestión del ciclo de vida de sesiones. Soporta `python_slim`, con soporte declarado para `node_npm` y `rust_cargo`.
+5. **Sistema de entorno Docker** — planificación del entorno de ejecución con LLM, bootstrapping de contenedores Docker, validación del entorno (smoke test + repair), y gestión del ciclo de vida de sesiones. Soporta `python_slim`, con soporte declarado para `node_npm` y `rust_cargo`. Rebuild eager cuando el usuario proporciona clarificaciones que implican nuevas dependencias.
 
-6. **Workflow completo por iteraciones** — el `ProjectWorkflowService` ejecuta iteraciones hasta cerrar el stage, con guards contra agotamiento del plan, reapertura de finalización, y límite de iteraciones configurable.
+6. **Workflow completo por iteraciones** — el `ProjectWorkflowService` ejecuta iteraciones hasta cerrar el stage, con guards contra agotamiento del plan, reapertura de finalización, y límite de iteraciones configurable. Soporta pausa cooperativa y reanudación.
+
+7. **Agente conversacional Aria** — máquina de estados de 6 fases (`gathering → ready → executing ⇄ awaiting_review → paused → completed`) con evaluadores LLM especializados por fase. La revisión manual no tiene límite de intentos: el proceso sólo se reanuda tras confirmación explícita del usuario sobre un plan concreto. El motivo del bloqueo real (del último `ExecutionRun`) se inyecta en la apertura del episodio.
+
+8. **Control de flujo del workflow** — pausa cooperativa vía `threading.Event`, reanudación desde pausa o crash, y recuperación automática al arrancar el servidor (re-encola workflows en estado `executing` con tareas pendientes).
+
+9. **Frontend React + WebSocket** — interfaz completa con Vite + React (`frontend/`), comunicación en tiempo real via WebSocket, historial de conversación, panel de tareas con estado en vivo, y controles de pausa/reanudación. El input se bloquea en la UI durante la ejecución.
+
+10. **Q&A de estado del proyecto** — en fases PAUSED y COMPLETED, el `ProjectQueryAgent` responde preguntas del usuario sobre el estado del proyecto con información real de la BD (tareas completadas, pendientes, fallidas).
 
 ### Cambios recientes significativos
 
+- **Agente conversacional Aria (overhaul completo)**: flujo de revisión manual rediseñado sin límite de intentos; sub-fase de confirmación (`review_subphase: gathering → awaiting_confirmation`) que requiere aprobación explícita del usuario antes de reanudar; motivo de bloqueo real extraído del `ExecutionRun`; `ReviewEvaluator` enriquecido con progreso de tareas del proyecto como contexto.
+- **Pausa y reanudación del workflow**: pausa cooperativa por proyecto via `threading.Event`, endpoints `POST /pause` y `POST /resume-workflow`, y recovery automático al arranque del servidor para proyectos que se quedaron en ejecución tras un crash.
+- **Rebuild eager de entorno**: cuando la clarificación del usuario implica nuevas librerías, el `ImpactAssessmentAgent` las detecta y el `ResumptionService` hace teardown + bootstrap del contenedor Docker con el nuevo spec antes de reintentar.
+- **Routing de modelo por capa**: validadores (`code_change_agent_validator`, `command_runner_agent_validator`) enrutables a un modelo independiente via `VALIDATOR_MODEL` / `VALIDATOR_PROVIDER` (ej. `gpt-5.2`).
+- **Frontend React + WebSocket** (`frontend/`): UI completa con Vite + React, comunicación en tiempo real, historial de conversación, estado de tareas en vivo, y controles de pausa/reanudación.
 - **Budget exhaustion → COMPLETED**: cuando el orquestador agota `max_steps`, el resultado se marca `completed` en lugar de `failed`, enviando el trabajo acumulado a validación para salvaguardar el trabajo parcial.
 - **`StageEvaluationOutput` derivación determinista**: `recommended_next_action`, `plan_change_scope` y `remaining_plan_still_valid` se derivan automáticamente de los campos fuente de verdad, eliminando una clase entera de errores de validación por salidas contradictorias del LLM.
 - **Docker stop 409 race condition**: el sistema maneja correctamente el caso donde Docker elimina el contenedor automáticamente (`--rm`) antes de que `stop_session` llame a `remove()`.
@@ -34,7 +47,7 @@ El sistema es capaz de ejecutar un proyecto de software de extremo a extremo de 
 
 ### Números actuales
 
-- **426 tests unitarios** — todos passing
+- **469 tests unitarios** — todos passing
 - **12 tests de integración** (Docker) — se ejecutan con `-m integration`
 - **0 failures** en CI
 
@@ -69,6 +82,99 @@ ProjectWorkflowService.run_workflow()
               ├── RecoveryService       → RecoveryDecision × tarea fallida
               ├── PostBatchDecisionSvc  → ResolvedPostBatchIntent
               └── LivePlanMutationSvc   → patched ExecutionPlan | replan | none
+```
+
+---
+
+## Agente Conversacional — Aria (`app/services/conversation/`)
+
+Aria gestiona la interacción con el usuario a lo largo de todo el ciclo de vida del proyecto. Es una máquina de estados con 6 fases; el routing de mensajes es siempre unidireccional — ningún handler llama a otro.
+
+### Fases y transiciones
+
+```
+GATHERING → READY → EXECUTING ⇄ AWAITING_REVIEW
+                         ↕
+                       PAUSED
+                         ↕
+                     COMPLETED
+```
+
+| Fase | Qué hace Aria |
+|---|---|
+| `gathering` | Hace preguntas via `RequirementsEvaluator` hasta tener suficiente contexto para el plan |
+| `ready` | Cualquier mensaje del usuario (o botón Start) lanza `ProjectStartService` |
+| `executing` | Input bloqueado en el frontend; backend devuelve mensaje estático |
+| `awaiting_review` | Episodio de revisión manual con dos sub-fases (ver abajo) |
+| `paused` | El usuario puede preguntar sobre el estado del proyecto (`ProjectQueryAgent`) |
+| `completed` | Idem; Aria emite un mensaje de cierre con el recuento final de tareas |
+
+### Sub-fases de revisión manual (`awaiting_review`)
+
+El campo `review_subphase` en `Conversation` rastrea la posición dentro del episodio:
+
+```
+gathering  →  [ReviewEvaluator: ready_to_confirm]  →  awaiting_confirmation
+    ↑                                                          |
+    └──────── [ConfirmationEvaluator: confirmed=False] ←───────┘
+                                                               |
+                                              [confirmed=True] ↓
+                                            ResumptionService → fase EXECUTING
+```
+
+- **Sin límite de intentos** — el episodio continúa indefinidamente hasta obtener confirmación o que el usuario abandone.
+- **Notas de validación reales** — la apertura del episodio incluye `validation_notes + blockers_found + error_message` del último `ExecutionRun`, para que el usuario entienda el motivo del bloqueo.
+- **Contexto de progreso** — `ReviewEvaluator` recibe un resumen de las tareas completadas/fallidas/pendientes para responder preguntas de estado dentro del episodio.
+- **Rebuild eager de entorno** — si la clarificación implica nuevas dependencias, `ResumptionService` llama al `ImpactAssessmentAgent`, hace teardown del contenedor Docker, y lo reconstruye con el nuevo spec antes de reintentar.
+
+### Evaluadores LLM
+
+| Servicio | Input | Output | Usado en |
+|---|---|---|---|
+| `RequirementsEvaluator` | historial + draft actual | `needs_more` / `sufficient` | `gathering` |
+| `ReviewEvaluator` | task context + episode history + task progress | `insufficient` / `ready_to_confirm` / `abandoned` | `awaiting_review` (gathering) |
+| `ConfirmationEvaluator` | action_summary + user_response | `confirmed: bool` + `follow_up` | `awaiting_review` (awaiting_confirmation) |
+| `ProjectQueryAgent` | task list (por estado) + user question | respuesta en lenguaje natural | `paused`, `completed` |
+| `ImpactAssessmentAgent` | user clarification + project context | scope + `environment_changes` | `ResumptionService` |
+
+### Control de flujo del workflow
+
+```python
+# Pausa cooperativa
+POST /conversations/pause          → request_workflow_stop(project_id)
+                                    # threading.Event → loop comprueba antes de cada tarea
+
+# Reanudación
+POST /conversations/resume-workflow → clear_workflow_stop(project_id)
+                                     → conversation.phase = EXECUTING
+                                     → _workflow_executor.submit(...)
+
+# Recovery de crash (en _lifespan de FastAPI)
+# Al arrancar: re-encola proyectos en EXECUTING con tareas PENDING
+```
+
+### API del agente conversacional
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `WS` | `/ws/projects/{project_id}/chat` | Canal principal de chat en tiempo real |
+| `GET` | `/projects/{project_id}/conversations/active` | Estado actual de la conversación + historial |
+| `POST` | `/projects/{project_id}/conversations/notify-review` | Notifica inicio de revisión manual (desde capa de ejecución) |
+| `POST` | `/projects/{project_id}/conversations/notify-task-event` | Broadcast de cambio de estado de tarea (desde workflow) |
+| `POST` | `/projects/{project_id}/conversations/confirm-start` | Inicia el proyecto desde el botón Start de la UI |
+| `POST` | `/projects/{project_id}/conversations/pause` | Solicita parada cooperativa del workflow |
+| `POST` | `/projects/{project_id}/conversations/resume-workflow` | Reanuda workflow pausado o bloqueado por crash |
+
+### Modelo de datos de conversación
+
+```python
+Conversation:
+    phase: str                        # gathering | ready | executing | awaiting_review | paused | completed
+    review_task_id: int | None        # tarea bloqueada actualmente en revisión
+    review_episode_attempts: int      # contador informativo (sin límite funcional)
+    review_subphase: str | None       # gathering | awaiting_confirmation
+    pending_clarification_summary: str | None  # plan propuesto pendiente de confirmación
+    requirements_draft: str | None    # borrador acumulado durante gathering
 ```
 
 ---
@@ -456,18 +562,37 @@ pending → running → awaiting_validation → completed
 
 ## API (`app/api/`)
 
+### Proyectos y tareas
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `GET` | `/projects` | Listar proyectos |
+| `GET` | `/projects/{project_id}` | Detalle de proyecto |
+| `GET` | `/projects/{project_id}/tasks` | Tareas del proyecto |
+| `GET` | `/projects/{project_id}/artifacts` | Artifacts del proyecto |
+| `GET` | `/projects/{project_id}/execution_runs` | Runs de ejecución del proyecto |
+| `POST` | `/tasks/{task_id}/execute` | Ejecutar una tarea atómica individualmente |
+
+### Pipeline de planificación
+
 | Método | Ruta | Descripción |
 |---|---|---|
 | `POST` | `/workflow/projects/{project_id}/run` | Ejecutar el workflow completo del proyecto |
 | `POST` | `/projects/{project_id}/plan` | Ejecutar solo la fase de planning |
 | `POST` | `/projects/{project_id}/technical_task_refiner` | Refinar una tarea high-level |
 | `POST` | `/projects/{project_id}/atomic_task_generator` | Generar tareas atómicas para un padre |
-| `POST` | `/tasks/{task_id}/execute` | Ejecutar una tarea atómica individualmente |
-| `GET` | `/projects` | Listar proyectos |
-| `GET` | `/projects/{project_id}` | Detalle de proyecto |
-| `GET` | `/projects/{project_id}/tasks` | Tareas del proyecto |
-| `GET` | `/projects/{project_id}/artifacts` | Artifacts del proyecto |
-| `GET` | `/projects/{project_id}/execution_runs` | Runs de ejecución del proyecto |
+
+### Agente conversacional (Aria)
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `WS` | `/ws/projects/{project_id}/chat` | Canal WebSocket principal de chat |
+| `GET` | `/projects/{project_id}/conversations/active` | Estado y historial de la conversación activa |
+| `POST` | `/projects/{project_id}/conversations/confirm-start` | Iniciar proyecto desde botón Start de la UI |
+| `POST` | `/projects/{project_id}/conversations/notify-review` | Notificar inicio de revisión manual (desde workflow) |
+| `POST` | `/projects/{project_id}/conversations/notify-task-event` | Broadcast de cambio de estado de tarea |
+| `POST` | `/projects/{project_id}/conversations/pause` | Solicitar pausa cooperativa del workflow |
+| `POST` | `/projects/{project_id}/conversations/resume-workflow` | Reanudar workflow pausado o tras crash |
 
 ---
 
@@ -484,7 +609,21 @@ AGENTS_PROJECTS_ROOT=...
 Variables opcionales clave:
 
 ```
+# Modelo base
 OPENAI_MODEL=gpt-5.1
+LLM_PROVIDER=openai              # openai | anthropic
+
+# Routing por capa (sobreescriben el modelo base cuando se definen)
+EXECUTION_ENGINE_PROVIDER=...    # orchestrator + context_selection_agent
+EXECUTION_ENGINE_MODEL=...
+CODE_AGENT_PROVIDER=...          # code_change_agent
+CODE_AGENT_MODEL=...
+COMMAND_AGENT_PROVIDER=...       # command_runner_agent
+COMMAND_AGENT_MODEL=...
+VALIDATOR_PROVIDER=...           # ambos validadores (ej. openai)
+VALIDATOR_MODEL=...              # ej. gpt-5.2
+
+# Motor de ejecución
 EXECUTION_ENGINE_BACKEND=orchestrated
 EXECUTION_ENGINE_MAX_STEPS=8
 EXECUTION_ENGINE_MAX_AGENT_CALLS=8
@@ -530,7 +669,7 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**426 tests unitarios + 12 tests de integración — todos passing.**
+**469 tests unitarios + 12 tests de integración — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
@@ -546,6 +685,7 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 | Project workflow | `test_project_workflow_service.py` |
 | Workspace runtime | `test_local_workspace_runtime.py` |
 | Execution plan service | `test_execution_plan_service.py` |
+| Agente conversacional | `test_project_assistant.py` |
 | Environment (integración) | `tests/integration/test_environment_integration.py` |
 | API | `test_projects.py` |
 
@@ -556,37 +696,40 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 ### Alta prioridad
 
 **1. Soporte multi-stage**
-El sistema actual ejecuta un único stage por proyecto. Para soportar proyectos reales con múltiples stages secuenciales (ej. "backend" → "frontend" → "integración"), el `ProjectWorkflowService` necesita un loop externo que cierre el stage actual, genere el siguiente, y reutilice el contexto acumulado. Las bases ya están: `project_stage_closed`, `stage_goal`, y la memoria de proyecto (`ProjectOperationalContext`) son stage-aware.
+El sistema ejecuta un único stage por proyecto. Para proyectos reales con múltiples stages secuenciales (ej. "backend" → "frontend" → "integración"), el `ProjectWorkflowService` necesita un loop externo que cierre el stage actual, genere el siguiente, y reutilice el contexto acumulado. Las bases ya están: `project_stage_closed`, `stage_goal`, y la memoria de proyecto (`ProjectOperationalContext`) son stage-aware.
 
 **2. Drivers de entorno para Node.js y Rust**
 `node_npm` y `rust_cargo` están declarados en los tipos pero sus drivers no están implementados. Añadir `NodeNpmDriver` y `RustCargoDriver` siguiendo el patrón de `DockerDriver`, con sus smoke tests y comandos de instalación correspondientes.
 
-**3. Observabilidad estructurada del pipeline completo**
-Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`) en todo el pipeline para facilitar correlación en producción sin necesidad de leer artifacts.
+**3. Tests de integración end-to-end del flujo conversacional**
+Los tests de `project_assistant` mockeando el WebSocket y el workflow en background para verificar el flujo completo: inicio de conversación → gathering → proyecto iniciado → revisión manual → confirmación → reanudación. Actualmente los tests del agente conversacional usan DB real pero mockean todos los evaluadores LLM.
 
 ### Media prioridad
 
-**4. API de monitorización del workflow**
-El endpoint `/workflow/projects/{project_id}/run` es síncrono y bloquea hasta el cierre del stage. Añadir endpoints de consulta de estado (`GET /workflow/projects/{project_id}/status`) y un mecanismo de ejecución asíncrona (tarea background + polling o WebSocket) para workflows de larga duración.
-
-**5. Precisión del validador en decisiones parciales**
+**4. Precisión del validador en decisiones parciales**
 El `command_runner_agent_validator` puede declarar `partial` incluso cuando los tests pasan, si detecta scope no cubierto en los criterios de aceptación. Ampliar la lista de markers en `_task_looks_like_executable_implementation` (persistence, storage, data) o relajar el criterio de normalización para tareas con exit_code=0.
 
-**6. Optimización del tamaño de prompt en `code_change_agent`**
+**5. Optimización del tamaño de prompt en `code_change_agent`**
 La inyección del workspace state puede generar prompts de 70-80k caracteres en proyectos con historial extenso. Añadir un presupuesto de caracteres configurable para las secciones de contenido de archivos, truncando por tamaño antes de insertar en el prompt.
 
-**7. Enriquecimiento de `StageEvaluationInput` con datos de run**
+**6. Historial persistido de Q&A del proyecto**
+Las respuestas del `ProjectQueryAgent` se guardan en el historial de la conversación, pero el agente no ve conversaciones anteriores al formular la respuesta. Pasar el historial reciente como contexto al agente para que sus respuestas sean coherentes con lo dicho antes.
+
+**7. Observabilidad estructurada del pipeline completo**
+Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`, `review_subphase`) en todo el pipeline para facilitar correlación en producción sin necesidad de leer artifacts.
+
+**8. Enriquecimiento de `StageEvaluationInput` con datos de run**
 El `evaluation_service` juzga el outcome de un batch pero no tiene acceso al estado de los runs individuales. Añadir un resumen de run-level a la entrada del evaluador para producir evaluaciones más precisas en batches con mezcla de éxito parcial y fallo.
 
 ### Baja prioridad
 
-**8. Tests end-to-end con engine real**
-Los tests actuales cubren servicios individuales con mocks. Añadir tests de integración que ejerciten el flujo completo desde `execute_task_sync` hasta la reconciliación de jerarquía, con un engine real pero LLM mockeado a nivel de provider.
+**9. Routing de modelo por evaluador conversacional**
+Los evaluadores de Aria (`RequirementsEvaluator`, `ReviewEvaluator`, `ConfirmationEvaluator`, `ProjectQueryAgent`) usan el provider por defecto. Añadir configuración granular similar a `VALIDATOR_MODEL` para poder enrutar evaluadores conversacionales a modelos más económicos.
 
-**9. Métricas de ejecución por proyecto**
-Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de timeout retries. Datos útiles para ajustar parámetros de orquestación y detectar proyectos problemáticos antes de que agoten el iteration limit.
+**10. Métricas de ejecución por proyecto**
+Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de episodios de revisión por tarea, tiempo medio hasta confirmación en revisión manual. Datos útiles para ajustar parámetros de orquestación y detectar proyectos problemáticos antes de que agoten el iteration limit.
 
-**10. Contexto estructural del repositorio en `context_selection_agent`**
+**11. Contexto estructural del repositorio en `context_selection_agent`**
 El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto seleccionado.
 
 ---

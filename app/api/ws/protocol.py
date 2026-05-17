@@ -93,7 +93,7 @@ def conversation_state(
 def review_required(
     *,
     content: str,
-    task_id: int,
+    task_id: int | None,
     conversation_id: int,
 ) -> dict[str, Any]:
     return OutgoingMessage(
@@ -118,6 +118,16 @@ def execution_event(
         task_title=task_title,
         status=status,
         project_id=project_id,
+    ).model_dump(exclude_none=True)
+
+
+def workflow_paused(*, conversation_id: int, project_id: int) -> dict[str, Any]:
+    return OutgoingMessage(
+        type="workflow_paused",
+        conversation_id=conversation_id,
+        project_id=project_id,
+        phase="paused",
+        content="La ejecución ha sido pausada. Puedes reanudarla cuando quieras.",
     ).model_dump(exclude_none=True)
 
 

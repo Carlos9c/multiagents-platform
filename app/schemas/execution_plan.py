@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, model_validator
 
 RiskLevel = Literal["low", "medium", "high"]
 PlanningScope = Literal["project_atomic_tasks", "refined_task_atomic_tasks"]
+OrderingHint = Literal["setup_first", "depends_on_setup", "standard"]
 CheckpointEvaluationFocus = Literal[
     "architecture_alignment",
     "functional_coverage",
@@ -42,6 +43,7 @@ class CandidateAtomicTask(BaseModel):
     tests_required: str | None = None
     technical_constraints: str | None = None
     out_of_scope: str | None = None
+    ordering_hint: OrderingHint = "standard"
 
     @model_validator(mode="after")
     def validate_atomic_level(self):

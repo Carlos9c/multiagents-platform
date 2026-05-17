@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Agente Desarrollador** is an autonomous task execution system: a multi-agent orchestration platform that executes atomic development tasks with structured validation, evidence tracking, and deterministic recovery. Built with FastAPI + SQLAlchemy + OpenAI structured outputs + Docker.
+**Agente Desarrollador** is an autonomous software development system: a conversational multi-agent platform where users interact with a project assistant (Aria) to define projects, monitor execution, and resolve blocked tasks. The system plans, executes, and validates atomic development tasks with structured evidence tracking and deterministic recovery. Built with FastAPI + SQLAlchemy + PostgreSQL + OpenAI structured outputs + Docker + React/Vite frontend.
 
 ## Commands
 
@@ -51,10 +51,27 @@ CI runs `ruff check .` + `black --check .` + `pytest -q` on Python 3.12.
 
 ## Architecture
 
-### Execution Flow
+### System-Level Flow
 
 ```
-API request → task_execution_service.execute_task_sync()
+User (browser/WebSocket)
+  → Aria conversational agent (project_assistant.py)
+      GATHERING  → RequirementsEvaluator → requirements_draft
+      READY      → ProjectStartService → atomic tasks created
+      EXECUTING  → ProjectWorkflowService (background thread)
+                     → task batches → OrchestratedExecutionEngine
+                     → post-batch pipeline → plan mutation
+                     → if task blocked → AWAITING_REVIEW
+      AWAITING_REVIEW → ReviewEvaluator → ConfirmationEvaluator
+                     → ResumptionService → back to EXECUTING
+      PAUSED     → ProjectQueryAgent (Q&A only)
+      COMPLETED  → ProjectQueryAgent (Q&A only)
+```
+
+### Task Execution Flow
+
+```
+task_execution_service.execute_task_sync()
   → ExecutionRun created in DB
   → EnvironmentBootstrapper → Docker session (if needed)
   → OrchestratedExecutionEngine.execute()
@@ -104,7 +121,34 @@ Independent from the execution layer. Runs after the engine returns:
 2. **Execution** — each validator independently judges `TaskValidationInput` (request + result)
 3. **Aggregation** — merges results with priority: `failed > manual_review > partial > completed`
 
-Two validators: `code_change_agent_validator` and `command_runner_agent_validator`.
+Two validators: `code_change_agent_validator` and `command_runner_agent_validator`. Each validator uses `get_llm_provider(model=settings.validator_model, provider=settings.validator_provider)` so the validation layer can be routed to a different model than the execution layer.
+
+### Conversational Agent — Aria (`app/services/conversation/`)
+
+Six-phase state machine. `project_assistant.py` is the coordinator — it contains no LLM logic of its own.
+
+**Phases:** `gathering → ready → executing ⇄ awaiting_review → paused → completed`
+
+**Key design decisions:**
+- `awaiting_review` has two internal sub-phases tracked via `conversation.review_subphase`: `gathering` (asking for clarification) and `awaiting_confirmation` (user must confirm the proposed plan before execution resumes). There is NO attempt limit.
+- `conversation.pending_clarification_summary` stores the proposed plan while waiting for confirmation.
+- The review opening message sources real failure info from the last `ExecutionRun` (`validation_notes + blockers_found + error_message`).
+- `ReviewEvaluator` receives a project task progress summary (completed/failed/pending task titles) so it can answer "what has been done?" questions naturally within the review episode without a separate agent.
+- During `executing`: message sending is disabled at the frontend level. The backend returns a static message with `event="executing"` (safe fallback).
+- During `paused` and `completed`: `ProjectQueryAgent` handles natural language questions about project state.
+- Cooperative pause: `request_workflow_stop(project_id)` sets a `threading.Event`; the workflow loop checks it before each task. Returns `status="paused"` → conversation transitions to `PAUSED`.
+- Crash recovery: FastAPI `_lifespan` re-queues workflows for conversations in `EXECUTING` with pending tasks on startup.
+- Eager environment rebuild: when `ImpactAssessmentAgent` detects `environment_changes` in the user's clarification, `_apply_environment_delta()` calls `bootstrapper.teardown()` then `bootstrapper.bootstrap()` before retrying the task. Fails fast if bootstrap fails.
+
+**LLM evaluators:**
+
+| Service | File | Used in phase |
+|---|---|---|
+| `RequirementsEvaluator` | `requirements_evaluator.py` | `gathering` |
+| `ReviewEvaluator` | `review_evaluator.py` | `awaiting_review` (gathering sub-phase) |
+| `ConfirmationEvaluator` | `confirmation_evaluator.py` | `awaiting_review` (awaiting_confirmation sub-phase) |
+| `ProjectQueryAgent` | `project_query_agent.py` | `paused`, `completed` |
+| `ImpactAssessmentAgent` | `impact_assessment_agent.py` | `ResumptionService` (on review resolution) |
 
 ### Key Contracts (`app/execution_engine/contracts.py`)
 
@@ -162,7 +206,21 @@ AGENTS_PROJECTS_ROOT=...   # root dir for project workspaces
 
 Key optional variables:
 ```
+# Base model
 OPENAI_MODEL=gpt-5.1
+LLM_PROVIDER=openai               # openai | anthropic
+
+# Per-layer model routing (override base when set)
+EXECUTION_ENGINE_PROVIDER=...     # orchestrator + context_selection_agent
+EXECUTION_ENGINE_MODEL=...
+CODE_AGENT_PROVIDER=...           # code_change_agent
+CODE_AGENT_MODEL=...
+COMMAND_AGENT_PROVIDER=...        # command_runner_agent
+COMMAND_AGENT_MODEL=...
+VALIDATOR_PROVIDER=...            # both validators (e.g. openai)
+VALIDATOR_MODEL=...               # e.g. gpt-5.2
+
+# Execution engine budget
 EXECUTION_ENGINE_BACKEND=orchestrated
 EXECUTION_ENGINE_MAX_STEPS=8
 EXECUTION_ENGINE_MAX_AGENT_CALLS=8
@@ -175,6 +233,8 @@ Note: Redis is **not used** — the `REDIS_URL` variable has been removed.
 
 ## Testing Conventions
 
-Tests use SQLite in-memory (`:memory:`) via pytest fixtures in `tests/conftest.py`. Key fixtures: `db_session`, `make_project`, `make_task`, `make_execution_run`. The conftest sets `DATABASE_URL=sqlite+pysqlite:///:memory:` and `AGENTS_PROJECTS_ROOT=.pytest_agents_projects`. The execution engine is typically monkeypatched in service tests.
+Tests use SQLite in-memory (`:memory:`) via pytest fixtures in `tests/conftest.py`. Key fixtures: `db_session`, `make_project`, `make_task`, `make_execution_run`. The conftest sets `DATABASE_URL=sqlite+pysqlite:///:memory:` and `AGENTS_PROJECTS_ROOT=.pytest_agents_projects`. The execution engine is typically monkeypatched in service tests. Conversation evaluators (LLM calls) are always monkeypatched in conversation tests.
+
+**Current count: 469 unit tests + 12 integration tests — all passing.**
 
 Integration tests (`tests/integration/`) require a live Docker daemon and are skipped by default. Run with `poetry run pytest -m integration`.

@@ -14,7 +14,6 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -81,12 +80,21 @@ class NewTaskSpec(BaseModel):
     reason: str
 
 
+class EnvironmentDependency(BaseModel):
+    """A new package or tool required by the user's clarification."""
+
+    package_name: str
+    version_constraint: str | None
+    reason: str
+
+
 class ImpactAssessmentLLMOutput(BaseModel):
     change_scope: Literal["narrow", "moderate", "disruptive"]
     reasoning: str
     tasks_to_modify: list[TaskRevisionSpec] = Field(default_factory=list)
     tasks_to_add: list[NewTaskSpec] = Field(default_factory=list)
     resequence_needed: bool
+    environment_changes: list[EnvironmentDependency] = Field(default_factory=list)
 
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -99,6 +107,11 @@ class ImpactAssessmentResult:
     tasks_to_modify: list[TaskRevisionSpec]
     tasks_to_add: list[NewTaskSpec]
     resequence_needed: bool
+    environment_changes: list[EnvironmentDependency] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.environment_changes is None:
+            self.environment_changes = []
 
 
 class ImpactAssessmentError(Exception):
@@ -146,6 +159,11 @@ Rules:
 - reasoning must explain WHY you chose this scope and what specifically is affected.
 - resequence_needed: set true for moderate when the new/modified tasks change the
   logical ordering of pending work.
+- environment_changes: populate this list if the clarification implies new libraries,
+  frameworks, tools, or runtime dependencies that are not already part of the project.
+  This applies to ALL scopes (narrow, moderate, disruptive). Leave empty if no new
+  dependencies are required. Each entry needs: package_name, version_constraint (or
+  null if any version is acceptable), and reason (why this dependency is needed).
 
 Return ONLY JSON matching the provided schema.
 """.strip()
@@ -211,17 +229,13 @@ def assess_impact(inp: ImpactAssessmentInput) -> ImpactAssessmentResult:
     an action plan for the resumption service.
     """
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        ImpactAssessmentLLMOutput.model_json_schema()
-    )
-
     user_prompt = _build_user_prompt(inp)
 
     raw = provider.generate_structured(
         system_prompt=_SYSTEM_PROMPT,
         user_prompt=user_prompt,
         schema_name="impact_assessment_output",
-        json_schema=strict_schema,
+        json_schema=ImpactAssessmentLLMOutput.model_json_schema(),
     )
 
     try:
@@ -246,4 +260,5 @@ def assess_impact(inp: ImpactAssessmentInput) -> ImpactAssessmentResult:
         tasks_to_modify=llm_output.tasks_to_modify,
         tasks_to_add=llm_output.tasks_to_add,
         resequence_needed=llm_output.resequence_needed,
+        environment_changes=llm_output.environment_changes,
     )

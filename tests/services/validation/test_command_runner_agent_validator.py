@@ -214,7 +214,7 @@ def test_command_runner_agent_validator_builds_prompt_with_command_evidence_and_
     provider = _CapturingProvider(_successful_llm_payload())
     monkeypatch.setattr(
         "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     result = CommandRunnerAgentValidator().validate(validation_input)
@@ -290,7 +290,7 @@ def test_command_runner_agent_validator_validated_evidence_ids_include_only_comm
     provider = _CapturingProvider(_successful_llm_payload())
     monkeypatch.setattr(
         "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     result = CommandRunnerAgentValidator().validate(validation_input)
@@ -352,7 +352,7 @@ def test_command_runner_agent_validator_maps_llm_decision_to_canonical_result(
     provider = _CapturingProvider(_successful_llm_payload(decision=decision))
     monkeypatch.setattr(
         "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     result = CommandRunnerAgentValidator().validate(validation_input)
@@ -409,7 +409,7 @@ def test_command_runner_agent_validator_promotes_partial_to_completed_when_termi
     provider = _CapturingProvider(_successful_llm_payload(decision="partial"))
     monkeypatch.setattr(
         "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     result = CommandRunnerAgentValidator().validate(validation_input)
@@ -455,7 +455,7 @@ def test_command_runner_agent_validator_includes_missing_files_in_prompt_without
     provider = _CapturingProvider(_successful_llm_payload(decision="manual_review"))
     monkeypatch.setattr(
         "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     result = CommandRunnerAgentValidator().validate(validation_input)
@@ -500,7 +500,7 @@ def test_command_runner_agent_validator_raises_on_invalid_llm_output(
     )
     monkeypatch.setattr(
         "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
-        lambda: provider,
+        lambda **_kw: provider,
     )
 
     with pytest.raises(CommandRunnerAgentValidatorError):
@@ -539,6 +539,60 @@ def _make_minimal_validation_input(*, task_type: str | None = None) -> TaskValid
         intent=None,
         metadata={},
     )
+
+
+def test_command_runner_agent_validator_does_not_promote_setup_only_terminal_command(
+    tmp_path,
+    monkeypatch,
+):
+    """A setup command (chmod +x) that succeeds must NOT elevate a partial decision to completed."""
+    workspace_dir = tmp_path / "workspace"
+    source_dir = tmp_path / "source"
+    workspace_dir.mkdir()
+    source_dir.mkdir()
+
+    validation_input = _make_validation_input(
+        workspace_path=str(workspace_dir),
+        source_path=str(source_dir),
+        relevant_files=[],
+        changed_files=[],
+        commands=[
+            CommandExecution(
+                command="./gradlew :app:testDebugUnitTest",
+                producer="command_runner_agent",
+                exit_code=127,
+                stdout="",
+                stderr="gradlew: not found",
+                expected_exit_codes=[0],
+                timed_out=False,
+                verification_goal="Run Android unit tests.",
+                observed_outcome_summary="gradlew was not found.",
+            ),
+            CommandExecution(
+                command="chmod +x gradlew",
+                producer="command_runner_agent",
+                exit_code=0,
+                stdout="",
+                stderr="",
+                expected_exit_codes=[0],
+                timed_out=False,
+                verification_goal="Make gradlew executable.",
+                observed_outcome_summary="chmod succeeded.",
+            ),
+        ],
+    )
+
+    provider = _CapturingProvider(_successful_llm_payload(decision="partial"))
+    monkeypatch.setattr(
+        "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
+        lambda **_kw: provider,
+    )
+
+    result = CommandRunnerAgentValidator().validate(validation_input)
+
+    # chmod +x is a setup step — the unit test was never re-run, so partial must stand
+    assert result.decision == "partial"
+    assert result.final_task_status == "partial"
 
 
 @pytest.mark.parametrize(

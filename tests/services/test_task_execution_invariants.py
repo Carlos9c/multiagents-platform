@@ -127,8 +127,8 @@ def _patch_engine(monkeypatch, engine_result: ExecutionResult):
         return engine_result, request
 
     monkeypatch.setattr(
-        "app.services.task_execution_service.get_execution_engine",
-        lambda db: types.SimpleNamespace(
+        "app.services.task_execution_service.get_engine_for_executor_type",
+        lambda executor_type: types.SimpleNamespace(
             backend_name="test_engine",
             execute=_fake_execute,
         ),

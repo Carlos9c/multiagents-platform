@@ -53,7 +53,34 @@ def _build_project_context(project: Project) -> ProjectExecutionContext:
     )
 
 
-def _build_candidate_atomic_task(task: Task, parent_task: Task | None) -> CandidateAtomicTask:
+_SETUP_TASK_TYPES = frozenset({"configuration"})
+_BUILD_DEPENDENT_TASK_TYPES = frozenset({"implementation", "testing"})
+
+
+def _compute_ordering_hints(tasks: list[Task]) -> dict[int, str]:
+    """Deterministically classify tasks into setup_first / depends_on_setup / standard.
+
+    Configuration tasks are project infrastructure (build system, scaffold). All
+    implementation and testing tasks implicitly depend on that infrastructure being
+    ready, so they are marked depends_on_setup. This hint is injected into the
+    CandidateAtomicTask so the sequencer receives an explicit ordering constraint
+    rather than having to infer it from task descriptions.
+    """
+    has_setup = any(t.task_type in _SETUP_TASK_TYPES for t in tasks)
+    hints: dict[int, str] = {}
+    for task in tasks:
+        if task.task_type in _SETUP_TASK_TYPES:
+            hints[task.id] = "setup_first"
+        elif has_setup and task.task_type in _BUILD_DEPENDENT_TASK_TYPES:
+            hints[task.id] = "depends_on_setup"
+        else:
+            hints[task.id] = "standard"
+    return hints
+
+
+def _build_candidate_atomic_task(
+    task: Task, parent_task: Task | None, ordering_hint: str = "standard"
+) -> CandidateAtomicTask:
     parent_refined_title = None
     parent_high_level_title = None
 
@@ -85,6 +112,7 @@ def _build_candidate_atomic_task(task: Task, parent_task: Task | None) -> Candid
         tests_required=task.tests_required,
         technical_constraints=task.technical_constraints,
         out_of_scope=task.out_of_scope,
+        ordering_hint=ordering_hint,
     )
 
 
@@ -332,8 +360,10 @@ def build_execution_plan_input(
             f"Project {project_id} has no active pending atomic tasks to sequence"
         )
 
+    ordering_hints = _compute_ordering_hints(candidate_tasks)
     candidate_atomic_tasks = [
-        _build_candidate_atomic_task(task, task.parent_task) for task in candidate_tasks
+        _build_candidate_atomic_task(task, task.parent_task, ordering_hints.get(task.id, "standard"))
+        for task in candidate_tasks
     ]
 
     execution_state = _build_execution_state_summary(db=db, project_id=project_id)

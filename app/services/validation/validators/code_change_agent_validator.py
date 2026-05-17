@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from app.core.config import settings
 from app.execution_engine.capabilities import get_subagent_capability
 from app.execution_engine.contracts import EvidenceItem
 from app.models.task import (
@@ -12,7 +13,6 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
 )
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 from app.services.validation.base import BaseTaskValidator
 from app.services.validation.contracts import (
     PartialAnnotation,
@@ -117,6 +117,19 @@ Strict boundary rules:
 - If the code is partially aligned but incomplete, choose partial.
 - If the code clearly contradicts the task objective or acceptance criteria, choose failed.
 - If the code materially satisfies the task objective and acceptance criteria, choose completed.
+
+Generated documentation is NOT authoritative ground truth:
+- Context files such as spec documents, README files, architecture docs, and design notes loaded
+  from the project repository were produced by prior agents as outputs, NOT as inputs.
+- These generated documents may contain imprecise, overly strict, or contradictory rules compared
+  to the actual task definition and the user's original intent.
+- The authoritative sources for validation are, in order of priority:
+  1. The task's acceptance_criteria and description (closest to user intent).
+  2. The code/file content itself and the evidence produced by code_change_agent.
+  3. Generated context documents — treated as supplemental hints only.
+- If a generated spec document contradicts the task acceptance_criteria, prefer the task
+  acceptance_criteria. Do NOT fail or mark partial solely because the code deviates from a
+  generated spec that was itself inconsistent with the task definition.
 
 Default-to-completed rule when verification evidence is present (burden of proof):
 - When supplemental non-code verification evidence shows a terminal command succeeded
@@ -515,11 +528,10 @@ class CodeChangeAgentValidator(BaseTaskValidator):
         )
         supporting_items = _collect_supporting_verification_items(validation_input)
 
-        provider = get_llm_provider()
-        strict_schema = to_openai_strict_json_schema(
-            CodeChangeAgentValidationLLMOutput.model_json_schema()
+        provider = get_llm_provider(
+            model=settings.validator_model,
+            provider=settings.validator_provider,
         )
-
         user_prompt = _build_user_prompt(
             validation_input=validation_input,
             producer_items=producer_items,
@@ -532,7 +544,7 @@ class CodeChangeAgentValidator(BaseTaskValidator):
             system_prompt=CODE_CHANGE_AGENT_VALIDATOR_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             schema_name="code_change_agent_validator_output",
-            json_schema=strict_schema,
+            json_schema=CodeChangeAgentValidationLLMOutput.model_json_schema(),
         )
 
         try:

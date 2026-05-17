@@ -4,7 +4,6 @@ from app.execution_engine.capabilities import render_executor_capabilities_for_p
 from app.models.task import EXECUTION_ENGINE
 from app.schemas.recovery import RecoveryDecision
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 RECOVERY_SYSTEM_PROMPT = """
 You are a senior recovery decision agent.
@@ -353,8 +352,6 @@ def call_recovery_model(
     relevant_file_contents: str | None = None,
 ) -> RecoveryDecision:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(RecoveryDecision.model_json_schema())
-
     first_user_prompt = build_recovery_user_prompt(
         source_task_summary=source_task_summary,
         execution_trajectory_summary=execution_trajectory_summary,
@@ -369,7 +366,7 @@ def call_recovery_model(
         system_prompt=RECOVERY_SYSTEM_PROMPT,
         user_prompt=first_user_prompt,
         schema_name="recovery_decision",
-        json_schema=strict_schema,
+        json_schema=RecoveryDecision.model_json_schema(),
     )
 
     try:
@@ -387,7 +384,7 @@ def call_recovery_model(
             system_prompt=RECOVERY_SYSTEM_PROMPT,
             user_prompt=retry_user_prompt,
             schema_name="recovery_decision",
-            json_schema=strict_schema,
+            json_schema=RecoveryDecision.model_json_schema(),
         )
 
         return RecoveryDecision.model_validate(raw_retry)

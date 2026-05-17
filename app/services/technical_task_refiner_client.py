@@ -2,7 +2,6 @@ from pydantic import ValidationError
 
 from app.schemas.technical_task_refiner import TechnicalTaskRefinementOutput
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 TECHNICAL_TASK_REFINER_SYSTEM_PROMPT = """
 You are a senior project refinement agent.
@@ -202,8 +201,6 @@ def call_technical_task_refiner_model(
     parent_task_out_of_scope: str,
 ) -> TechnicalTaskRefinementOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(TechnicalTaskRefinementOutput.model_json_schema())
-
     first_user_prompt = build_refiner_user_prompt(
         project_name=project_name,
         project_description=project_description,
@@ -222,7 +219,7 @@ def call_technical_task_refiner_model(
         system_prompt=TECHNICAL_TASK_REFINER_SYSTEM_PROMPT,
         user_prompt=first_user_prompt,
         schema_name="technical_task_refinement_output",
-        json_schema=strict_schema,
+        json_schema=TechnicalTaskRefinementOutput.model_json_schema(),
     )
 
     try:
@@ -238,6 +235,6 @@ def call_technical_task_refiner_model(
             system_prompt=TECHNICAL_TASK_REFINER_SYSTEM_PROMPT,
             user_prompt=retry_user_prompt,
             schema_name="technical_task_refinement_output",
-            json_schema=strict_schema,
+            json_schema=TechnicalTaskRefinementOutput.model_json_schema(),
         )
         return TechnicalTaskRefinementOutput.model_validate(raw_retry)

@@ -15,6 +15,14 @@ from app.api.technical_task_refiner import router as technical_task_refiner_rout
 from app.api.workflow import router as workflow_router
 from app.api.ws.connection_manager import manager as ws_manager
 from app.api.ws.router import router as ws_router
+from app.db.session import SessionLocal
+from app.models.conversation import (
+    CONVERSATION_PHASE_EXECUTING,
+    CONVERSATION_PHASE_PAUSED,
+    CONVERSATION_STATUS_ACTIVE,
+    Conversation,
+)
+from app.models.task import TASK_STATUS_PENDING, Task
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +41,39 @@ logging.getLogger("sqlalchemy").propagate = False
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     ws_manager.set_event_loop(asyncio.get_running_loop())
+
+    # Startup recovery: conversations left in EXECUTING state (e.g. after a crash or
+    # restart) are transitioned to PAUSED so the user can decide whether to resume.
+    # Workflows are NEVER restarted automatically — resumption is always a user action.
+    db = SessionLocal()
+    try:
+        stuck_conversations = (
+            db.query(Conversation)
+            .filter(
+                Conversation.phase == CONVERSATION_PHASE_EXECUTING,
+                Conversation.status == CONVERSATION_STATUS_ACTIVE,
+            )
+            .all()
+        )
+        for conv in stuck_conversations:
+            has_pending = (
+                db.query(Task)
+                .filter(Task.project_id == conv.project_id, Task.status == TASK_STATUS_PENDING)
+                .first()
+            ) is not None
+            if has_pending:
+                conv.phase = CONVERSATION_PHASE_PAUSED
+                logging.getLogger(__name__).info(
+                    "startup_recovery_paused project_id=%s conversation_id=%s",
+                    conv.project_id,
+                    conv.id,
+                )
+        db.commit()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("startup_recovery_failed error=%s", exc)
+    finally:
+        db.close()
+
     yield
 
 

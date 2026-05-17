@@ -4,7 +4,6 @@ from pydantic import ValidationError
 
 from app.schemas.planner import PlannerOutput
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 PLANNER_SYSTEM_PROMPT = """
 You are a senior project planning agent.
@@ -284,8 +283,6 @@ Quality reminder:
 
 def call_planner_model(project_name: str, project_description: str) -> PlannerOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(PlannerOutput.model_json_schema())
-
     first_user_prompt = build_planner_user_prompt(
         project_name=project_name,
         project_description=project_description,
@@ -295,7 +292,7 @@ def call_planner_model(project_name: str, project_description: str) -> PlannerOu
         system_prompt=PLANNER_SYSTEM_PROMPT,
         user_prompt=first_user_prompt,
         schema_name="planner_output",
-        json_schema=strict_schema,
+        json_schema=PlannerOutput.model_json_schema(),
     )
 
     try:
@@ -310,7 +307,7 @@ def call_planner_model(project_name: str, project_description: str) -> PlannerOu
             system_prompt=PLANNER_SYSTEM_PROMPT,
             user_prompt=retry_user_prompt,
             schema_name="planner_output",
-            json_schema=strict_schema,
+            json_schema=PlannerOutput.model_json_schema(),
         )
         return PlannerOutput.model_validate(raw_retry)
 
@@ -321,8 +318,6 @@ def call_evolutionary_planner_model(
     codebase_analysis: object,
 ) -> PlannerOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(PlannerOutput.model_json_schema())
-
     first_user_prompt = build_evolutionary_planner_user_prompt(
         project_name=project_name,
         project_description=project_description,
@@ -333,7 +328,7 @@ def call_evolutionary_planner_model(
         system_prompt=PLANNER_SYSTEM_PROMPT,
         user_prompt=first_user_prompt,
         schema_name="planner_output",
-        json_schema=strict_schema,
+        json_schema=PlannerOutput.model_json_schema(),
     )
 
     try:
@@ -348,6 +343,6 @@ def call_evolutionary_planner_model(
             system_prompt=PLANNER_SYSTEM_PROMPT,
             user_prompt=retry_user_prompt,
             schema_name="planner_output",
-            json_schema=strict_schema,
+            json_schema=PlannerOutput.model_json_schema(),
         )
         return PlannerOutput.model_validate(raw_retry)

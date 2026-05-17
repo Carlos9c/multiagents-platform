@@ -3,47 +3,26 @@ import logging
 import time
 from typing import Any
 
-from openai import APITimeoutError, InternalServerError, OpenAI, RateLimitError
+import anthropic
 
 from app.services.llm.base import LLMProvider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
+from app.services.llm.schema_utils import to_anthropic_tool_schema
 
 logger = logging.getLogger("app.services.llm")
 
 
-class OpenAIProvider(LLMProvider):
+class AnthropicProvider(LLMProvider):
     def __init__(
         self,
         api_key: str,
         model: str,
         timeout: float = 120.0,
-        max_retries: int = 1,
+        max_tokens: int = 32768,
     ) -> None:
-        self.client = OpenAI(
-            api_key=api_key,
-            timeout=timeout,
-            max_retries=max_retries,
-        )
+        self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
         self.model = model
         self.timeout = timeout
-        self.max_retries = max_retries
-
-    @staticmethod
-    def _safe_usage_value(response: Any, field_name: str) -> int | None:
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return None
-
-        value = getattr(usage, field_name, None)
-        if isinstance(value, int):
-            return value
-
-        if isinstance(usage, dict):
-            raw = usage.get(field_name)
-            if isinstance(raw, int):
-                return raw
-
-        return None
+        self.max_tokens = max_tokens
 
     @staticmethod
     def _truncate_for_log(value: str | None, limit: int = 500) -> str | None:
@@ -66,22 +45,21 @@ class OpenAIProvider(LLMProvider):
         total_prompt_chars = system_chars + user_chars
 
         logger.info(
-            "llm_call_started provider=openai model=%s schema=%s timeout_s=%s max_retries=%s prompt_chars_total=%d system_chars=%d user_chars=%d",
+            "llm_call_started provider=anthropic model=%s schema=%s timeout_s=%s prompt_chars_total=%d system_chars=%d user_chars=%d",
             self.model,
             schema_name,
             self.timeout,
-            self.max_retries,
             total_prompt_chars,
             system_chars,
             user_chars,
         )
 
-        adapted_schema = to_openai_strict_json_schema(json_schema)
+        adapted_schema = to_anthropic_tool_schema(json_schema)
         response = None
 
         try:
             logger.info(
-                "llm_http_request_started provider=openai model=%s schema=%s",
+                "llm_http_request_started provider=anthropic model=%s schema=%s",
                 self.model,
                 schema_name,
             )
@@ -89,32 +67,26 @@ class OpenAIProvider(LLMProvider):
             _max_provider_retries = 5
             for _attempt in range(_max_provider_retries):
                 try:
-                    response = self.client.responses.create(
+                    response = self.client.messages.create(
                         model=self.model,
-                        input=[
+                        max_tokens=self.max_tokens,
+                        system=system_prompt,
+                        messages=[{"role": "user", "content": user_prompt}],
+                        tools=[
                             {
-                                "role": "system",
-                                "content": [{"type": "input_text", "text": system_prompt}],
-                            },
-                            {
-                                "role": "user",
-                                "content": [{"type": "input_text", "text": user_prompt}],
-                            },
-                        ],
-                        text={
-                            "format": {
-                                "type": "json_schema",
                                 "name": schema_name,
-                                "schema": adapted_schema,
-                                "strict": True,
+                                "description": f"Respond with a valid {schema_name} object.",
+                                "input_schema": adapted_schema,
                             }
-                        },
+                        ],
+                        tool_choice={"type": "tool", "name": schema_name},
                     )
                     break
-                except RateLimitError as _exc:
+                except anthropic.RateLimitError as _exc:
                     if _attempt < _max_provider_retries - 1:
-                        # Honour the retry-after header when present; otherwise use
-                        # an aggressive exponential schedule (30 s, 60 s, 120 s…).
+                        # Try to read retry-after from the response headers; fall
+                        # back to an aggressive exponential schedule (30s, 60s, 120s…)
+                        # because Anthropic rate-limit windows are typically ≥ 60 s.
                         _retry_after: float | None = None
                         _response_obj = getattr(_exc, "response", None)
                         if _response_obj is not None:
@@ -126,7 +98,7 @@ class OpenAIProvider(LLMProvider):
                                     pass
                         _wait = _retry_after if _retry_after is not None else 30 * (2**_attempt)
                         logger.warning(
-                            "llm_rate_limit_retry provider=openai model=%s schema=%s attempt=%s/%s wait_s=%s",
+                            "llm_rate_limit_retry provider=anthropic model=%s schema=%s attempt=%s/%s wait_s=%s",
                             self.model,
                             schema_name,
                             _attempt + 1,
@@ -136,11 +108,11 @@ class OpenAIProvider(LLMProvider):
                         time.sleep(_wait)
                         continue
                     raise
-                except APITimeoutError:
+                except anthropic.APITimeoutError:
                     if _attempt < _max_provider_retries - 1:
-                        _wait = 2 * (2**_attempt)  # 2, 4, 8, 16 s
+                        _wait = 2 * (2**_attempt)
                         logger.warning(
-                            "llm_timeout_retry provider=openai model=%s schema=%s attempt=%s/%s wait_s=%s",
+                            "llm_timeout_retry provider=anthropic model=%s schema=%s attempt=%s/%s wait_s=%s",
                             self.model,
                             schema_name,
                             _attempt + 1,
@@ -150,16 +122,16 @@ class OpenAIProvider(LLMProvider):
                         time.sleep(_wait)
                         continue
                     raise
-                except InternalServerError as _exc:
+                except anthropic.InternalServerError as _exc:
                     _status = getattr(_exc, "status_code", None)
                     if (
                         _status is not None
                         and _status >= 500
                         and _attempt < _max_provider_retries - 1
                     ):
-                        _wait = 2 * (2**_attempt)  # 2, 4, 8, 16 s
+                        _wait = 2 * (2**_attempt)
                         logger.warning(
-                            "llm_http_5xx_retry provider=openai model=%s schema=%s status=%s attempt=%s/%s wait_s=%s",
+                            "llm_http_5xx_retry provider=anthropic model=%s schema=%s status=%s attempt=%s/%s wait_s=%s",
                             self.model,
                             schema_name,
                             _status,
@@ -172,31 +144,35 @@ class OpenAIProvider(LLMProvider):
                     raise
 
             logger.info(
-                "llm_http_request_finished provider=openai model=%s schema=%s",
+                "llm_http_request_finished provider=anthropic model=%s schema=%s",
                 self.model,
                 schema_name,
             )
 
-            output_text = getattr(response, "output_text", None)
-            if not output_text:
-                raise ValueError("OpenAI returned an empty structured response.")
-
-            logger.info(
-                "llm_response_text_received provider=openai model=%s schema=%s response_chars=%d",
-                self.model,
-                schema_name,
-                len(output_text),
+            tool_block = next(
+                (b for b in response.content if b.type == "tool_use" and b.name == schema_name),
+                None,
             )
+            if tool_block is None:
+                raise ValueError(
+                    f"Anthropic returned no tool_use block for schema '{schema_name}'. "
+                    f"stop_reason={response.stop_reason}"
+                )
 
-            parsed = json.loads(output_text)
+            parsed: dict[str, Any] = tool_block.input
+            output_chars = len(json.dumps(parsed))
 
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-            input_tokens = self._safe_usage_value(response, "input_tokens")
-            output_tokens = self._safe_usage_value(response, "output_tokens")
-            total_tokens = self._safe_usage_value(response, "total_tokens")
+            input_tokens = getattr(response.usage, "input_tokens", None)
+            output_tokens = getattr(response.usage, "output_tokens", None)
+            total_tokens = (
+                (input_tokens or 0) + (output_tokens or 0)
+                if input_tokens is not None and output_tokens is not None
+                else None
+            )
 
             logger.info(
-                "llm_call_completed provider=openai model=%s schema=%s duration_ms=%d prompt_chars_total=%d input_tokens=%s output_tokens=%s total_tokens=%s response_chars=%d",
+                "llm_call_completed provider=anthropic model=%s schema=%s duration_ms=%d prompt_chars_total=%d input_tokens=%s output_tokens=%s total_tokens=%s response_chars=%d",
                 self.model,
                 schema_name,
                 elapsed_ms,
@@ -204,12 +180,12 @@ class OpenAIProvider(LLMProvider):
                 input_tokens,
                 output_tokens,
                 total_tokens,
-                len(output_text),
+                output_chars,
             )
 
             if elapsed_ms >= 10000:
                 logger.warning(
-                    "llm_call_slow provider=openai model=%s schema=%s duration_ms=%d prompt_chars_total=%d input_tokens=%s output_tokens=%s total_tokens=%s",
+                    "llm_call_slow provider=anthropic model=%s schema=%s duration_ms=%d prompt_chars_total=%d input_tokens=%s output_tokens=%s total_tokens=%s",
                     self.model,
                     schema_name,
                     elapsed_ms,
@@ -223,19 +199,20 @@ class OpenAIProvider(LLMProvider):
 
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
-
             input_tokens = (
-                self._safe_usage_value(response, "input_tokens") if response is not None else None
+                getattr(response.usage, "input_tokens", None) if response is not None else None
             )
             output_tokens = (
-                self._safe_usage_value(response, "output_tokens") if response is not None else None
+                getattr(response.usage, "output_tokens", None) if response is not None else None
             )
             total_tokens = (
-                self._safe_usage_value(response, "total_tokens") if response is not None else None
+                (input_tokens or 0) + (output_tokens or 0)
+                if input_tokens is not None and output_tokens is not None
+                else None
             )
 
             logger.exception(
-                "llm_call_failed provider=openai model=%s schema=%s duration_ms=%d prompt_chars_total=%d input_tokens=%s output_tokens=%s total_tokens=%s error=%s",
+                "llm_call_failed provider=anthropic model=%s schema=%s duration_ms=%d prompt_chars_total=%d input_tokens=%s output_tokens=%s total_tokens=%s error=%s",
                 self.model,
                 schema_name,
                 elapsed_ms,

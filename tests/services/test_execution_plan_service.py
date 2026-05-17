@@ -1,4 +1,74 @@
-from app.services.execution_plan_service import persist_execution_plan
+from unittest.mock import MagicMock
+
+from app.services.execution_plan_service import _compute_ordering_hints, persist_execution_plan
+
+# ---------------------------------------------------------------------------
+# _compute_ordering_hints — Fix 1: deterministic task ordering
+# ---------------------------------------------------------------------------
+
+
+def _make_task_stub(task_id: int, task_type: str) -> MagicMock:
+    t = MagicMock()
+    t.id = task_id
+    t.task_type = task_type
+    return t
+
+
+def test_configuration_tasks_get_setup_first_hint():
+    tasks = [
+        _make_task_stub(1, "configuration"),
+        _make_task_stub(2, "implementation"),
+        _make_task_stub(3, "testing"),
+    ]
+    hints = _compute_ordering_hints(tasks)
+    assert hints[1] == "setup_first"
+
+
+def test_implementation_and_testing_tasks_get_depends_on_setup_when_setup_present():
+    tasks = [
+        _make_task_stub(1, "configuration"),
+        _make_task_stub(2, "implementation"),
+        _make_task_stub(3, "testing"),
+    ]
+    hints = _compute_ordering_hints(tasks)
+    assert hints[2] == "depends_on_setup"
+    assert hints[3] == "depends_on_setup"
+
+
+def test_no_setup_first_tasks_leaves_implementation_as_standard():
+    tasks = [
+        _make_task_stub(1, "implementation"),
+        _make_task_stub(2, "testing"),
+        _make_task_stub(3, "documentation"),
+    ]
+    hints = _compute_ordering_hints(tasks)
+    assert hints[1] == "standard"
+    assert hints[2] == "standard"
+    assert hints[3] == "standard"
+
+
+def test_non_build_dependent_types_stay_standard_even_with_setup_present():
+    tasks = [
+        _make_task_stub(1, "configuration"),
+        _make_task_stub(2, "documentation"),
+        _make_task_stub(3, "design"),
+    ]
+    hints = _compute_ordering_hints(tasks)
+    assert hints[1] == "setup_first"
+    assert hints[2] == "standard"
+    assert hints[3] == "standard"
+
+
+def test_multiple_configuration_tasks_all_get_setup_first():
+    tasks = [
+        _make_task_stub(1, "configuration"),
+        _make_task_stub(2, "configuration"),
+        _make_task_stub(3, "implementation"),
+    ]
+    hints = _compute_ordering_hints(tasks)
+    assert hints[1] == "setup_first"
+    assert hints[2] == "setup_first"
+    assert hints[3] == "depends_on_setup"
 
 
 def test_persist_execution_plan_updates_project_plan_version(

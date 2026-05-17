@@ -25,7 +25,6 @@ from app.execution_engine.tools.context_builder_tool import (
 )
 from app.models.project import Project
 from app.models.task import Task
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -224,13 +223,19 @@ def _build_historical_task_selection_retry_prompt(
     current_task: Task,
     catalog: list[HistoricalTaskCatalogEntry],
     project_name: str,
+    project_description: str,
+    project_context_excerpt: str | None = None,
     validation_error: str,
 ) -> str:
     return f"""
 Project name: {project_name}
+Project description: {project_description}
 
 Current atomic task:
 {json.dumps(_task_to_prompt_payload(current_task), ensure_ascii=False, indent=2)}
+
+Project context excerpt:
+{project_context_excerpt or "None"}
 
 Completed historical task catalog:
 {json.dumps([_catalog_entry_to_prompt_payload(entry) for entry in catalog], ensure_ascii=False, indent=2)}
@@ -307,10 +312,6 @@ class ContextSelectionAgent(BaseSubagent):
         project: Project,
         context_input: ContextBuilderResult,
     ) -> HistoricalTaskSelectionResult:
-        strict_schema = to_openai_strict_json_schema(
-            HistoricalTaskSelectionResult.model_json_schema()
-        )
-
         first_user_prompt = _build_historical_task_selection_user_prompt(
             current_task=current_task,
             catalog=context_input.completed_task_catalog,
@@ -324,7 +325,7 @@ class ContextSelectionAgent(BaseSubagent):
             system_prompt=HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT,
             user_prompt=first_user_prompt,
             schema_name="historical_task_selection_result",
-            json_schema=strict_schema,
+            json_schema=HistoricalTaskSelectionResult.model_json_schema(),
         )
 
         try:
@@ -352,7 +353,7 @@ class ContextSelectionAgent(BaseSubagent):
                 system_prompt=HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT,
                 user_prompt=retry_user_prompt,
                 schema_name="historical_task_selection_result",
-                json_schema=strict_schema,
+                json_schema=HistoricalTaskSelectionResult.model_json_schema(),
             )
 
             try:

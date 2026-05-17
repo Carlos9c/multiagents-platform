@@ -35,6 +35,7 @@ TERMINAL_TASK_STATUSES = {
 # - execution_engine: la task será ejecutada por el engine orquestado
 PENDING_ENGINE_ROUTING_EXECUTOR = "pending_engine_routing"
 EXECUTION_ENGINE = "execution_engine"
+DOCUMENTATION_ENGINE = "documentation_engine"
 
 VALID_PLANNING_LEVELS = {
     PLANNING_LEVEL_HIGH_LEVEL,
@@ -58,6 +59,7 @@ VALID_TASK_STATUSES = {
 VALID_EXECUTOR_TYPES = {
     PENDING_ENGINE_ROUTING_EXECUTOR,
     EXECUTION_ENGINE,
+    DOCUMENTATION_ENGINE,
 }
 
 VALID_TASK_TYPES = frozenset(

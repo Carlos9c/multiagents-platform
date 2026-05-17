@@ -31,7 +31,6 @@ from app.execution_engine.subagent_registry import (
     SubagentRegistryError,
 )
 from app.execution_engine.subagents.base import SubagentRejectedStepError
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +68,7 @@ Return ONLY JSON matching the provided schema.
 
 JSON field rules (enforced by the validator — violations cause the whole run to fail):
 - When decision_type is "finish", "reject", or "invalid": subagent_name MUST be null and target_paths MUST be an empty list.
-- When decision_type is "call_subagent": subagent_name MUST be a non-null string from {context_selection_agent, code_change_agent, command_runner_agent}.
+- When decision_type is "call_subagent": subagent_name MUST be a non-null string from {context_selection_agent, code_change_agent, command_runner_agent, document_writer_agent}.
 
 Core responsibility:
 - Look at the task, the current phase, the accumulated evidence, and the last executed subagent.
@@ -105,7 +104,10 @@ Phase model:
 
    Normal behavior:
    - Call context_selection_agent only if execution reveals a real and hard context gap.
-   - Call code_change_agent only if repository changes or material file edits are still needed, or if the last verification attempt failed in a way that repository changes can repair.
+   - Call code_change_agent only if implementation work is needed: source code, tests, scripts, configuration files, or any file whose primary content is executable logic.
+   - Call document_writer_agent only if the primary deliverable is a documentation or design artifact: README, architecture docs, ADRs, API specs, design documents, onboarding guides, specification files, or diagram-as-code files. document_writer_agent may embed code snippets inside those documents (e.g., examples in a README) but its output must be a text artifact, not a source code file meant to be executed or imported.
+   - Do not call code_change_agent for tasks whose deliverable is a documentation or design artifact — route those to document_writer_agent instead.
+   - Do not call document_writer_agent for implementation tasks whose deliverable is a source code file, test file, or configuration file meant to be executed or imported.
    - Call command_runner_agent only if repository-local verification would materially improve the evidence.
    - Finish when the completion checklist says the pass is sufficient.
    - Reject only when no safe contribution is possible with the available subagents.
@@ -125,6 +127,7 @@ How to choose subagents:
 - Use context_selection_agent again only when a genuine context gap appears during execution.
 - Do not use command_runner_agent for exploration.
 - Repository-local verification is not automatically required just because files changed.
+- For documentation, requirements, specification, README, or design-note tasks, use document_writer_agent — not code_change_agent. document_writer_agent may include code snippets inside those documents.
 - For documentation, requirements, specification, README, or design-note tasks, repository-local command execution is often not materially useful unless the task explicitly asks for a check, test, lint, build, or other executable verification step.
 - A failed verification attempt does not by itself prove that the task still has a concrete product gap.
 - If verification later succeeds and covers the task materially, do not continue the loop just because earlier attempts failed.
@@ -157,6 +160,12 @@ What to inspect before choosing finish:
 - Look at the last attempted subagent to avoid repeating work.
 - Look at whether the latest command evidence succeeded or failed.
 - Do not keep the loop open merely because some warning or risk note exists.
+
+Important: setup commands are NOT acceptance-criteria verification.
+- Commands like chmod +x, mkdir, cp, mv, apt-get install, pip install are infrastructure prep.
+- Even if a setup command succeeded (exit_code=0), that does NOT satisfy local_verification_done_if_material.
+- When the task requires running a test, build, or other verification command, the actual test/build must have run and succeeded — a preceding chmod or mkdir does not count.
+- If the last command was a setup step and the acceptance-criteria test has not yet run, local_verification_done_if_material is NO. Call command_runner_agent to run the actual test.
 
 Do not finish just because some work exists.
 Finish because the checklist says the current operational pass is sufficient.
@@ -251,6 +260,7 @@ def _last_attempted_subagent_name(runtime_state: ExecutionState) -> str | None:
             "context_selection_agent",
             "code_change_agent",
             "command_runner_agent",
+            "document_writer_agent",
         }:
             return agent_name
     return None
@@ -286,6 +296,7 @@ def _allowed_subagents_for_phase(phase: str) -> list[str]:
             "context_selection_agent",
             "code_change_agent",
             "command_runner_agent",
+            "document_writer_agent",
         ]
 
     return []
@@ -475,6 +486,13 @@ def _code_change_agent_completed_a_step(resolution_state: ResolutionState) -> bo
     )
 
 
+def _document_writer_agent_completed_a_step(resolution_state: ResolutionState) -> bool:
+    return any(
+        _extract_subagent_name_from_step_id(step_id) == "document_writer_agent"
+        for step_id in resolution_state.completed_steps
+    )
+
+
 def _changed_files_look_documentation_only(resolution_state: ResolutionState) -> bool:
     changed_files = resolution_state.evidence.changed_files
     if not changed_files:
@@ -528,14 +546,54 @@ def _command_succeeded(command) -> bool:
     return exit_code == 0
 
 
+_SETUP_ONLY_COMMAND_PREFIXES: tuple[str, ...] = (
+    "chmod ",
+    "mkdir ",
+    "cp ",
+    "mv ",
+    "ln ",
+    "touch ",
+    "export ",
+    "apt ",
+    "apt-get ",
+    "pip install",
+    "npm install",
+    "yarn install",
+    "bundle install",
+    "brew install",
+)
+
+
+def _command_is_setup_only(command) -> bool:
+    """Return True when command is infrastructure prep, not objective verification.
+
+    Setup commands (chmod, mkdir, cp, etc.) enable subsequent work but do not
+    verify the task objective. A successful setup command must not be treated as
+    evidence that acceptance-criteria verification has been completed.
+    """
+    if command is None:
+        return False
+    cmd = (getattr(command, "command", "") or "").strip().lower()
+    return any(cmd.startswith(prefix) for prefix in _SETUP_ONLY_COMMAND_PREFIXES)
+
+
 def _verification_would_materially_improve(
     request: ExecutionRequest,
     resolution_state: ResolutionState,
 ) -> bool:
     latest_command = _latest_command_execution(resolution_state)
     if latest_command is not None and _command_succeeded(latest_command):
-        # Command already ran and passed — no further verification needed.
-        return False
+        # A setup command (chmod, mkdir, cp, etc.) enables subsequent work but does NOT
+        # verify the task objective. When the task explicitly requires repo-local
+        # verification, fall through so the actual test/build command still runs.
+        if (
+            _task_explicitly_requests_repo_local_verification(request)
+            and _command_is_setup_only(latest_command)
+        ):
+            pass  # treat as if no real verification has run yet
+        else:
+            # Command already ran and passed — no further verification needed.
+            return False
 
     # Past this point, latest_command is either None (no verification yet) or a
     # failed command. In both cases, running or re-running verification would
@@ -612,7 +670,7 @@ def _latest_step_failure_indicates_repairable_gap(
     if last_attempted_subagent == "context_selection_agent":
         return True
 
-    if last_attempted_subagent == "code_change_agent":
+    if last_attempted_subagent in {"code_change_agent", "document_writer_agent"}:
         return True
 
     if last_attempted_subagent == "command_runner_agent":
@@ -645,15 +703,26 @@ def _build_completion_checklist(
         not implementation_needed
         or bool(resolution_state.evidence.changed_files)
         or bool(resolution_state.evidence.artifacts_created)
-        # code_change_agent completing a step is direct evidence that the
+        # A file-writing subagent completing a step is direct evidence that the
         # implementation pass ran, even when keyword detection is ambiguous
         or _code_change_agent_completed_a_step(resolution_state)
+        or _document_writer_agent_completed_a_step(resolution_state)
     )
 
     verification_needed = _verification_would_materially_improve(request, resolution_state)
     latest_command = _latest_command_execution(resolution_state)
-    local_verification_done_if_material = not verification_needed or (
-        latest_command is not None and _command_succeeded(latest_command)
+    # A setup command (chmod +x, mkdir, etc.) does not constitute verification of the
+    # task objective even when it succeeds. Exclude it from the "verification done" check.
+    latest_cmd_is_real_verification = (
+        latest_command is not None
+        and _command_succeeded(latest_command)
+        and not (
+            _task_explicitly_requests_repo_local_verification(request)
+            and _command_is_setup_only(latest_command)
+        )
+    )
+    local_verification_done_if_material = (
+        not verification_needed or latest_cmd_is_real_verification
     )
 
     new_concrete_gap_detected = _latest_step_failure_indicates_repairable_gap(
@@ -877,14 +946,25 @@ def _normalize_decision(
             last_attempted_subagent is not None
             and decision.subagent_name == last_attempted_subagent
         ):
-            return _invalidate_decision(
-                decision,
-                rationale=(f"Subagent '{decision.subagent_name}' cannot be called twice in a row."),
-                expected_outcome=(
-                    "Retry orchestration with a different subagent, finish, or reject."
-                ),
-                extra_risk_flag="same_subagent_twice_in_a_row",
+            # Exception: allow command_runner_agent to run again immediately after a
+            # setup-only command (chmod, mkdir, etc.) when the task explicitly requires
+            # verification. The setup step did not consume the verification slot.
+            _allow_repeat = (
+                decision.subagent_name == "command_runner_agent"
+                and _task_explicitly_requests_repo_local_verification(request)
+                and _command_is_setup_only(_latest_command_execution(state))
             )
+            if not _allow_repeat:
+                return _invalidate_decision(
+                    decision,
+                    rationale=(
+                        f"Subagent '{decision.subagent_name}' cannot be called twice in a row."
+                    ),
+                    expected_outcome=(
+                        "Retry orchestration with a different subagent, finish, or reject."
+                    ),
+                    extra_risk_flag="same_subagent_twice_in_a_row",
+                )
 
     if decision.decision_type == DECISION_FINISH and not state.completed_steps:
         return _invalidate_decision(
@@ -970,7 +1050,7 @@ def _maybe_build_forced_terminal_decision(
     latest_command = _latest_command_execution(resolution_state)
 
     if (
-        last_attempted_subagent == "code_change_agent"
+        last_attempted_subagent in {"code_change_agent", "document_writer_agent"}
         and bool(resolution_state.evidence.changed_files)
         and _verification_would_materially_improve(request, resolution_state) is False
         and not _latest_step_failure_indicates_repairable_gap(
@@ -993,6 +1073,10 @@ def _maybe_build_forced_terminal_decision(
         and _command_succeeded(latest_command)
         and bool(resolution_state.evidence.changed_files)
         and resolution_state.completed_steps
+        and not (
+            _task_explicitly_requests_repo_local_verification(request)
+            and _command_is_setup_only(latest_command)
+        )
     ):
         return NextActionDecision(
             decision_type=DECISION_FINISH,
@@ -1025,7 +1109,7 @@ def _maybe_build_forced_terminal_decision(
         )
 
     if (
-        last_attempted_subagent == "code_change_agent"
+        last_attempted_subagent in {"code_change_agent", "document_writer_agent"}
         and not resolution_state.evidence.changed_files
         and not resolution_state.failed_steps
         and resolution_state.completed_steps
@@ -1033,10 +1117,10 @@ def _maybe_build_forced_terminal_decision(
         return NextActionDecision(
             decision_type=DECISION_FINISH,
             rationale=(
-                "The last implementation pass completed without materialized file changes and no concrete "
+                "The last file-writing pass completed without materialized file changes and no concrete "
                 "operational gap remains, so the orchestration should stop instead of looping."
             ),
-            expected_outcome="Stop orchestration because another immediate implementation pass would be redundant.",
+            expected_outcome="Stop orchestration because another immediate file-writing pass would be redundant.",
             risk_flags=[],
         )
 
@@ -1519,7 +1603,6 @@ class ExecutionOrchestrator:
         runtime_state: ExecutionState,
         resolution_state: ResolutionState,
     ) -> NextActionDecision:
-        schema = to_openai_strict_json_schema(NextActionDecision.model_json_schema())
         user_prompt = _build_orchestrator_prompt(request, runtime_state, resolution_state)
 
         last_exc: ValidationError | None = None
@@ -1528,7 +1611,7 @@ class ExecutionOrchestrator:
                 system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 schema_name="execution_engine_next_action",
-                json_schema=schema,
+                json_schema=NextActionDecision.model_json_schema(),
             )
             try:
                 return NextActionDecision.model_validate(raw)

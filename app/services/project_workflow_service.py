@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
     PLANNING_LEVEL_REFINED,
+    TASK_STATUS_AWAITING_REVIEW,
     TASK_STATUS_PENDING,
     Task,
 )
@@ -54,6 +56,30 @@ logger = logging.getLogger(__name__)
 
 class ProjectWorkflowServiceError(Exception):
     """Base exception for project workflow orchestration failures."""
+
+
+# ── Cooperative stop-event registry ──────────────────────────────────────────
+
+_project_stop_events: dict[int, threading.Event] = {}
+_stop_events_lock = threading.Lock()
+
+
+def _get_stop_event(project_id: int) -> threading.Event:
+    with _stop_events_lock:
+        if project_id not in _project_stop_events:
+            _project_stop_events[project_id] = threading.Event()
+        return _project_stop_events[project_id]
+
+
+def request_workflow_stop(project_id: int) -> None:
+    """Signal the workflow loop to stop after completing the current task."""
+    _get_stop_event(project_id).set()
+    logger.info("workflow_stop_requested project_id=%s", project_id)
+
+
+def clear_workflow_stop(project_id: int) -> None:
+    """Clear a pending stop signal (call before re-submitting the workflow)."""
+    _get_stop_event(project_id).clear()
 
 
 def _get_project_or_raise(db: Session, project_id: int) -> Project:
@@ -426,11 +452,30 @@ def _persist_workflow_batch_trace(
 def _execute_batch_tasks_synchronously(
     db: Session,
     batch_task_ids: list[int],
+    project_id: int,
     *,
     batch_id: str | None = None,
     plan_version: int | None = None,
-) -> None:
+) -> bool:
+    """
+    Execute a batch of tasks sequentially.
+
+    Checks the per-project stop event before each task. If the stop is requested,
+    clears the event and returns False so the caller can transition to PAUSED.
+    Returns True when all tasks complete normally.
+    """
+    stop_event = _get_stop_event(project_id)
+
     for task_id in batch_task_ids:
+        if stop_event.is_set():
+            stop_event.clear()
+            logger.info(
+                "workflow_paused_between_tasks project_id=%s next_task_id=%s",
+                project_id,
+                task_id,
+            )
+            return False
+
         _assert_batch_task_is_atomic(
             db=db,
             task_id=task_id,
@@ -450,6 +495,8 @@ def _execute_batch_tasks_synchronously(
             raise ProjectWorkflowServiceError(
                 f"Failed to execute and validate task {task_id} synchronously: {str(exc)}"
             ) from exc
+
+    return True
 
 
 def _process_batch_after_terminal_tasks(
@@ -553,12 +600,107 @@ def _run_execution_iteration(
             project_id=project_id,
         )
 
-        _execute_batch_tasks_synchronously(
+        completed_normally = _execute_batch_tasks_synchronously(
             db=db,
             batch_task_ids=batch.task_ids,
+            project_id=project_id,
             batch_id=batch.batch_id,
             plan_version=current_plan.plan_version,
         )
+
+        if not completed_normally:
+            # Stop was requested — return a synthetic summary so callers can
+            # transition the project to the PAUSED state.
+            ending_plan_version = current_plan.plan_version
+            processed_set = set(processed_batch_ids)
+            blocked_after = [
+                b.batch_id
+                for b in current_plan.execution_batches
+                if b.batch_id not in processed_set
+                and b.batch_id not in previously_completed_batch_ids
+            ]
+            paused_summary = WorkflowIterationSummary(
+                iteration_number=iteration_number,
+                plan_version=current_plan.plan_version,
+                starting_plan_version=starting_plan_version,
+                ending_plan_version=ending_plan_version,
+                batch_ids_processed=processed_batch_ids,
+                blocked_batch_ids_after_iteration=blocked_after,
+                resolved_intent_type="continue",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=True,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
+                requires_manual_review=False,
+                reopened_finalization=False,
+                used_patched_plan=used_patched_plan,
+                decision_signals=["workflow_paused_by_user"],
+                notes="Workflow paused by user request before executing the next task.",
+            )
+            return (
+                paused_summary,
+                "paused",
+                current_finalization_iteration_count,
+                current_plan,
+                False,
+            )
+
+        # Short-circuit: if any task in this batch is AWAITING_REVIEW the post-batch LLM
+        # call is unnecessary — it would just confirm requires_manual_review=True, which we
+        # can infer directly from the task status. Skipping it shaves 20-60s off the window
+        # where the user sees "executing" after a task failure.
+        awaiting_review_task = (
+            db.query(Task)
+            .filter(
+                Task.id.in_(batch.task_ids),
+                Task.status == TASK_STATUS_AWAITING_REVIEW,
+            )
+            .first()
+        )
+        if awaiting_review_task is not None:
+            logger.info(
+                "workflow_short_circuit_manual_review batch_id=%s task_id=%s",
+                batch.batch_id,
+                awaiting_review_task.id,
+            )
+            processed_with_current = set(processed_batch_ids) | {batch.batch_id}
+            sc_blocked_after = [
+                b.batch_id
+                for b in current_plan.execution_batches
+                if b.batch_id not in processed_with_current
+                and b.batch_id not in previously_completed_batch_ids
+            ]
+            sc_summary = WorkflowIterationSummary(
+                iteration_number=iteration_number,
+                plan_version=current_plan.plan_version,
+                starting_plan_version=starting_plan_version,
+                ending_plan_version=current_plan.plan_version,
+                batch_ids_processed=list(processed_batch_ids) + [batch.batch_id],
+                blocked_batch_ids_after_iteration=sc_blocked_after,
+                resolved_intent_type="manual_review",
+                resolved_mutation_scope="none",
+                remaining_plan_still_valid=False,
+                has_new_recovery_tasks=False,
+                requires_plan_mutation=False,
+                requires_all_new_tasks_assigned=False,
+                can_continue_after_application=False,
+                should_close_stage=False,
+                requires_manual_review=True,
+                reopened_finalization=False,
+                used_patched_plan=used_patched_plan,
+                decision_signals=["awaiting_review_task_detected"],
+                notes="Post-batch evaluation skipped: batch contained a task in AWAITING_REVIEW status.",
+            )
+            return (
+                sc_summary,
+                "awaiting_manual_review",
+                current_finalization_iteration_count,
+                current_plan,
+                False,
+            )
 
         post_batch_result = _process_batch_after_terminal_tasks(
             db=db,
@@ -757,11 +899,25 @@ def _build_environment_manual_review_result(
     )
 
 
+def teardown_project_environment(project_id: int) -> None:
+    """Stop the project's Docker container and remove its session entry.
+
+    Called from the router AFTER all Aria notifications have been sent so the
+    conversation transitions to AWAITING_REVIEW before the container disappears.
+    Safe to call even if no session exists (no-op).
+    """
+    try:
+        EnvironmentBootstrapper().teardown(project_id=project_id)
+    except Exception as exc:
+        logger.warning("environment_teardown_failed project_id=%s error=%s", project_id, exc)
+
+
 def run_project_workflow(
     db: Session,
     project_id: int,
     max_workflow_iterations: int = 5,
     max_finalization_iterations: int = 2,
+    auto_teardown: bool = True,
 ) -> ProjectWorkflowResult:
     project = _get_project_or_raise(db=db, project_id=project_id)
     enable_technical_refinement = project.enable_technical_refinement
@@ -974,6 +1130,10 @@ def run_project_workflow(
         iterations.append(iteration_summary)
         completed_batches.extend(iteration_summary.batch_ids_processed)
 
+        if resulting_status == "paused":
+            final_status = "paused"
+            break
+
         if resulting_status == "stage_closed":
             final_stage_closed = True
             final_status = "stage_closed"
@@ -1038,7 +1198,9 @@ def run_project_workflow(
         except Exception:
             blocked_batches = []
 
-    if final_stage_closed:
+    if final_status == "paused":
+        notes = "Project workflow paused by user request."
+    elif final_stage_closed:
         notes = "Project workflow completed and the current stage was closed by the evaluator."
     elif manual_review_required:
         notes = (
@@ -1051,7 +1213,8 @@ def run_project_workflow(
             "enabled." if enable_technical_refinement else "bypassed."
         )
 
-    bootstrapper.teardown(project_id=project_id)
+    if auto_teardown:
+        bootstrapper.teardown(project_id=project_id)
 
     return ProjectWorkflowResult(
         project_id=project_id,

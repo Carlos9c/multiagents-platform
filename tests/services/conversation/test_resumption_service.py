@@ -23,7 +23,6 @@ from app.services.conversation.resumption_service import (
     resume_after_review,
 )
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -139,7 +138,7 @@ def test_narrow_raises_if_task_not_in_awaiting_review(db_session, make_project):
     task = _make_task(db_session, project.id, status=TASK_STATUS_PENDING)
     db_session.commit()
 
-    with pytest.raises(ResumptionError, match="not in awaiting_review"):
+    with pytest.raises(ResumptionError, match="cannot be resumed"):
         resume_after_review(
             db_session,
             project_id=project.id,

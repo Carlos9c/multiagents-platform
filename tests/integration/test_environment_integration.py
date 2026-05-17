@@ -280,6 +280,135 @@ def test_validator_passes_on_empty_spec(
         bootstrapper.teardown(project_id=300)
 
 
+# ---------------------------------------------------------------------------
+# android_gradle — gradle wrapper seeding
+# ---------------------------------------------------------------------------
+
+ANDROID_IMAGE = "mingc/android-build-box:1.26.0"
+
+
+def test_android_gradle_wrapper_jar_seeded_in_source_dir(
+    docker_client,
+    tmp_path: Path,
+) -> None:
+    """Bootstrap android_gradle and verify gradle-wrapper.jar is downloaded into source_dir."""
+    from app.services.environment.docker_driver import DockerDriver
+    from app.services.environment.registry import DriverRegistry
+    from app.services.environment.session_store import EnvironmentSessionStore
+    from app.services.project_storage import ProjectStorageService
+
+    driver = DockerDriver()
+    registry = DriverRegistry()
+    registry.register("android_gradle", driver)
+    store = EnvironmentSessionStore()
+    storage = ProjectStorageService(root=tmp_path)
+
+    spec = RuntimeSpec(runtime_type="android_gradle", image=ANDROID_IMAGE, dependencies=[])
+
+    bootstrapper = EnvironmentBootstrapper(
+        registry=registry, session_store=store, storage_service=storage
+    )
+
+    try:
+        bootstrapper.bootstrap(project_id=400, spec=spec)
+
+        paths = storage.get_project_paths(400)
+        jar_path = paths.source_dir / "gradle" / "wrapper" / "gradle-wrapper.jar"
+        assert jar_path.exists(), "gradle-wrapper.jar missing from source_dir"
+        # Verify the downloaded file is a valid JAR (ZIP format)
+        assert jar_path.stat().st_size > 10_000, (
+            f"gradle-wrapper.jar is suspiciously small ({jar_path.stat().st_size} bytes)"
+        )
+    finally:
+        bootstrapper.teardown(project_id=400)
+
+
+def test_android_gradle_run_command_uses_bash_login_shell(
+    docker_client,
+    tmp_path: Path,
+) -> None:
+    """Verify that run_command for android_gradle uses bash (not sh) as the shell."""
+    from app.services.environment.docker_driver import DockerDriver
+
+    driver = DockerDriver()
+    spec = RuntimeSpec(runtime_type="android_gradle", image=ANDROID_IMAGE, dependencies=[])
+
+    session = driver.start_session(project_id=401, project_root=tmp_path, spec=spec)
+    try:
+        # `$BASH_VERSION` is only set inside a real bash process; sh returns empty
+        result = driver.run_command(session, "echo $BASH_VERSION", tmp_path)
+        assert result.succeeded
+        assert result.stdout.strip(), (
+            "Expected BASH_VERSION to be non-empty — run_command should use bash for android_gradle"
+        )
+    finally:
+        driver.stop_session(session)
+
+
+def test_android_gradlew_runs_with_seeded_jar(
+    docker_client,
+    tmp_path: Path,
+) -> None:
+    """End-to-end: bootstrapped gradle-wrapper.jar + agent-written gradlew = working ./gradlew."""
+    from app.services.environment.docker_driver import DockerDriver
+    from app.services.environment.registry import DriverRegistry
+    from app.services.environment.session_store import EnvironmentSessionStore
+    from app.services.project_storage import ProjectStorageService
+
+    driver = DockerDriver()
+    registry = DriverRegistry()
+    registry.register("android_gradle", driver)
+    store = EnvironmentSessionStore()
+    storage = ProjectStorageService(root=tmp_path)
+
+    spec = RuntimeSpec(runtime_type="android_gradle", image=ANDROID_IMAGE, dependencies=[])
+    bootstrapper = EnvironmentBootstrapper(
+        registry=registry, session_store=store, storage_service=storage
+    )
+
+    try:
+        bootstrapper.bootstrap(project_id=402, spec=spec)
+
+        paths = storage.get_project_paths(402)
+        source_dir = paths.source_dir
+
+        # Simulate what the code agent would write (text files only)
+        wrapper_props = source_dir / "gradle" / "wrapper" / "gradle-wrapper.properties"
+        wrapper_props.write_text(
+            "distributionBase=GRADLE_USER_HOME\n"
+            "distributionPath=wrapper/dists\n"
+            "zipStoreBase=GRADLE_USER_HOME\n"
+            "zipStorePath=wrapper/dists\n"
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip\n"
+            "networkTimeout=10000\n",
+            encoding="utf-8",
+        )
+        gradlew = source_dir / "gradlew"
+        # Use binary write to guarantee LF-only line endings on Windows hosts.
+        # In production the code agent writes \r\n on Windows, but
+        # _normalize_android_shell_line_endings strips \r from the run tree copy
+        # before Docker executes. Here we skip the run tree layer, so we normalise
+        # manually in the test to isolate the JAR-seeding concern.
+        gradlew.write_bytes(
+            b"#!/bin/sh\n"
+            b'APP_HOME=$(cd "$(dirname "$0")" && pwd)\n'
+            b'exec java \\\n'
+            b'    -classpath "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" \\\n'
+            b'    -Dgradle.user.home="$HOME/.gradle" \\\n'
+            b'    org.gradle.wrapper.GradleWrapperMain "$@"\n'
+        )
+
+        session = store.get_session(402)
+        result = driver.run_command(session, "chmod +x gradlew && ./gradlew --version", source_dir)
+        assert result.succeeded, (
+            f"./gradlew --version failed (exit_code={result.exit_code}).\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "Gradle" in result.stdout, f"Unexpected output: {result.stdout}"
+    finally:
+        bootstrapper.teardown(project_id=402)
+
+
 def test_validator_passes_after_installing_real_package(
     registry: DriverRegistry,
     store: EnvironmentSessionStore,

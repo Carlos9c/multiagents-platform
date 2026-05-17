@@ -35,6 +35,7 @@ def build_default_registry() -> DriverRegistry:
     registry.register("node_npm", DockerDriver())
     registry.register("rust_cargo", DockerDriver())
     registry.register("java_maven", DockerDriver())
+    registry.register("android_gradle", DockerDriver())
     return registry
 
 

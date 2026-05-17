@@ -17,7 +17,6 @@ from app.execution_engine.tools.file_reader_tool import read_text_file
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
 from app.services.environment.registry import get_driver_registry
 from app.services.environment.session_store import get_session_store
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_storage import ProjectStorageService
 from app.services.workspace_runtime import WorkspaceRuntimeError
@@ -30,8 +29,6 @@ You are a repository-local verification context selector.
 Your job is to inspect the candidate run-tree inventory for ONE already-atomic task and select
 the smallest set of repository-relative files that should be read before deciding whether an
 executable repository-local verification command is appropriate.
-
-Return ONLY JSON matching the provided schema.
 
 Hard rules:
 - Select only files that appear in the provided candidate run-tree inventory.
@@ -61,8 +58,6 @@ Your job is to inspect the candidate run tree for ONE already-atomic task and de
 
 2. verification_not_applicable
    - choose this when no meaningful repository-local executable verification would materially improve the evidence for the current task
-
-Return ONLY JSON matching the provided schema.
 
 Hard rules:
 - Do not force a command when no meaningful repository-local verification exists.
@@ -544,6 +539,30 @@ Correction rules:
     )
 
 
+def _normalize_android_shell_line_endings(run_dir: Path) -> None:
+    """Strip CR from shell scripts in the run tree (android_gradle context only).
+
+    LLM-generated shell scripts may carry \\r\\n line endings from Windows. Inside
+    a Linux container `bash` treats the trailing \\r as part of the option name
+    (e.g. `set -e\\r`) and exits with "invalid option name". Normalizing on the
+    host before Docker reads the files avoids this without touching non-Android runs.
+    """
+    for path in run_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name == "gradlew" or path.suffix == ".sh":
+            try:
+                raw = path.read_bytes()
+                if b"\r\n" in raw:
+                    path.write_bytes(raw.replace(b"\r\n", b"\n"))
+            except Exception:
+                logger.warning(
+                    "command_runner_agent_crlf_normalize_failed path=%s",
+                    path,
+                    exc_info=True,
+                )
+
+
 def _resolve_command_cwd(run_dir: Path, cwd_relative_path: str) -> Path:
     relative = (cwd_relative_path or ".").strip() or "."
     candidate = (run_dir / relative).resolve()
@@ -593,7 +612,6 @@ class CommandRunnerAgent(BaseSubagent):
         run_dir: Path,
         inventory: list[str],
     ) -> CommandInspectionPlan:
-        schema = to_openai_strict_json_schema(CommandInspectionPlan.model_json_schema())
         user_prompt = _build_file_selection_prompt(
             request=request, step=step, state=state, run_dir=run_dir, inventory=inventory
         )
@@ -601,7 +619,7 @@ class CommandRunnerAgent(BaseSubagent):
             system_prompt=COMMAND_FILE_SELECTION_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             schema_name="execution_engine_command_file_selection",
-            json_schema=schema,
+            json_schema=CommandInspectionPlan.model_json_schema(),
         )
 
         try:
@@ -623,7 +641,7 @@ class CommandRunnerAgent(BaseSubagent):
                     validation_error=str(exc),
                 ),
                 schema_name="execution_engine_command_file_selection",
-                json_schema=schema,
+                json_schema=CommandInspectionPlan.model_json_schema(),
             )
             try:
                 plan = CommandInspectionPlan.model_validate(retry_raw)
@@ -660,7 +678,6 @@ class CommandRunnerAgent(BaseSubagent):
         inspection_plan: CommandInspectionPlan,
         inspected_files: list[dict],
     ) -> CommandVerificationPlan:
-        schema = to_openai_strict_json_schema(CommandVerificationPlan.model_json_schema())
         user_prompt = _build_command_planning_prompt(
             request=request,
             step=step,
@@ -674,7 +691,7 @@ class CommandRunnerAgent(BaseSubagent):
             system_prompt=COMMAND_RUNNER_AGENT_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             schema_name="execution_engine_command_verification_plan",
-            json_schema=schema,
+            json_schema=CommandVerificationPlan.model_json_schema(),
         )
 
         try:
@@ -698,7 +715,7 @@ class CommandRunnerAgent(BaseSubagent):
                     validation_error=str(exc),
                 ),
                 schema_name="execution_engine_command_verification_plan",
-                json_schema=schema,
+                json_schema=CommandVerificationPlan.model_json_schema(),
             )
             try:
                 plan = CommandVerificationPlan.model_validate(retry_raw)
@@ -728,7 +745,7 @@ class CommandRunnerAgent(BaseSubagent):
                     constraint_error=str(constraint_exc),
                 ),
                 schema_name="execution_engine_command_verification_plan",
-                json_schema=schema,
+                json_schema=CommandVerificationPlan.model_json_schema(),
             )
             try:
                 plan = CommandVerificationPlan.model_validate(constraint_retry_raw)
@@ -768,6 +785,8 @@ class CommandRunnerAgent(BaseSubagent):
             or None
         )
 
+        docker_session = get_session_store().get_session(request.project_id)
+
         run_dir: Path | None = None
         inventory: list[str] = []
         inspection_plan: CommandInspectionPlan | None = None
@@ -780,6 +799,9 @@ class CommandRunnerAgent(BaseSubagent):
                 execution_run_id=request.execution_run_id,
                 overlay_paths=overlay_paths,
             )
+
+            if docker_session is not None and docker_session.runtime_type == "android_gradle":
+                _normalize_android_shell_line_endings(run_dir)
 
             logger.info(
                 "command_runner_agent_run_tree_materialized task_id=%s run_dir=%s",
@@ -859,7 +881,6 @@ class CommandRunnerAgent(BaseSubagent):
 
             command_cwd = _resolve_command_cwd(run_dir, plan.cwd_relative_path)
 
-            docker_session = get_session_store().get_session(request.project_id)
             if docker_session is not None:
                 driver = get_driver_registry().get_driver(docker_session.runtime_type)
                 docker_result = driver.run_command(docker_session, plan.command, command_cwd)

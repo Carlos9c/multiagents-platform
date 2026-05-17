@@ -4,7 +4,6 @@ from app.execution_engine.capabilities import render_executor_capabilities_for_p
 from app.models.task import VALID_EXECUTOR_TYPES
 from app.schemas.atomic_task_generator import AtomicTaskGenerationOutput
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT = """
 You are a senior atomic task generation agent.
@@ -25,36 +24,43 @@ Current system reality:
 - You must reason from the actual execution-engine subagents and tools listed in the prompt.
 
 Task design rules:
-- Prefer tasks that end in a concrete repository deliverable.
-- Prefer tasks whose result can be validated from changed files, command output, and workspace evidence.
+- Prefer tasks that end in a concrete, inspectable deliverable (artifact, document, configuration, output, or workspace change).
+- Prefer tasks whose result can be validated from observable evidence after execution.
 - Keep manual investigation, external research, human-only validation, and stakeholder judgment out of the core deliverable.
-- A task may span multiple related files when they belong to one coherent implementation slice.
 - Bootstrap from an empty repository is allowed only when the task objective clearly implies a minimal initial structure.
 
 Hard executor-oriented rule:
-- If the parent task mixes executable repository work with non-executable research/manual work, do NOT keep them mixed in one atomic task.
-- Extract only the repository-executable slice.
-- Reformulate the task around a concrete repo/file deliverable whenever possible.
+- If the parent task mixes executable work with non-executable research/manual work, do NOT keep them mixed in one atomic task.
+- Extract only the executable slice.
+- Reformulate the task around a concrete, verifiable deliverable whenever possible.
 
 Atomicity rules:
 - Each atomic task must have one primary deliverable.
 - Each atomic task must have one clear validation boundary.
 - Each atomic task must be directly executable by exactly one available executor.
-- Prefer compact, coherent tasks, but never at the cost of executor mismatch.
 - Avoid overlap, duplication, and artificial fragmentation.
+- A task must address one focused functional concern. It must NOT span multiple independent functional areas, multiple architectural layers, or the "core" of an entire system in one shot.
+
+Scope calibration rule:
+- The right granularity is a focused functional unit — one component, one feature slice, one data layer element, one screen, one service, one document section, one configuration block.
+- A task may naturally include tightly-coupled supporting artifacts (e.g., a data model together with its persistence mapping, a feature together with its directly-tied tests) as long as they form a single indivisible deliverable.
+- A task is too broad when: it spans multiple independent feature areas, it would produce a significant fraction of the project in one step, or there are two or more natural checkpoints within it where you could say "this part is done independently."
+- A task is too narrow when: splitting it would create invalid intermediate states that block further progress, or the pieces have no independent validation boundary.
 
 When to split:
-- split when there are clearly separate deliverables
+- split when there are clearly separate deliverables that can be validated independently
 - split when there are clearly separate validation boundaries
-- split when implementation and documentation are both substantial and separable
-- split when two feature slices can be completed independently
-- split when one part is executable by the execution engine and another part is not
+- split when executable work is mixed with manual/research work
+- split when two feature slices or functional areas can be implemented independently
+- split when one part is executable by the available executor and another part is not
+- split when the scope covers an entire module, layer, subsystem, or "core" of the project
+- split when there are multiple natural completion checkpoints within the task
 
 When NOT to split:
-- one coherent implementation slice with one repository-level deliverable
-- one coherent repository document deliverable
-- one coherent API/code contract change with a single validation boundary
-- one small implementation plus its directly related tests if they belong to the same deliverable
+- one focused functional unit with a single validation boundary
+- tightly-coupled artifacts that have no independent validation boundary on their own
+- one coherent document, specification, or configuration deliverable
+- a feature slice together with its directly-tied verification if both are modest in scope
 
 Forbidden task patterns for the execution engine:
 - “investigate the real runtime behavior and document findings”
@@ -89,10 +95,12 @@ Valid values and when to use them:
 
 Self-check before finalizing each atomic task:
 - Can the current execution target really complete this task with its actual capabilities?
-- Is the main deliverable a concrete repository or file outcome?
-- Would post-execution validation be able to inspect repo/workspace evidence?
+- Is the main deliverable concrete and inspectable after execution?
+- Would post-execution validation be able to confirm the result from observable evidence?
 - Is this task free from hidden manual/external work?
-- Is splitting truly necessary, or am I over-fragmenting?
+- Does this task address one focused functional concern, or does it span multiple independent areas?
+- Are there two or more natural completion checkpoints within this task? If so, split it.
+- Does the task cover an entire module, layer, subsystem, or "core" of the project? If so, split it.
 
 Language rule:
 - Detect the language of the parent task description.
@@ -189,20 +197,23 @@ For the execution engine specifically:
 - Do not assign the execution engine a task whose core output is “analyze and document findings” unless the analysis is directly tied to a concrete repository artifact that can be produced from repo context.
 
 Split when:
-- there are clearly separate repository deliverables
+- there are clearly separate deliverables that can be validated independently
 - there are clearly separate validation boundaries
-- executable repository work is mixed with manual/research work
-- two feature slices can be implemented independently
+- executable work is mixed with manual/research work
+- two feature slices or functional areas can be completed independently
+- the scope covers an entire module, layer, subsystem, or "core" of the project
+- there are multiple natural completion checkpoints within the task
 
 Do NOT split when:
-- one coherent repository deliverable is enough
-- implementation and directly related tests are part of one validation boundary
-- the work is already a compact executor-compatible slice
+- the deliverable is one focused functional unit with a single validation boundary
+- tightly-coupled artifacts have no independent validation boundary on their own
+- a feature slice together with its directly-tied verification is modest in combined scope
 
 Important:
 - Rewrite the task around what the executor can actually finish.
 - If a portion of the parent task is not executable by the available executors, do not make that non-executable portion the core of an atomic task.
-- Output one task if one task is enough.
+- Prefer tasks that are individually completable and verifiable over tasks that are oversized and produce partial results.
+- A task may be broader than a single file or class as long as it addresses one focused functional concern with one validation boundary.
 """.strip()
 
 
@@ -268,8 +279,6 @@ def call_atomic_task_generator_model(
     available_executors: list[str],
 ) -> AtomicTaskGenerationOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(AtomicTaskGenerationOutput.model_json_schema())
-
     first_user_prompt = build_atomic_user_prompt(
         project_name=project_name,
         project_description=project_description,
@@ -292,7 +301,7 @@ def call_atomic_task_generator_model(
         system_prompt=ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT,
         user_prompt=first_user_prompt,
         schema_name="atomic_task_generation_output",
-        json_schema=strict_schema,
+        json_schema=AtomicTaskGenerationOutput.model_json_schema(),
     )
 
     try:
@@ -309,7 +318,7 @@ def call_atomic_task_generator_model(
             system_prompt=ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT,
             user_prompt=retry_user_prompt,
             schema_name="atomic_task_generation_output",
-            json_schema=strict_schema,
+            json_schema=AtomicTaskGenerationOutput.model_json_schema(),
         )
 
         return AtomicTaskGenerationOutput.model_validate(raw_retry)

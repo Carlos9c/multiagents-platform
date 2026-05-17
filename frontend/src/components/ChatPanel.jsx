@@ -11,7 +11,7 @@ const PHASE_LABELS = {
 const INPUT_PLACEHOLDERS = {
   gathering_requirements: 'Cuéntale a Aria sobre tu proyecto… (Enter para enviar, Shift+Enter para nueva línea)',
   ready_to_start: 'Responde "sí" para confirmar, o edita la descripción de la derecha…',
-  executing: 'El proyecto está en ejecución…',
+  executing: 'Pregunta a Aria sobre el estado del proyecto…',
   awaiting_review: 'Responde a Aria sobre la tarea bloqueada…',
   completed: 'Proyecto finalizado.',
 }
@@ -24,7 +24,7 @@ export function ChatPanel({ messages, phase, wsStatus, onSendMessage }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const inputDisabled = phase === 'executing' || phase === 'completed'
+  const inputDisabled = phase === 'completed'
 
   const handleSubmit = (e) => {
     e.preventDefault()
@@ -54,6 +54,13 @@ export function ChatPanel({ messages, phase, wsStatus, onSendMessage }) {
         </div>
         <span className={`phase-badge ${phase}`}>{phaseLabel}</span>
       </div>
+
+      {phase === 'executing' && (
+        <div className="executing-banner">
+          <span className="executing-spinner" />
+          <span>Proyecto en ejecución — puedes preguntarle a Aria sobre el estado</span>
+        </div>
+      )}
 
       {phase === 'awaiting_review' && (
         <div className="review-banner">

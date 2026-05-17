@@ -11,10 +11,9 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 logger = logging.getLogger(__name__)
 
@@ -144,15 +143,12 @@ def evaluate_requirements(
     inp: RequirementsEvaluatorInput,
 ) -> RequirementsEvaluatorResult:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(
-        RequirementsEvaluatorLLMOutput.model_json_schema()
-    )
 
     raw = provider.generate_structured(
         system_prompt=_SYSTEM_PROMPT,
         user_prompt=_build_user_prompt(inp),
         schema_name="requirements_evaluator_output",
-        json_schema=strict_schema,
+        json_schema=RequirementsEvaluatorLLMOutput.model_json_schema(),
     )
 
     try:

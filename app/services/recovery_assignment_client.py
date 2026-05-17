@@ -9,7 +9,6 @@ from app.schemas.recovery_assignment import (
     RecoveryAssignmentLLMOutput,
 )
 from app.services.llm.factory import get_llm_provider
-from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 RECOVERY_ASSIGNMENT_SYSTEM_PROMPT = """
 You are the recovery assignment planner for a live multi-batch execution plan.
@@ -185,8 +184,6 @@ def call_recovery_assignment_model(
     assignment_input: RecoveryAssignmentInput,
 ) -> RecoveryAssignmentLLMOutput:
     provider = get_llm_provider()
-    strict_schema = to_openai_strict_json_schema(RecoveryAssignmentLLMOutput.model_json_schema())
-
     first_user_prompt = build_recovery_assignment_user_prompt(
         assignment_input=assignment_input,
     )
@@ -195,7 +192,7 @@ def call_recovery_assignment_model(
         system_prompt=RECOVERY_ASSIGNMENT_SYSTEM_PROMPT,
         user_prompt=first_user_prompt,
         schema_name="recovery_assignment_output",
-        json_schema=strict_schema,
+        json_schema=RecoveryAssignmentLLMOutput.model_json_schema(),
     )
 
     try:
@@ -210,7 +207,7 @@ def call_recovery_assignment_model(
             system_prompt=RECOVERY_ASSIGNMENT_SYSTEM_PROMPT,
             user_prompt=retry_user_prompt,
             schema_name="recovery_assignment_output",
-            json_schema=strict_schema,
+            json_schema=RecoveryAssignmentLLMOutput.model_json_schema(),
         )
 
         return RecoveryAssignmentLLMOutput.model_validate(raw_retry)
