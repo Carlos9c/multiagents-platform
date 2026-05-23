@@ -146,7 +146,7 @@ class EnvironmentBootstrapper:
                 f"stderr: {install_result.stderr}"
             )
 
-        if spec.runtime_type == "android_gradle":
+        if spec.runtime_type in ("android_gradle", "java_gradle"):
             self._seed_gradle_wrapper(driver, session, paths.source_dir)
 
         lock_content = driver.generate_lock_file(session, spec)

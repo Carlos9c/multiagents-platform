@@ -93,6 +93,21 @@ Valid values and when to use them:
 - configuration: produces environment setup, CI/CD pipelines, tooling config, or infrastructure-as-code
 - refactor: restructures existing code without changing external behavior
 
+verification_level assignment rules:
+Assign "none" only when the task is purely additive and no runtime execution is needed to confirm correctness:
+- Adding a brand-new file whose content is statically verifiable from the code alone (e.g. a README, a config file, a plain data file)
+- Creating initial project scaffolding with no compilation or test execution expected
+- Purely textual documentation additions with no code impact
+
+Assign "runtime" (default) for everything else:
+- Any task that changes existing logic, fixes bugs, modifies behavior, or touches integration points
+- Any task that must be compiled, built, or run to confirm correctness
+- Any task that introduces test files or requires executing tests
+- Any task that modifies existing files (risk of breaking existing behavior)
+- Any build-system or CI/CD change (gradle, makefile, package.json, etc.)
+- Any mobile, game, or compiled-language task where a build run is the acceptance gate
+- When in doubt, assign "runtime"
+
 Self-check before finalizing each atomic task:
 - Can the current execution target really complete this task with its actual capabilities?
 - Is the main deliverable concrete and inspectable after execution?

@@ -387,6 +387,9 @@ def _is_executable_implementation_like_task(request: ExecutionRequest) -> bool:
 
 
 def _task_explicitly_requests_repo_local_verification(request: ExecutionRequest) -> bool:
+    if request.verification_level == "none":
+        return False
+
     if request.task_type and request.task_type.lower() in TASK_TYPES_REQUIRING_VERIFICATION:
         return True
 
@@ -581,6 +584,9 @@ def _verification_would_materially_improve(
     request: ExecutionRequest,
     resolution_state: ResolutionState,
 ) -> bool:
+    if request.verification_level == "none":
+        return False
+
     latest_command = _latest_command_execution(resolution_state)
     if latest_command is not None and _command_succeeded(latest_command):
         # A setup command (chmod, mkdir, cp, etc.) enables subsequent work but does NOT

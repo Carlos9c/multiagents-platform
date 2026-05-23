@@ -231,6 +231,7 @@ def generate_atomic_tasks(
             out_of_scope=atomic.out_of_scope,
             priority=atomic.priority,
             task_type=atomic.task_type,
+            verification_level=atomic.verification_level,
             planning_level=PLANNING_LEVEL_ATOMIC,
             executor_type=EXECUTION_ENGINE,
             sequence_order=index,

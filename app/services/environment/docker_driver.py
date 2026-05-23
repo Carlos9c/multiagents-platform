@@ -24,7 +24,11 @@ LOCK_FILE_NAMES: dict[str, str] = {
     "node_npm": "package.lock",
     "rust_cargo": "cargo.lock",
     "java_maven": "maven.lock",
+    "java_gradle": "gradle.lock",
     "android_gradle": "gradle.lock",
+    "react_native": "package.lock",
+    "dotnet": "dotnet.lock",
+    "go": "go.lock",
 }
 
 
@@ -32,7 +36,7 @@ def _build_install_command(spec: RuntimeSpec) -> str:
     if not spec.dependencies:
         return ""
 
-    if spec.runtime_type == "python_venv":
+    if spec.runtime_type in ("python_venv", "fullstack_py_node"):
         pkgs = []
         for dep in spec.dependencies:
             if dep.extras:
@@ -42,16 +46,14 @@ def _build_install_command(spec: RuntimeSpec) -> str:
                 pkgs.append(f"{dep.name}=={dep.version}")
         return f"pip install --no-cache-dir {' '.join(pkgs)}"
 
-    if spec.runtime_type == "node_npm":
+    if spec.runtime_type in ("node_npm", "react_native"):
         pkgs = [f"{dep.name}@{dep.version}" for dep in spec.dependencies]
         return f"npm install --save-exact {' '.join(pkgs)}"
 
-    if spec.runtime_type == "java_maven":
-        # Maven dependencies are declared in pom.xml by the code agents; no bootstrap install needed.
-        return ""
-
-    if spec.runtime_type == "android_gradle":
-        # Gradle dependencies are declared in build.gradle by code agents; no pre-install needed.
+    # Build-system-managed ecosystems: dependencies are declared in project files
+    # (pom.xml, build.gradle, Cargo.toml, go.mod, .csproj, pubspec.yaml) by code agents.
+    # No bootstrap-time installation is needed or possible before those files exist.
+    if spec.runtime_type in ("java_maven", "java_gradle", "android_gradle", "rust_cargo", "dotnet", "go"):
         return ""
 
     return ""
@@ -60,13 +62,18 @@ def _build_install_command(spec: RuntimeSpec) -> str:
 def _build_lock_command(spec: RuntimeSpec) -> str:
     if spec.runtime_type == "python_venv":
         return "pip freeze"
-    if spec.runtime_type == "node_npm":
+    if spec.runtime_type in ("node_npm", "react_native"):
         return "npm list --json --depth=0"
     if spec.runtime_type == "java_maven":
         return "mvn --version"
-    if spec.runtime_type == "android_gradle":
-        # Android projects use the Gradle wrapper (./gradlew); no system-level lock needed.
+    if spec.runtime_type in ("java_gradle", "android_gradle"):
         return "java -version"
+    if spec.runtime_type == "rust_cargo":
+        return "cargo --version"
+    if spec.runtime_type == "go":
+        return "go version"
+    if spec.runtime_type == "dotnet":
+        return "dotnet --version"
     return "echo '{}'"
 
 
@@ -85,14 +92,26 @@ def _build_smoke_test_command(spec: RuntimeSpec) -> str:
         return f"node -e \"{checks}; console.log('ok')\""
 
     if spec.runtime_type == "rust_cargo":
-        return "cargo --version"
+        return "rustc --version && cargo --version"
 
     if spec.runtime_type == "java_maven":
         return "mvn --version && java --version"
 
+    if spec.runtime_type == "java_gradle":
+        # Projects use the Gradle wrapper; verify the JDK only.
+        return "java --version && javac --version"
+
     if spec.runtime_type == "android_gradle":
-        # Verify Java and ANDROID_HOME only — Android projects use ./gradlew, not a system gradle.
         return "java -version && echo $ANDROID_HOME"
+
+    if spec.runtime_type == "react_native":
+        return "node --version && java -version && echo $ANDROID_HOME"
+
+    if spec.runtime_type == "dotnet":
+        return "dotnet --version"
+
+    if spec.runtime_type == "go":
+        return "go version"
 
     return "echo ok"
 
@@ -150,12 +169,23 @@ class DockerDriver(BaseEnvironmentDriver):
                 exc_info=True,
             )
 
-    def _ensure_image(self, client: docker.DockerClient, image: str) -> None:
+    def _ensure_image(
+        self,
+        client: docker.DockerClient,
+        image: str,
+        dockerfile_path: str | None = None,
+    ) -> None:
         try:
             client.images.get(image)
             return
         except docker.errors.ImageNotFound:
             pass
+
+        # If a Dockerfile path is provided, try a local build before pulling.
+        # This is the catalog fallback: curated images are built locally when not cached.
+        if dockerfile_path:
+            self._build_image_from_dockerfile(client, image, dockerfile_path)
+            return
 
         logger.info("docker_driver_pulling_image image=%s", image)
         # Use low-level streaming pull: the high-level images.pull() has a known issue on
@@ -175,6 +205,52 @@ class DockerDriver(BaseEnvironmentDriver):
                 f"  docker pull {image}"
             ) from exc
 
+    def _build_image_from_dockerfile(
+        self,
+        client: docker.DockerClient,
+        image: str,
+        dockerfile_path: str,
+    ) -> None:
+        from pathlib import Path
+
+        df_path = Path(dockerfile_path)
+        if not df_path.is_file():
+            raise EnvironmentBootstrapError(
+                f"Catalog Dockerfile not found at {dockerfile_path!r}. "
+                f"Cannot build image {image!r}."
+            )
+
+        logger.info(
+            "docker_driver_building_catalog_image image=%s dockerfile=%s",
+            image,
+            dockerfile_path,
+        )
+
+        try:
+            _, build_logs = client.images.build(
+                path=str(df_path.parent),
+                dockerfile=df_path.name,
+                tag=image,
+                rm=True,
+            )
+            for log in build_logs:
+                if "stream" in log:
+                    line = log["stream"].rstrip()
+                    if line:
+                        logger.debug("docker_build %s: %s", image, line)
+                if "error" in log:
+                    raise EnvironmentBootstrapError(
+                        f"Docker build failed for image {image!r}:\n{log['error']}\n"
+                        f"Dockerfile: {dockerfile_path}"
+                    )
+        except docker.errors.BuildError as exc:
+            raise EnvironmentBootstrapError(
+                f"Docker build failed for image {image!r}: {exc}\n"
+                f"Dockerfile: {dockerfile_path}"
+            ) from exc
+
+        logger.info("docker_driver_catalog_image_built image=%s", image)
+
     def start_session(
         self,
         project_id: int,
@@ -185,7 +261,7 @@ class DockerDriver(BaseEnvironmentDriver):
         name = self._container_name(project_id)
 
         self._remove_existing_container(client, name)
-        self._ensure_image(client, spec.image)
+        self._ensure_image(client, spec.image, spec.dockerfile_path)
 
         container = client.containers.run(
             image=spec.image,
@@ -227,10 +303,11 @@ class DockerDriver(BaseEnvironmentDriver):
         client = self._get_client()
         container = client.containers.get(session.container_id)
         container_cwd = session.host_to_container_path(cwd.resolve())
-        if session.runtime_type == "android_gradle":
-            # Use bash login shell so any profile-based PATH extensions (e.g. jenv shims)
-            # are active. `sh` is sufficient for most runtimes, but Android build scripts
-            # often depend on bash features and login-shell initialisation.
+        # Gradle-based runtimes (Android, Java Gradle, React Native) require bash: their
+        # build scripts use bash-only features and rely on login-shell PATH initialisation
+        # (e.g. jenv shims, ANDROID_HOME exports from /etc/profile.d/).
+        _bash_runtimes = {"android_gradle", "java_gradle", "react_native"}
+        if session.runtime_type in _bash_runtimes:
             full_command = ["bash", "-lc", f"cd {container_cwd} && {command}"]
         else:
             full_command = ["sh", "-c", f"cd {container_cwd} && {command}"]

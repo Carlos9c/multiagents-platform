@@ -37,6 +37,9 @@ PENDING_ENGINE_ROUTING_EXECUTOR = "pending_engine_routing"
 EXECUTION_ENGINE = "execution_engine"
 DOCUMENTATION_ENGINE = "documentation_engine"
 
+VERIFICATION_LEVEL_NONE = "none"
+VERIFICATION_LEVEL_RUNTIME = "runtime"
+
 VALID_PLANNING_LEVELS = {
     PLANNING_LEVEL_HIGH_LEVEL,
     PLANNING_LEVEL_REFINED,
@@ -142,6 +145,12 @@ class Task(Base):
         String(50),
         nullable=False,
         default=PENDING_ENGINE_ROUTING_EXECUTOR,
+    )
+
+    verification_level: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default=VERIFICATION_LEVEL_RUNTIME,
     )
 
     last_execution_agent_sequence: Mapped[str | None] = mapped_column(

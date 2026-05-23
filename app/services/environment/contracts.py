@@ -6,7 +6,17 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-RuntimeType = Literal["python_venv", "node_npm", "rust_cargo", "java_maven", "android_gradle"]
+RuntimeType = Literal[
+    "python_venv",
+    "node_npm",
+    "rust_cargo",
+    "java_maven",
+    "java_gradle",
+    "android_gradle",
+    "react_native",
+    "dotnet",
+    "go",
+]
 
 
 class PinnedDependency(BaseModel):
@@ -32,6 +42,7 @@ class SpecChange(BaseModel):
 class RuntimeSpec(BaseModel):
     runtime_type: RuntimeType
     image: str
+    dockerfile_path: str | None = None
     dependencies: list[PinnedDependency] = Field(default_factory=list)
     environment_variables: dict[str, str] = Field(default_factory=dict)
     pending_additions: list[DependencyRequest] = Field(default_factory=list)

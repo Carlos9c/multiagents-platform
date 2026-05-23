@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from app.schemas.task_types import TaskType
 
 Priority = Literal["high", "medium", "low"]
+VerificationLevel = Literal["none", "runtime"]
 
 
 class AtomicTaskOutput(BaseModel):
@@ -20,6 +21,7 @@ class AtomicTaskOutput(BaseModel):
     out_of_scope: str = Field(min_length=10)
     priority: Priority
     task_type: TaskType
+    verification_level: VerificationLevel
 
 
 class AtomicTaskGenerationOutput(BaseModel):

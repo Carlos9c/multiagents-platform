@@ -2,7 +2,17 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-RuntimeType = Literal["python_venv", "node_npm", "rust_cargo", "java_maven", "android_gradle"]
+RuntimeType = Literal[
+    "python_venv",
+    "node_npm",
+    "rust_cargo",
+    "java_maven",
+    "java_gradle",
+    "android_gradle",
+    "react_native",
+    "dotnet",
+    "go",
+]
 
 
 class EnvVar(BaseModel):

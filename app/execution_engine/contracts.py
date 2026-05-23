@@ -90,6 +90,7 @@ class ExecutionRequest(BaseModel):
 
     task_type: str | None = None
     executor_type: str
+    verification_level: str = "runtime"
 
     success_criteria: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)

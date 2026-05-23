@@ -145,6 +145,7 @@ def test_call_environment_planner_raises_after_double_invalid() -> None:
 
 def test_plan_runtime_environment_stores_spec(db_session) -> None:
     from app.models.project import Project
+    from app.services.environment.catalog.selector_client import CatalogSelectionOutput
     from app.services.environment.planner import plan_runtime_environment
 
     project = Project(name="Test", description="ML project")
@@ -153,7 +154,12 @@ def test_plan_runtime_environment_stores_spec(db_session) -> None:
 
     raw_output = _make_plan_output()
 
-    with patch("app.services.environment.planner_client.get_llm_provider") as mock_factory:
+    no_match = CatalogSelectionOutput(selected_image=None, reasoning="no match")
+
+    with (
+        patch("app.services.environment.planner.select_catalog_image", return_value=no_match),
+        patch("app.services.environment.planner_client.get_llm_provider") as mock_factory,
+    ):
         mock_provider = MagicMock()
         mock_provider.generate_structured.return_value = raw_output
         mock_factory.return_value = mock_provider

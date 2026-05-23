@@ -391,6 +391,7 @@ def build_placeholder_execution_request(
         out_of_scope=task.out_of_scope,
         task_type=task.task_type,
         executor_type=resolved_executor_type,
+        verification_level=getattr(task, "verification_level", "runtime") or "runtime",
         success_criteria=_split_multiline_text(task.acceptance_criteria),
         constraints=_split_multiline_text(task.technical_constraints),
         allowed_paths=[],
