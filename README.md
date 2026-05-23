@@ -2,7 +2,7 @@
 
 Sistema de orquestación multi-agente para la ejecución autónoma de tareas de desarrollo. Ejecuta tareas atómicas con validación estructurada, trazabilidad de evidencia y recuperación determinista.
 
-**Stack:** FastAPI · SQLAlchemy 2.0 · PostgreSQL · OpenAI structured outputs · Docker
+**Stack:** FastAPI · SQLAlchemy 2.0 · PostgreSQL · OpenAI structured outputs · Docker · React/Vite
 
 ---
 
@@ -20,7 +20,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 4. **Pipeline post-batch completo** — evaluación de stage con LLM, recovery (reatomize / insert_followup / manual_review), decisión de intención post-batch, compiler de asignación de recovery, y mutación viva del plan (patch, resequence, replan).
 
-5. **Sistema de entorno Docker** — planificación del entorno de ejecución con LLM, bootstrapping de contenedores Docker, validación del entorno (smoke test + repair), y gestión del ciclo de vida de sesiones. Soporta `python_slim`, con soporte declarado para `node_npm` y `rust_cargo`. Rebuild eager cuando el usuario proporciona clarificaciones que implican nuevas dependencias.
+5. **Sistema de entorno Docker con catálogo de imágenes** — planificación del entorno con LLM, bootstrapping de contenedores, smoke test + repair, y gestión del ciclo de vida de sesiones. Catálogo de **11 imágenes especializadas** (Python, Node, Java, Rust, Go, .NET, Android, Flutter, React Native, fullstack:py-node, fullstack:java-node) con selección automática via LLM. Rebuild eager cuando el usuario proporciona clarificaciones que implican nuevas dependencias.
 
 6. **Workflow completo por iteraciones** — el `ProjectWorkflowService` ejecuta iteraciones hasta cerrar el stage, con guards contra agotamiento del plan, reapertura de finalización, y límite de iteraciones configurable. Soporta pausa cooperativa y reanudación.
 
@@ -33,6 +33,10 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 10. **Q&A de estado del proyecto** — en fases PAUSED y COMPLETED, el `ProjectQueryAgent` responde preguntas del usuario sobre el estado del proyecto con información real de la BD (tareas completadas, pendientes, fallidas).
 
 ### Cambios recientes significativos
+
+- **Catálogo de imágenes Docker v2 (11 imágenes, selector LLM)**: reemplaza la detección por keywords por una llamada LLM estructurada que selecciona la imagen más adecuada del catálogo. Imágenes cubren Python, Node, Java, Rust, Go, .NET, Android, Flutter, React Native, y dos fullstack (py+node, java+node). Todas las imágenes llevan labels OCI (`org.opencontainers.image.*`) y `agente.catalog.*`. Script `scripts/build-catalog-images.sh` para construir y smoke-testear el catálogo completo.
+
+- **`verification_level` en tareas atómicas**: nuevo campo `"runtime"` | `"none"` (default `"runtime"`) en `Task`. Cuando `"none"`, el orquestador nunca invoca `command_runner_agent`, eliminando loops de verificación costosos para cambios puramente estructurales en proyectos compilados (Android, Flutter, .NET, etc.). Threaded a través de `AtomicTaskOutput` → `Task` → `ExecutionRequest` → orchestrator.
 
 - **Agente conversacional Aria (overhaul completo)**: flujo de revisión manual rediseñado sin límite de intentos; sub-fase de confirmación (`review_subphase: gathering → awaiting_confirmation`) que requiere aprobación explícita del usuario antes de reanudar; motivo de bloqueo real extraído del `ExecutionRun`; `ReviewEvaluator` enriquecido con progreso de tareas del proyecto como contexto.
 - **Pausa y reanudación del workflow**: pausa cooperativa por proyecto via `threading.Event`, endpoints `POST /pause` y `POST /resume-workflow`, y recovery automático al arranque del servidor para proyectos que se quedaron en ejecución tras un crash.
@@ -47,7 +51,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Números actuales
 
-- **469 tests unitarios** — todos passing
+- **492 tests unitarios** — todos passing
 - **12 tests de integración** (Docker) — se ejecutan con `-m integration`
 - **0 failures** en CI
 
@@ -206,6 +210,7 @@ Descompone tareas `high_level` o `refined` en tareas atómicas ejecutables:
 - Valida longitud mínima de campos: `implementation_notes` ≥ 60 chars, `acceptance_criteria` ≥ 30 chars
 - Los padres válidos tienen `planning_level ∈ {high_level, refined}`
 - Produce tareas con `planning_level="atomic"`, `executor_type="pending_engine_routing"`
+- Asigna `verification_level` (`"runtime"` | `"none"`) por tarea: `"none"` para cambios puramente estructurales en proyectos compilados donde la verificación en contenedor no aportaría valor
 
 ### Sequencing — Execution Plan Service (`app/services/execution_plan_service.py`)
 
@@ -236,39 +241,66 @@ Sistema de entorno de ejecución basado en Docker. Se activa para tareas que req
 ### Flujo
 
 ```
-EnvironmentPlanner   → RuntimeSpec (image, dependencies, env vars)
+CatalogSelector (LLM)  → selecciona imagen del catálogo según tipo de proyecto
+EnvironmentPlanner     → RuntimeSpec (image, dockerfile_path, dependencies, env vars)
 EnvironmentBootstrapper
-  → pull imagen Docker
+  → build/pull imagen Docker (desde catálogo local o registry)
   → arrancar contenedor
   → instalar dependencias
   → smoke test
   → (si falla) repair via LLM → retry
-EnvironmentSession   → proxy para comandos en el contenedor
-stop_session()       → detener y eliminar contenedor
+EnvironmentSession     → proxy para comandos en el contenedor
+stop_session()         → detener y eliminar contenedor
 ```
+
+### Catálogo de imágenes (`app/services/environment/catalog/`)
+
+11 imágenes pre-construidas con toolchains completos, seleccionadas automáticamente por LLM según el tipo de proyecto:
+
+| Imagen | Tag | Casos de uso |
+|---|---|---|
+| `agente-python:3.12` | Python 3.12-slim + libs científicas/web | Django, FastAPI, Flask, scripts, ML |
+| `agente-node:22` | Node 22 LTS | Express, NestJS, Vite, herramientas JS/TS |
+| `agente-java:21` | Eclipse Temurin 21 JDK + Maven | Spring Boot, APIs REST Java |
+| `agente-rust:stable` | Rust stable + musl-tools | CLIs, sistemas, WebAssembly |
+| `agente-go:1.22` | Go 1.22 | Microservicios, CLIs Go |
+| `agente-dotnet:8` | .NET SDK 8.0 | ASP.NET Core, apps C# |
+| `agente-android:sdk34` | Android SDK 34 + JDK 17 + Gradle | Apps nativas Android (Kotlin/Java) |
+| `agente-flutter:3` | Flutter 3.22 + Dart + Android SDK 34 | Apps Flutter para Android |
+| `agente-react-native:0.74` | Node 22 + Android SDK 34 + JDK 17 | Apps React Native / Expo (Android) |
+| `agente-fullstack:py-node` | Python 3.12 + Node 22 | Monorepos backend Python + frontend JS/TS |
+| `agente-fullstack:java-node` | Java 21 + Maven + Node 22 | Monorepos Spring + frontend JS/TS |
+
+Todas las imágenes incluyen labels OCI (`org.opencontainers.image.*`) y `agente.catalog.*` para identificación. El script `scripts/build-catalog-images.sh` construye y smoke-testea el catálogo completo o imágenes individuales.
+
+**Runtimes soportados:** `python_venv`, `node_npm`, `rust_cargo`, `go_modules`, `dotnet`, `java_maven`, `java_gradle`, `android_gradle`, `react_native`
+
+**Ecosistemas build-system** (Gradle, Maven, Cargo, Go, .NET, Flutter): el bootstrapper no instala dependencias de la aplicación — se declaran en los archivos del proyecto y se resuelven en el primer build. El smoke test verifica el toolchain.
 
 ### Componentes
 
 | Archivo | Rol |
 |---|---|
-| `planner.py` | Llama al LLM para producir `RuntimeEnvironmentPlanOutput` y lo convierte en `RuntimeSpec` |
+| `catalog/selector_client.py` | Llamada LLM que selecciona la imagen del catálogo más adecuada para el proyecto |
+| `catalog/registry.py` | Registro de las 11 `CatalogEntry` con metadatos de imagen y Dockerfile |
+| `planner.py` | Llama al selector de catálogo, luego al LLM planificador; fusiona el hint del catálogo en el `RuntimeSpec` |
+| `planner_client.py` | Prompts del planificador; inyecta el hint del catálogo cuando hay match |
 | `bootstrapper.py` | Arranca el contenedor, instala dependencias, valida con smoke test, repara si falla |
-| `docker_driver.py` | Wrapper sobre la SDK de Docker: pull, run, exec, stop/remove |
+| `docker_driver.py` | Wrapper sobre la SDK de Docker: pull, build local, run, exec, stop/remove |
 | `validator.py` | Ejecuta el smoke test y decide si el entorno está listo |
 | `session_store.py` | Persiste y recupera `EnvironmentSession` activas por proyecto |
-| `registry.py` | Registry de drivers por `RuntimeType` |
 | `contracts.py` | Tipos compartidos: `RuntimeSpec`, `EnvironmentSession`, `EnvironmentCommandResult` |
 
 ### Tipos clave
 
 | Tipo | Descripción |
 |---|---|
-| `RuntimeSpec` | Especificación del entorno: `runtime_type`, `image`, `dependencies`, `environment_variables` |
+| `RuntimeSpec` | Especificación del entorno: `runtime_type`, `image`, `dockerfile_path`, `dependencies`, `environment_variables` |
 | `EnvironmentSession` | Sesión activa: `project_id`, `container_id`, `project_root`, `runtime_type` |
 | `RuntimeEnvironmentPlanOutput` | Output del LLM: imagen, dependencias, vars de entorno (lista de `EnvVar`) |
 | `EnvVar` | Par `key`/`value` para variables de entorno (compatible con OpenAI Structured Outputs) |
-
-Runtimes soportados: `python_slim` (implementado y probado), `node_npm` y `rust_cargo` (declarados en tipos, drivers pendientes).
+| `CatalogEntry` | Entrada del catálogo: `image_name`, `runtime_type`, `description`, `dockerfile` |
+| `CatalogSelectionOutput` | Output del selector LLM: `selected_image` (nullable) + `reasoning` |
 
 ---
 
@@ -698,39 +730,45 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 **1. Soporte multi-stage**
 El sistema ejecuta un único stage por proyecto. Para proyectos reales con múltiples stages secuenciales (ej. "backend" → "frontend" → "integración"), el `ProjectWorkflowService` necesita un loop externo que cierre el stage actual, genere el siguiente, y reutilice el contexto acumulado. Las bases ya están: `project_stage_closed`, `stage_goal`, y la memoria de proyecto (`ProjectOperationalContext`) son stage-aware.
 
-**2. Drivers de entorno para Node.js y Rust**
-`node_npm` y `rust_cargo` están declarados en los tipos pero sus drivers no están implementados. Añadir `NodeNpmDriver` y `RustCargoDriver` siguiendo el patrón de `DockerDriver`, con sus smoke tests y comandos de instalación correspondientes.
+**2. Pre-fetch de dependencias en bootstrap para proyectos existentes**
+Para proyectos con archivos de dependencias ya escritos por los code agents (`build.gradle`, `pom.xml`, `Cargo.toml`, `go.mod`, `*.csproj`, `pubspec.yaml`), el bootstrapper podría ejecutar un pre-fetch opcional (`./gradlew dependencies`, `mvn dependency:resolve`, `cargo fetch`, `go mod download`, `dotnet restore`, `flutter pub get`) antes de comenzar la ejecución de tareas. Reduciría el tiempo de primera build y daría feedback temprano sobre dependencias rotas.
 
 **3. Tests de integración end-to-end del flujo conversacional**
-Los tests de `project_assistant` mockeando el WebSocket y el workflow en background para verificar el flujo completo: inicio de conversación → gathering → proyecto iniciado → revisión manual → confirmación → reanudación. Actualmente los tests del agente conversacional usan DB real pero mockean todos los evaluadores LLM.
+Tests de `project_assistant` mockeando el WebSocket y el workflow en background para verificar el flujo completo: inicio de conversación → gathering → proyecto iniciado → revisión manual → confirmación → reanudación. Actualmente los tests del agente conversacional usan DB real pero mockean todos los evaluadores LLM.
 
 ### Media prioridad
 
-**4. Precisión del validador en decisiones parciales**
+**4. Nuevo executor type: generación de media**
+El sistema asume que "ejecutar" equivale a "correr en Docker". Para proyectos que incluyan generación de assets (sprites, iconos, sonidos), se necesita un nuevo `executor_type` (`image_generation`, `audio_generation`) que llame APIs generativas externas (DALL-E 3, etc.) y escriba los archivos resultantes al workspace, sin necesidad de contenedor. El `atomic_task_generator` emitiría tareas de este tipo; el orchestrator las delegaría a un nuevo `MediaGenerationAgent`. Habilitaría casos de uso completos de tipo videojuego donde los agentes generan tanto el código como los assets visuales.
+
+**5. Precisión del validador en decisiones parciales**
 El `command_runner_agent_validator` puede declarar `partial` incluso cuando los tests pasan, si detecta scope no cubierto en los criterios de aceptación. Ampliar la lista de markers en `_task_looks_like_executable_implementation` (persistence, storage, data) o relajar el criterio de normalización para tareas con exit_code=0.
 
-**5. Optimización del tamaño de prompt en `code_change_agent`**
+**6. Optimización del tamaño de prompt en `code_change_agent`**
 La inyección del workspace state puede generar prompts de 70-80k caracteres en proyectos con historial extenso. Añadir un presupuesto de caracteres configurable para las secciones de contenido de archivos, truncando por tamaño antes de insertar en el prompt.
 
-**6. Historial persistido de Q&A del proyecto**
+**7. Historial persistido de Q&A del proyecto**
 Las respuestas del `ProjectQueryAgent` se guardan en el historial de la conversación, pero el agente no ve conversaciones anteriores al formular la respuesta. Pasar el historial reciente como contexto al agente para que sus respuestas sean coherentes con lo dicho antes.
 
-**7. Observabilidad estructurada del pipeline completo**
+**8. Observabilidad estructurada del pipeline completo**
 Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`, `review_subphase`) en todo el pipeline para facilitar correlación en producción sin necesidad de leer artifacts.
 
-**8. Enriquecimiento de `StageEvaluationInput` con datos de run**
+**9. Enriquecimiento de `StageEvaluationInput` con datos de run**
 El `evaluation_service` juzga el outcome de un batch pero no tiene acceso al estado de los runs individuales. Añadir un resumen de run-level a la entrada del evaluador para producir evaluaciones más precisas en batches con mezcla de éxito parcial y fallo.
 
 ### Baja prioridad
 
-**9. Routing de modelo por evaluador conversacional**
+**10. Routing de modelo por evaluador conversacional**
 Los evaluadores de Aria (`RequirementsEvaluator`, `ReviewEvaluator`, `ConfirmationEvaluator`, `ProjectQueryAgent`) usan el provider por defecto. Añadir configuración granular similar a `VALIDATOR_MODEL` para poder enrutar evaluadores conversacionales a modelos más económicos.
 
-**10. Métricas de ejecución por proyecto**
+**11. Métricas de ejecución por proyecto**
 Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de episodios de revisión por tarea, tiempo medio hasta confirmación en revisión manual. Datos útiles para ajustar parámetros de orquestación y detectar proyectos problemáticos antes de que agoten el iteration limit.
 
-**11. Contexto estructural del repositorio en `context_selection_agent`**
+**12. Contexto estructural del repositorio en `context_selection_agent`**
 El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto seleccionado.
+
+**13. Mantenimiento del catálogo de imágenes**
+Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter stable), política de versionado de imágenes en el catálogo, y estrategia de publicación en un registry privado para evitar builds locales en cada máquina.
 
 ---
 
@@ -738,7 +776,7 @@ El agente selecciona tareas históricas pero no tiene visibilidad del layout act
 
 | Área | Invariante |
 |---|---|
-| Ejecución | `finish` requiere evidencia; `reject` es salida válida; budget exhaustion → `completed` para salvaguardar trabajo parcial |
+| Ejecución | `finish` requiere evidencia; `reject` es salida válida; budget exhaustion → `completed` para salvaguardar trabajo parcial; `verification_level="none"` cortocircuita `command_runner_agent` en el orquestador |
 | Validación | Validadores independientes entre sí; agregación determinista |
 | Persistencia | 1 run → 1 artifact; artifact contiene la verdad final |
 | Workspace | Aislamiento total entre runs; `run/` siempre eliminado; promoción controlada |
@@ -746,4 +784,4 @@ El agente selecciona tareas históricas pero no tiene visibilidad del layout act
 | Recovery | `is_recovery_task=True` bloquea `reatomize`; `followup_depth >= 2` bloquea `insert_followup`; ≥1 sibling recovery fallado bloquea nuevo followup |
 | Jerarquía | Propagación determinista; rollback si falla algún paso; sin efectos parciales sobre padres |
 | Descomposición | `MAX_ATOMIC_TASKS_PER_PARENT = 8`; `MAX_IMPLEMENTATION_STEPS_PER_ATOMIC = 20` |
-| Entorno | Smoke test obligatorio antes de usar el contenedor; repair automático con LLM ante fallo de bootstrap |
+| Entorno | Smoke test obligatorio antes de usar el contenedor; repair automático con LLM ante fallo de bootstrap; selección de imagen via LLM con fallback a imagen libre si ninguna del catálogo encaja |
