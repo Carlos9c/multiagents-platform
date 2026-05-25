@@ -24,7 +24,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 6. **Workflow completo por iteraciones** — el `ProjectWorkflowService` ejecuta iteraciones hasta cerrar el stage, con guards contra agotamiento del plan, reapertura de finalización, y límite de iteraciones configurable. Soporta pausa cooperativa y reanudación.
 
-7. **Agente conversacional Aria** — máquina de estados de 6 fases (`gathering → ready → executing ⇄ awaiting_review → paused → completed`) con evaluadores LLM especializados por fase. La revisión manual no tiene límite de intentos: el proceso sólo se reanuda tras confirmación explícita del usuario sobre un plan concreto. El motivo del bloqueo real (del último `ExecutionRun`) se inyecta en la apertura del episodio.
+7. **Agente conversacional Aria — orquestador LLM con herramientas** — Aria recibe cada turno (mensaje de usuario o evento de sistema), decide en un loop ligero qué herramienta invocar (`requirements_agent`, `query_agent`, `review_agent`, `confirmation_agent`, `start_project`, `resumption_agent`) y sintetiza la respuesta final. La `phase` de la conversación pasa de router rígido a hint contextual para Aria. El Q&A es accesible en cualquier fase sin romper el flujo activo.
 
 8. **Control de flujo del workflow** — pausa cooperativa vía `threading.Event`, reanudación desde pausa o crash, y recuperación automática al arrancar el servidor (re-encola workflows en estado `executing` con tareas pendientes).
 
@@ -42,7 +42,10 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 - **`verification_level` en tareas atómicas**: nuevo campo `"runtime"` | `"none"` (default `"runtime"`) en `Task`. Cuando `"none"`, el orquestador nunca invoca `command_runner_agent`, eliminando loops de verificación costosos para cambios puramente estructurales en proyectos compilados (Android, Flutter, .NET, etc.). Threaded a través de `AtomicTaskOutput` → `Task` → `ExecutionRequest` → orchestrator.
 
-- **Agente conversacional Aria (overhaul completo)**: flujo de revisión manual rediseñado sin límite de intentos; sub-fase de confirmación (`review_subphase: gathering → awaiting_confirmation`) que requiere aprobación explícita del usuario antes de reanudar; motivo de bloqueo real extraído del `ExecutionRun`; `ReviewEvaluator` enriquecido con progreso de tareas del proyecto como contexto.
+- **Aria refactorizado como orquestador LLM** (`app/services/conversation/aria/`): reemplaza el God Object `project_assistant.py` (~1100 líneas) con un orquestador LLM limpio. Aria recibe un `AriaInput` (mensaje de usuario o `SystemEvent`), ejecuta un loop de hasta `MAX_STEPS=4` pasos con constraint de no-repetición por herramienta, y sintetiza la respuesta final. La `phase` pasa de router a hint contextual. El Q&A es accesible en cualquier fase. Arquitectura: `contracts.py` (tipos), `context_builder.py` (snapshot DB sin LLM), `orchestrator.py` (loop + transiciones de fase), y 6 tools (`requirements_tool`, `query_tool`, `review_tool`, `confirmation_tool`, `start_project_tool`, `resumption_tool`).
+- **ReviewContext como ADT discriminada**: reemplaza los campos separados `review_task_id` + `review_subphase` + `pending_clarification_summary` por una unión discriminada `TaskReviewContext | ProjectReviewContext` (campo `kind`) serializada como JSON en `conversation.review_context`. El campo `proposed_plan` (si presente) indica que se espera confirmación del usuario — no hay sub-fase explícita.
+- **Eventos de sistema como inputs de primera clase**: el workflow notifica a Aria via `AriaInput(source="system", system_event=SystemEvent(...))`. Eventos soportados: `MANUAL_REVIEW_REQUIRED`, `WORKFLOW_ERROR`, `EXECUTION_STARTED`, `PROJECT_COMPLETED`, `CONFIRM_START`. Aria aplica las transiciones de DB antes del loop LLM y sintetiza el mensaje al usuario.
+- **Agente conversacional Aria (overhaul previo)**: flujo de revisión manual rediseñado sin límite de intentos; motivo de bloqueo real extraído del `ExecutionRun`; `ReviewEvaluator` enriquecido con progreso de tareas del proyecto como contexto.
 - **Pausa y reanudación del workflow**: pausa cooperativa por proyecto via `threading.Event`, endpoints `POST /pause` y `POST /resume-workflow`, y recovery automático al arranque del servidor para proyectos que se quedaron en ejecución tras un crash.
 - **Rebuild eager de entorno**: cuando la clarificación del usuario implica nuevas librerías, el `ImpactAssessmentAgent` las detecta y el `ResumptionService` hace teardown + bootstrap del contenedor Docker con el nuevo spec antes de reintentar.
 - **Routing de modelo por capa**: validadores (`code_change_agent_validator`, `command_runner_agent_validator`) enrutables a un modelo independiente via `VALIDATOR_MODEL` / `VALIDATOR_PROVIDER` (ej. `gpt-5.2`).
@@ -55,7 +58,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Números actuales
 
-- **733 tests unitarios** — todos passing
+- **760 tests unitarios** — todos passing
 - **12 tests de integración** (Docker) — se ejecutan con `-m integration`
 - **0 failures** en CI
 
@@ -94,56 +97,112 @@ ProjectWorkflowService.run_workflow()
 
 ---
 
-## Agente Conversacional — Aria (`app/services/conversation/`)
+## Agente Conversacional — Aria (`app/services/conversation/aria/`)
 
-Aria gestiona la interacción con el usuario a lo largo de todo el ciclo de vida del proyecto. Es una máquina de estados con 6 fases; el routing de mensajes es siempre unidireccional — ningún handler llama a otro.
+Aria es un **orquestador LLM** que gestiona la interacción con el usuario a lo largo de todo el ciclo de vida del proyecto. Recibe inputs de dos fuentes (mensajes del usuario y eventos del sistema), decide en un loop ligero qué herramienta invocar, y sintetiza la respuesta final en lenguaje natural.
+
+### Arquitectura del orquestador
+
+```
+AriaInput (user | system)
+    │
+    ├── apply_system_event_pre_loop()   ← transiciones DB inmediatas
+    │       MANUAL_REVIEW_REQUIRED  → phase=reviewing, review_context=TaskReviewContext
+    │       WORKFLOW_ERROR          → phase=reviewing, review_context=ProjectReviewContext
+    │       EXECUTION_STARTED       → phase=executing
+    │       PROJECT_COMPLETED       → phase=completed
+    │
+    └── _run_loop()
+          │
+          ├─ [step 1..MAX_STEPS=4]
+          │     _call_aria_llm() → AriaStep{action, tool_name, tool_hint, reasoning}
+          │         action="call_tool" → tool.execute(db, project_id, conversation, hint)
+          │                              (no-repeat: mismo tool ≤ 1 vez por turno)
+          │         action="respond"  → break
+          │
+          └─ _apply_phase_transitions() + persist → AriaResponse
+```
+
+**Archivos:**
+
+| Archivo | Rol |
+|---|---|
+| `contracts.py` | `AriaStep`, `AriaInput`, `AriaResponse`, `ToolName`, `ToolResult`, `SystemEvent`, `ReviewContext` ADT |
+| `context_builder.py` | `ProjectSnapshot` — snapshot plano de DB (sin LLM) inyectado en el prompt de Aria |
+| `orchestrator.py` | Loop principal, transiciones de fase, llamada al LLM, registro de mensajes en DB |
+| `tools/requirements_tool.py` | Wraps `evaluate_requirements()` |
+| `tools/query_tool.py` | Wraps `answer_project_query()` |
+| `tools/review_tool.py` | Wraps `evaluate_review()` — funciona para revisiones por tarea y por proyecto |
+| `tools/confirmation_tool.py` | Wraps `evaluate_confirmation()` |
+| `tools/start_project_tool.py` | Wraps `ProjectStartService.start()` |
+| `tools/resumption_tool.py` | Wraps `resume_after_review()` |
+
+### Herramientas disponibles
+
+| Herramienta | `ToolName` | Cuándo la usa Aria |
+|---|---|---|
+| `RequirementsTool` | `requirements_agent` | Durante gathering para evaluar y enriquecer el borrador |
+| `QueryTool` | `query_agent` | Preguntas del usuario sobre el estado del proyecto (cualquier fase) |
+| `ReviewTool` | `review_agent` | Turno de clarificación en revisión manual (fase reviewing) |
+| `ConfirmationTool` | `confirmation_agent` | Cuando hay un `proposed_plan` y el usuario responde |
+| `StartProjectTool` | `start_project` | Al recibir el evento `CONFIRM_START` o decisión de usuario |
+| `ResumptionTool` | `resumption_agent` | Tras confirmación positiva para reanudar la ejecución |
 
 ### Fases y transiciones
 
 ```
-GATHERING → READY → EXECUTING ⇄ AWAITING_REVIEW
-                         ↕
-                       PAUSED
-                         ↕
-                     COMPLETED
+gathering → [requirements_ready=True] → (botón Start / CONFIRM_START)
+                                              ↓
+                                         executing ←──────────────────┐
+                                              │                        │
+                          MANUAL_REVIEW_REQUIRED / WORKFLOW_ERROR      │
+                                              ↓                        │
+                                          reviewing                    │
+                                    [review → proposed_plan]           │
+                                    [confirmation → confirmed=True]    │
+                                    [resumption_tool] ─────────────────┘
+                                              │
+                                       PROJECT_COMPLETED
+                                              ↓
+                                          completed
+                                              │
+                                    (stop request del usuario)
+                                              ↓
+                                           paused
 ```
 
-| Fase | Qué hace Aria |
+| Fase | Hint para Aria |
 |---|---|
-| `gathering` | Hace preguntas via `RequirementsEvaluator` hasta tener suficiente contexto para el plan |
-| `ready` | Cualquier mensaje del usuario (o botón Start) lanza `ProjectStartService` |
-| `executing` | Input bloqueado en el frontend; backend devuelve mensaje estático |
-| `awaiting_review` | Episodio de revisión manual con dos sub-fases (ver abajo) |
-| `paused` | El usuario puede preguntar sobre el estado del proyecto (`ProjectQueryAgent`) |
-| `completed` | Idem; Aria emite un mensaje de cierre con el recuento final de tareas |
+| `gathering` | Priorizar `requirements_agent`; el Q&A sigue disponible |
+| `executing` | Input bloqueado en el frontend; Aria responde con estado |
+| `reviewing` | Priorizar `review_agent` → `confirmation_agent` → `resumption_agent` |
+| `paused` | Sólo `query_agent` es relevante |
+| `completed` | Sólo `query_agent` es relevante |
 
-### Sub-fases de revisión manual (`awaiting_review`)
+### ReviewContext — unión discriminada
 
-El campo `review_subphase` en `Conversation` rastrea la posición dentro del episodio:
+El campo `conversation.review_context` serializa una de dos estructuras según el origen del bloqueo:
 
+```python
+# Tarea específica bloqueada
+TaskReviewContext(kind="task", task_id, task_title, task_description, validation_notes)
+
+# Error a nivel de proyecto (sin tarea ancla)
+ProjectReviewContext(kind="project", failure_type, failure_reason)
+# failure_type: "bootstrap" | "plan_empty" | "iteration_limit" | "unknown"
 ```
-gathering  →  [ReviewEvaluator: ready_to_confirm]  →  awaiting_confirmation
-    ↑                                                          |
-    └──────── [ConfirmationEvaluator: confirmed=False] ←───────┘
-                                                               |
-                                              [confirmed=True] ↓
-                                            ResumptionService → fase EXECUTING
-```
 
-- **Sin límite de intentos** — el episodio continúa indefinidamente hasta obtener confirmación o que el usuario abandone.
-- **Notas de validación reales** — la apertura del episodio incluye `validation_notes + blockers_found + error_message` del último `ExecutionRun`, para que el usuario entienda el motivo del bloqueo.
-- **Contexto de progreso** — `ReviewEvaluator` recibe un resumen de las tareas completadas/fallidas/pendientes para responder preguntas de estado dentro del episodio.
-- **Rebuild eager de entorno** — si la clarificación implica nuevas dependencias, `ResumptionService` llama al `ImpactAssessmentAgent`, hace teardown del contenedor Docker, y lo reconstruye con el nuevo spec antes de reintentar.
+El campo `conversation.proposed_plan` (si presente) indica que Aria ya tiene un plan propuesto y espera confirmación del usuario. Su ausencia indica que aún se está recopilando información.
 
-### Evaluadores LLM
+### Evaluadores LLM (subagentes intactos)
 
-| Servicio | Input | Output | Usado en |
+| Servicio | Input | Output | Invocado por |
 |---|---|---|---|
-| `RequirementsEvaluator` | historial + draft actual | `needs_more` / `sufficient` | `gathering` |
-| `ReviewEvaluator` | task context + episode history + task progress | `insufficient` / `ready_to_confirm` / `abandoned` | `awaiting_review` (gathering) |
-| `ConfirmationEvaluator` | action_summary + user_response | `confirmed: bool` + `follow_up` | `awaiting_review` (awaiting_confirmation) |
-| `ProjectQueryAgent` | task list (por estado) + user question | respuesta en lenguaje natural | `paused`, `completed` |
-| `ImpactAssessmentAgent` | user clarification + project context | scope + `environment_changes` | `ResumptionService` |
+| `RequirementsEvaluator` | historial + draft actual | `needs_more` / `sufficient` + draft actualizado | `RequirementsTool` |
+| `ReviewEvaluator` | task/project context + episode history + task progress | `insufficient` / `ready_to_confirm` / `abandoned` | `ReviewTool` |
+| `ConfirmationEvaluator` | proposed_plan + user_response | `confirmed: bool` + `follow_up` | `ConfirmationTool` |
+| `ProjectQueryAgent` | task list (por estado) + user question | respuesta en lenguaje natural | `QueryTool` |
+| `ImpactAssessmentAgent` | user clarification + project context | scope + `environment_changes` | `ResumptionTool` |
 
 ### Control de flujo del workflow
 
@@ -154,11 +213,11 @@ POST /conversations/pause          → request_workflow_stop(project_id)
 
 # Reanudación
 POST /conversations/resume-workflow → clear_workflow_stop(project_id)
-                                     → conversation.phase = EXECUTING
+                                     → conversation.phase = executing
                                      → _workflow_executor.submit(...)
 
 # Recovery de crash (en _lifespan de FastAPI)
-# Al arrancar: re-encola proyectos en EXECUTING con tareas PENDING
+# Al arrancar: re-encola proyectos en executing con tareas PENDING
 ```
 
 ### API del agente conversacional
@@ -167,22 +226,22 @@ POST /conversations/resume-workflow → clear_workflow_stop(project_id)
 |---|---|---|
 | `WS` | `/ws/projects/{project_id}/chat` | Canal principal de chat en tiempo real |
 | `GET` | `/projects/{project_id}/conversations/active` | Estado actual de la conversación + historial |
-| `POST` | `/projects/{project_id}/conversations/notify-review` | Notifica inicio de revisión manual (desde capa de ejecución) |
-| `POST` | `/projects/{project_id}/conversations/notify-task-event` | Broadcast de cambio de estado de tarea (desde workflow) |
 | `POST` | `/projects/{project_id}/conversations/confirm-start` | Inicia el proyecto desde el botón Start de la UI |
+| `POST` | `/projects/{project_id}/conversations/notify-review` | Notifica inicio de revisión manual (desde workflow) |
+| `POST` | `/projects/{project_id}/conversations/notify-task-event` | Broadcast de cambio de estado de tarea |
 | `POST` | `/projects/{project_id}/conversations/pause` | Solicita parada cooperativa del workflow |
-| `POST` | `/projects/{project_id}/conversations/resume-workflow` | Reanuda workflow pausado o bloqueado por crash |
+| `POST` | `/projects/{project_id}/conversations/resume-workflow` | Reanuda workflow pausado o tras crash |
 
 ### Modelo de datos de conversación
 
 ```python
 Conversation:
-    phase: str                        # gathering | ready | executing | awaiting_review | paused | completed
-    review_task_id: int | None        # tarea bloqueada actualmente en revisión
-    review_episode_attempts: int      # contador informativo (sin límite funcional)
-    review_subphase: str | None       # gathering | awaiting_confirmation
-    pending_clarification_summary: str | None  # plan propuesto pendiente de confirmación
-    requirements_draft: str | None    # borrador acumulado durante gathering
+    phase: str                   # gathering | executing | reviewing | paused | completed
+    requirements_ready: bool     # True cuando RequirementsTool devuelve "sufficient"
+    review_context: str | None   # JSON de TaskReviewContext | ProjectReviewContext
+    proposed_plan: str | None    # plan pendiente de confirmación (si presente → awaiting confirmation)
+    review_episode_attempts: int # contador informativo de turnos en el episodio
+    requirements_draft: str | None  # borrador acumulado durante gathering
 ```
 
 ---
@@ -740,7 +799,7 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**733 tests unitarios + 12 tests de integración — todos passing.**
+**760 tests unitarios + 12 tests de integración — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
@@ -757,10 +816,13 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 | Project workflow | `test_project_workflow_service.py` |
 | Workspace runtime | `test_local_workspace_runtime.py` |
 | Execution plan service | `test_execution_plan_service.py` |
-| Agente conversacional | `test_project_assistant.py` |
+| Aria — contratos y context builder | `aria/test_contracts.py`, `aria/test_context_builder.py` |
+| Aria — orquestador | `aria/test_orchestrator.py` |
+| Aria — tools | `aria/tools/test_requirements_tool.py`, `aria/tools/test_review_tool.py`, `aria/tools/test_confirmation_tool.py`, `aria/tools/test_query_tool.py`, `aria/tools/test_start_project_tool.py`, `aria/tools/test_resumption_tool.py` |
 | Environment — manager | `test_environment_manager.py`, `test_manager_strategies.py` |
 | Environment (integración) | `tests/integration/test_environment_integration.py` |
-| API | `test_projects.py` |
+| API — proyectos | `test_projects.py` |
+| API — WebSocket + REST Aria | `test_aria_ws.py` |
 
 ---
 
@@ -768,42 +830,42 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 
 ### Alta prioridad
 
-**1. Soporte multi-stage**
+**1. Respuestas en el idioma del usuario**
+Los evaluadores LLM (`RequirementsEvaluator`, `ReviewEvaluator`, `ConfirmationEvaluator`, `ProjectQueryAgent`) y el planificador producen contenido en inglés independientemente del idioma del usuario, lo que provoca que tareas, borradores y mensajes aparezcan en inglés en la UI aunque el usuario escriba en español. Añadir una instrucción de idioma en los system prompts de cada evaluador que tome como referencia el idioma del último mensaje del usuario. El orquestador Aria ya tiene acceso al historial de conversación y puede extraer el idioma sin llamada LLM adicional.
+
+**2. Soporte multi-stage**
 El sistema ejecuta un único stage por proyecto. Para proyectos reales con múltiples stages secuenciales (ej. "backend" → "frontend" → "integración"), el `ProjectWorkflowService` necesita un loop externo que cierre el stage actual, genere el siguiente, y reutilice el contexto acumulado. Las bases ya están: `project_stage_closed`, `stage_goal`, y la memoria de proyecto (`ProjectOperationalContext`) son stage-aware.
 
-**2. Pre-fetch de dependencias en el bootstrapper para ecosistemas compilados**
-Cuando los `code_change_agent` escriben archivos de manifiesto (`pom.xml`, `Cargo.toml`, `go.mod`, `.csproj`, `pubspec.yaml`) durante la ejecución, el bootstrapper del siguiente run no ejecuta pre-fetch. Añadir una fase opcional en `bootstrapper.py` que detecte la presencia de estos archivos y ejecute el comando de descarga antes del smoke test (`mvn dependency:resolve -q`, `cargo fetch`, `go mod download`, `dotnet restore`, `./gradlew dependencies -q`, `flutter pub get`). Reduciría el tiempo de primera compilación y daría feedback temprano sobre manifests rotos, antes de que el code agent empiece a escribir código que los use.
-
-**3. Tests de integración end-to-end del flujo conversacional**
-Tests de `project_assistant` mockeando el WebSocket y el workflow en background para verificar el flujo completo: inicio de conversación → gathering → proyecto iniciado → revisión manual → confirmación → reanudación. Actualmente los tests del agente conversacional usan DB real pero mockean todos los evaluadores LLM.
+**3. Pre-fetch de dependencias en el bootstrapper para ecosistemas compilados**
+Cuando `code_change_agent` escribe archivos de manifiesto (`pom.xml`, `Cargo.toml`, `go.mod`, `.csproj`, `pubspec.yaml`) durante la ejecución, el bootstrapper del siguiente run no ejecuta pre-fetch. Añadir una fase opcional en `bootstrapper.py` que detecte la presencia de estos archivos y ejecute el comando de descarga antes del smoke test (`mvn dependency:resolve -q`, `cargo fetch`, `go mod download`, `dotnet restore`, `./gradlew dependencies -q`, `flutter pub get`). Reduciría el tiempo de primera compilación y daría feedback temprano sobre manifests rotos.
 
 ### Media prioridad
 
-**4. Nuevo executor type: generación de media**
-El sistema asume que "ejecutar" equivale a "correr en Docker". Para proyectos que incluyan generación de assets (sprites, iconos, sonidos), se necesita un nuevo `executor_type` (`image_generation`, `audio_generation`) que llame APIs generativas externas (DALL-E 3, etc.) y escriba los archivos resultantes al workspace, sin necesidad de contenedor. El `atomic_task_generator` emitiría tareas de este tipo; el orchestrator las delegaría a un nuevo `MediaGenerationAgent`. Habilitaría casos de uso completos de tipo videojuego donde los agentes generan tanto el código como los assets visuales.
+**4. Routing de modelo para Aria y evaluadores conversacionales**
+El LLM call del orquestador Aria y los evaluadores (`RequirementsEvaluator`, `ReviewEvaluator`, `ConfirmationEvaluator`, `ProjectQueryAgent`) usan el provider por defecto. Añadir variables de configuración (`ARIA_MODEL` / `ARIA_PROVIDER`, `CONVERSATION_EVALUATOR_MODEL`) para enrutar la capa conversacional a modelos distintos del motor de ejecución, al igual que ya existe `VALIDATOR_MODEL` para la capa de validación.
 
-**5. Precisión del validador en decisiones parciales**
+**5. Nuevo executor type: generación de media**
+El sistema asume que "ejecutar" equivale a "correr en Docker". Para proyectos que incluyan generación de assets (sprites, iconos, sonidos), se necesita un nuevo `executor_type` (`image_generation`, `audio_generation`) que llame APIs generativas externas (DALL-E 3, etc.) y escriba los archivos resultantes al workspace, sin necesidad de contenedor. El `atomic_task_generator` emitiría tareas de este tipo; el orquestador las delegaría a un nuevo `MediaGenerationAgent`. Habilitaría casos de uso tipo videojuego donde los agentes generan tanto el código como los assets visuales.
+
+**6. Precisión del validador en decisiones parciales**
 El `command_runner_agent_validator` puede declarar `partial` incluso cuando los tests pasan, si detecta scope no cubierto en los criterios de aceptación. Ampliar la lista de markers en `_task_looks_like_executable_implementation` (persistence, storage, data) o relajar el criterio de normalización para tareas con exit_code=0.
 
-**6. Optimización del tamaño de prompt en `code_change_agent`**
+**7. Optimización del tamaño de prompt en `code_change_agent`**
 La inyección del workspace state puede generar prompts de 70-80k caracteres en proyectos con historial extenso. Añadir un presupuesto de caracteres configurable para las secciones de contenido de archivos, truncando por tamaño antes de insertar en el prompt.
 
-**7. Historial persistido de Q&A del proyecto**
-Las respuestas del `ProjectQueryAgent` se guardan en el historial de la conversación, pero el agente no ve conversaciones anteriores al formular la respuesta. Pasar el historial reciente como contexto al agente para que sus respuestas sean coherentes con lo dicho antes.
-
 **8. Observabilidad estructurada del pipeline completo**
-Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`, `review_subphase`) en todo el pipeline para facilitar correlación en producción sin necesidad de leer artifacts.
+Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`, `aria_tool_called`, `aria_steps`) en todo el pipeline para facilitar correlación en producción sin necesidad de leer artifacts. Incluir telemetría del loop de Aria (herramienta llamada, número de pasos, si se llegó al fallback).
 
 **9. Enriquecimiento de `StageEvaluationInput` con datos de run**
 El `evaluation_service` juzga el outcome de un batch pero no tiene acceso al estado de los runs individuales. Añadir un resumen de run-level a la entrada del evaluador para producir evaluaciones más precisas en batches con mezcla de éxito parcial y fallo.
 
+**10. Tests de integración end-to-end del flujo conversacional**
+Tests que cubran el flujo completo con WebSocket real y workflow en background mockeado: gathering → requirements_ready → botón Start → executing → revisión manual → confirmación → reanudación. Los tests actuales del agente conversacional (`test_aria_ws.py`, `test_orchestrator.py`) mockean el LLM de Aria pero no prueban el ciclo completo con WebSocket y persistencia.
+
 ### Baja prioridad
 
-**10. Routing de modelo por evaluador conversacional**
-Los evaluadores de Aria (`RequirementsEvaluator`, `ReviewEvaluator`, `ConfirmationEvaluator`, `ProjectQueryAgent`) usan el provider por defecto. Añadir configuración granular similar a `VALIDATOR_MODEL` para poder enrutar evaluadores conversacionales a modelos más económicos.
-
 **11. Métricas de ejecución por proyecto**
-Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de episodios de revisión por tarea, tiempo medio hasta confirmación en revisión manual. Datos útiles para ajustar parámetros de orquestación y detectar proyectos problemáticos antes de que agoten el iteration limit.
+Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de episodios de revisión por tarea, tiempo medio hasta confirmación, herramientas más invocadas por Aria. Datos útiles para ajustar parámetros de orquestación y detectar proyectos problemáticos antes de que agoten el iteration limit.
 
 **12. Contexto estructural del repositorio en `context_selection_agent`**
 El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto seleccionado.
@@ -827,3 +889,5 @@ Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter s
 | Descomposición | `MAX_ATOMIC_TASKS_PER_PARENT = 8`; `MAX_IMPLEMENTATION_STEPS_PER_ATOMIC = 20` |
 | Entorno | Smoke test obligatorio antes de usar el contenedor; repair automático con LLM ante fallo de bootstrap; selección de imagen via LLM con fallback a imagen libre si ninguna del catálogo encaja |
 | EnvironmentManager | `environment_manager_agent` no produce entregables validables (en `IGNORED_VALIDATION_PRODUCERS`); su fallo es terminal (no entra en loop de reparación); `exact_only` + conflicto de versión → `needs_user_input`; archivos de manifiesto modificados en disco siempre se registran en evidencia independientemente del éxito de la instalación |
+| Aria loop | `MAX_STEPS = 4`; misma herramienta ≤ 1 vez por turno (no-repeat); si el loop se agota sin `respond`, se fuerza una respuesta de fallback; los eventos de sistema aplican transiciones DB antes del loop LLM |
+| ReviewContext | `conversation.proposed_plan != None` ↔ estado "esperando confirmación"; `conversation.review_context` serializa el ADT completo (`TaskReviewContext` \| `ProjectReviewContext`); se limpia al resolver la revisión |

@@ -70,6 +70,11 @@ Rules:
   acknowledges exactly what the user said and asks the most important next question.
 - When confirmed=true, follow_up must be null.
 - Do not ask for re-confirmation if the user already confirmed — that wastes their time.
+
+Language rule:
+- Detect the language of the user's response.
+- Write follow_up in that same language.
+- Never mix languages within a single response.
 """.strip()
 
 

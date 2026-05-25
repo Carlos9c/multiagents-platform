@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -17,31 +17,27 @@ VALID_CONVERSATION_STATUSES = {
 
 MESSAGE_ROLE_USER = "user"
 MESSAGE_ROLE_ASSISTANT = "assistant"
+MESSAGE_ROLE_SYSTEM = "system"
 
 VALID_MESSAGE_ROLES = {
     MESSAGE_ROLE_USER,
     MESSAGE_ROLE_ASSISTANT,
+    MESSAGE_ROLE_SYSTEM,
 }
 
 CONVERSATION_PHASE_GATHERING = "gathering_requirements"
-CONVERSATION_PHASE_READY = "ready_to_start"
 CONVERSATION_PHASE_EXECUTING = "executing"
-CONVERSATION_PHASE_AWAITING_REVIEW = "awaiting_review"
+CONVERSATION_PHASE_REVIEWING = "reviewing"
 CONVERSATION_PHASE_PAUSED = "paused"
 CONVERSATION_PHASE_COMPLETED = "completed"
 
 VALID_CONVERSATION_PHASES = {
     CONVERSATION_PHASE_GATHERING,
-    CONVERSATION_PHASE_READY,
     CONVERSATION_PHASE_EXECUTING,
-    CONVERSATION_PHASE_AWAITING_REVIEW,
+    CONVERSATION_PHASE_REVIEWING,
     CONVERSATION_PHASE_PAUSED,
     CONVERSATION_PHASE_COMPLETED,
 }
-
-# Sub-phases within AWAITING_REVIEW
-REVIEW_SUBPHASE_GATHERING = "gathering"
-REVIEW_SUBPHASE_AWAITING_CONFIRMATION = "awaiting_confirmation"
 
 
 class Conversation(Base):
@@ -52,13 +48,6 @@ class Conversation(Base):
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id"),
         nullable=False,
-        index=True,
-    )
-
-    # Task under manual_review that triggered the current review episode (nullable)
-    review_task_id: Mapped[int | None] = mapped_column(
-        ForeignKey("tasks.id"),
-        nullable=True,
         index=True,
     )
 
@@ -74,6 +63,22 @@ class Conversation(Base):
         default=CONVERSATION_PHASE_GATHERING,
     )
 
+    # True once RequirementsTool returns "sufficient" — signals frontend to show Start button.
+    requirements_ready: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
+    # JSON-serialized ReviewContext (TaskReviewContext | ProjectReviewContext).
+    # Set when phase transitions to REVIEWING. Cleared when review is resolved.
+    review_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Stores the clarification_summary once ReviewTool returns "ready_to_confirm".
+    # Presence signals the orchestrator that we are awaiting user confirmation.
+    # Cleared on confirmation (confirmed or rejected).
+    proposed_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Accumulated turn count within the current review episode (informational only).
     review_episode_attempts: Mapped[int] = mapped_column(
         Integer,
@@ -81,20 +86,7 @@ class Conversation(Base):
         default=0,
     )
 
-    # Sub-phase within AWAITING_REVIEW: "gathering" | "awaiting_confirmation"
-    review_subphase: Mapped[str | None] = mapped_column(String(50), nullable=True)
-
-    # Clarification text stored when the review evaluator reaches "ready_to_confirm".
-    # Passed to resume_after_review() once the user confirms the proposed plan.
-    pending_clarification_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # For project-level review episodes (review_task_id=None): stores the original failure
-    # reason (env error, iteration limit, etc.) that anchors the review. Persists across
-    # gathering → confirmation round-trips, unlike pending_clarification_summary which is
-    # overwritten when the proposed plan is stored.
-    review_failure_context: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # Living requirements document built during GATHERING_REQUIREMENTS phase.
+    # Living requirements document built during GATHERING phase.
     # Becomes project.description when the agent decides it has enough context.
     requirements_draft: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -112,7 +104,6 @@ class Conversation(Base):
     )
 
     project = relationship("Project", backref="conversations")
-    review_task = relationship("Task", foreign_keys=[review_task_id])
     messages: Mapped[list["ConversationMessage"]] = relationship(
         "ConversationMessage",
         back_populates="conversation",
@@ -138,13 +129,6 @@ class ConversationMessage(Base):
 
     content: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Optional link to the task that triggered this message (for review episodes)
-    task_id: Mapped[int | None] = mapped_column(
-        ForeignKey("tasks.id"),
-        nullable=True,
-        index=True,
-    )
-
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
@@ -155,4 +139,3 @@ class ConversationMessage(Base):
         "Conversation",
         back_populates="messages",
     )
-    task = relationship("Task", foreign_keys=[task_id])

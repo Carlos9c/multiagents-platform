@@ -1,7 +1,11 @@
 """WebSocket and conversation REST endpoints.
 
 WS:   ws://host/ws/projects/{project_id}/chat
-REST: POST /projects/{project_id}/conversations/notify-review
+REST: POST /projects/{project_id}/conversations/confirm-start
+      POST /projects/{project_id}/conversations/notify-review
+      POST /projects/{project_id}/conversations/notify-task-event
+      POST /projects/{project_id}/conversations/pause
+      POST /projects/{project_id}/conversations/resume-workflow
       GET  /projects/{project_id}/conversations/active
 """
 
@@ -41,6 +45,7 @@ from app.models.conversation import (
     Conversation,
     ConversationMessage,
 )
+from app.models.execution_run import ExecutionRun
 from app.models.task import (
     TASK_STATUS_AWAITING_REVIEW,
     TASK_STATUS_FAILED,
@@ -49,14 +54,15 @@ from app.models.task import (
     TERMINAL_TASK_STATUSES,
     Task,
 )
-from app.services.conversation.project_assistant import (
-    ProjectAssistantError,
+from app.services.conversation.aria import (
+    AriaInput,
+    AriaOrchestratorError,
+    AriaResponse,
+    SystemEvent,
+    SystemEventType,
+    check_project_completed,
     get_or_create_conversation,
-    notify_project_completed,
-    notify_review_started,
-    notify_workflow_error,
-    process_user_message,
-    start_project_manually,
+    process_with_pre_transitions,
 )
 from app.services.project_start_service import ActiveTasksError
 from app.services.project_workflow_service import (
@@ -74,7 +80,7 @@ router = APIRouter(tags=["conversation"])
 _workflow_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="workflow")
 
 
-def _find_active_conversation(db, project_id: int) -> "Conversation | None":
+def _find_active_conversation(db: Session, project_id: int) -> Conversation | None:
     return (
         db.query(Conversation)
         .filter(
@@ -85,63 +91,46 @@ def _find_active_conversation(db, project_id: int) -> "Conversation | None":
     )
 
 
-def _try_notify_workflow_error(db, project_id: int, failure_reason: str) -> None:
-    """
-    Best-effort: find the active conversation and call notify_workflow_error so Aria
-    can inform the user exactly what happened and how to continue. Swallows all errors
-    so we never mask the original exception or crash the background thread.
-    """
-    try:
-        active_conv = _find_active_conversation(db, project_id)
-        if active_conv is None:
-            logger.warning(
-                "workflow_error_no_conv project_id=%s — no active conversation to notify",
-                project_id,
-            )
-            return
-        resp = notify_workflow_error(
-            db, conversation_id=active_conv.id, failure_reason=failure_reason
-        )
-        manager.broadcast_sync(
-            project_id,
-            review_required(
-                content=resp.message,
-                task_id=None,
-                conversation_id=active_conv.id,
-            ),
-        )
-    except Exception as notify_exc:  # noqa: BLE001
-        logger.warning(
-            "workflow_error_notify_failed project_id=%s error=%s", project_id, notify_exc
-        )
+def _get_task_validation_notes(db: Session, task_id: int) -> str | None:
+    last_run = (
+        db.query(ExecutionRun)
+        .filter(ExecutionRun.task_id == task_id)
+        .order_by(ExecutionRun.id.desc())
+        .first()
+    )
+    if last_run is None:
+        return None
+    parts = [last_run.validation_notes, last_run.blockers_found, last_run.error_message]
+    combined = " | ".join(p for p in parts if p)
+    return combined or None
 
 
 def _build_workflow_failure_reason(result) -> str:
-    """
-    Derive a human-readable failure reason from a ProjectWorkflowResult so Aria
-    can explain exactly what stopped the workflow and what recovery options exist.
-    Includes the last iteration's decision signal for precision.
-    """
     base = result.notes or "El flujo de trabajo se ha detenido sin motivo registrado."
-
-    # Append the last iteration's decision signal if present for extra precision
     if result.iterations:
         last_signals = result.iterations[-1].decision_signals or []
         if last_signals:
-            signal_str = ", ".join(last_signals)
-            base = f"{base} (señal: {signal_str})"
-
+            base = f"{base} (señal: {', '.join(last_signals)})"
     return base
 
 
-def _run_workflow_background(project_id: int) -> None:
-    """Run the full project workflow in a background thread with its own DB session.
+def _broadcast_aria_response(project_id: int, resp: AriaResponse) -> None:
+    """Helper to broadcast an AriaResponse to connected WebSocket clients."""
+    manager.broadcast_sync(
+        project_id,
+        assistant_message(
+            content=resp.message,
+            event=resp.event,
+            phase=resp.phase,
+            conversation_id=resp.conversation_id,
+            project_id=resp.project_id,
+            requirements_draft=resp.requirements_draft,
+        ),
+    )
 
-    Teardown of the Docker container is intentionally deferred to the finally block so
-    the conversation transition to AWAITING_REVIEW (or PAUSED) is broadcast to the client
-    before the container disappears. This eliminates the window where the user could send
-    a message and receive "El proyecto está en ejecución" while teardown is in progress.
-    """
+
+def _run_workflow_background(project_id: int) -> None:
+    """Run the full project workflow in a background thread with its own DB session."""
     db = SessionLocal()
     try:
         result = run_project_workflow(db, project_id, auto_teardown=False)
@@ -161,7 +150,7 @@ def _run_workflow_background(project_id: int) -> None:
                 )
             return
 
-        # ── Blocked for manual review (task explicitly in awaiting_review) ────
+        # ── Blocked for manual review (task in awaiting_review) ───────────────
         awaiting_task = (
             db.query(Task)
             .filter(Task.project_id == project_id, Task.status == TASK_STATUS_AWAITING_REVIEW)
@@ -171,9 +160,23 @@ def _run_workflow_background(project_id: int) -> None:
         if awaiting_task is not None:
             active_conv = _find_active_conversation(db, project_id)
             if active_conv is not None:
+                validation_notes = _get_task_validation_notes(db, awaiting_task.id)
                 try:
-                    resp = notify_review_started(
-                        db, conversation_id=active_conv.id, task_id=awaiting_task.id
+                    resp = process_with_pre_transitions(
+                        db,
+                        active_conv.id,
+                        AriaInput(
+                            source="system",
+                            system_event=SystemEvent(
+                                event_type=SystemEventType.MANUAL_REVIEW_REQUIRED,
+                                data={
+                                    "task_id": awaiting_task.id,
+                                    "task_title": awaiting_task.title,
+                                    "task_description": awaiting_task.description,
+                                    "validation_notes": validation_notes,
+                                },
+                            ),
+                        ),
                     )
                     manager.broadcast_sync(
                         project_id,
@@ -183,14 +186,11 @@ def _run_workflow_background(project_id: int) -> None:
                             conversation_id=active_conv.id,
                         ),
                     )
-                except ProjectAssistantError as exc:
+                except AriaOrchestratorError as exc:
                     logger.warning("review_notify_failed project_id=%s error=%s", project_id, exc)
             return
 
-        # ── Manual review required ─────────────────────────────────────────────
-        # Covers three sub-cases in order of preference:
-        #   1. Task ended FAILED/PARTIAL (validator chose manual_review but set FAILED status)
-        #   2. Project-level failure — no task anchor at all (env error, empty plan, etc.)
+        # ── Manual review required (task failed/partial, or project-level) ────
         if result.manual_review_required:
             failed_task = (
                 db.query(Task)
@@ -201,50 +201,55 @@ def _run_workflow_background(project_id: int) -> None:
                 .order_by(Task.id.desc())
                 .first()
             )
+            active_conv = _find_active_conversation(db, project_id)
+            if active_conv is None:
+                return
+
             if failed_task is not None:
-                active_conv = _find_active_conversation(db, project_id)
-                if active_conv is not None:
-                    try:
-                        resp = notify_review_started(
-                            db, conversation_id=active_conv.id, task_id=failed_task.id
-                        )
-                        manager.broadcast_sync(
-                            project_id,
-                            review_required(
-                                content=resp.message,
-                                task_id=failed_task.id,
-                                conversation_id=active_conv.id,
+                validation_notes = _get_task_validation_notes(db, failed_task.id)
+                try:
+                    resp = process_with_pre_transitions(
+                        db,
+                        active_conv.id,
+                        AriaInput(
+                            source="system",
+                            system_event=SystemEvent(
+                                event_type=SystemEventType.MANUAL_REVIEW_REQUIRED,
+                                data={
+                                    "task_id": failed_task.id,
+                                    "task_title": failed_task.title,
+                                    "task_description": failed_task.description,
+                                    "validation_notes": validation_notes,
+                                },
                             ),
-                        )
-                    except ProjectAssistantError as exc:
-                        logger.warning(
-                            "review_notify_failed project_id=%s error=%s", project_id, exc
-                        )
+                        ),
+                    )
+                    manager.broadcast_sync(
+                        project_id,
+                        review_required(
+                            content=resp.message,
+                            task_id=failed_task.id,
+                            conversation_id=active_conv.id,
+                        ),
+                    )
+                except AriaOrchestratorError as exc:
+                    logger.warning("review_notify_failed project_id=%s error=%s", project_id, exc)
             else:
-                # No task anchor — project-level failure (env, empty plan, iteration limit).
-                # Notify Aria so the user learns exactly what happened and how to continue.
+                # No task anchor — project-level failure
                 failure_reason = _build_workflow_failure_reason(result)
                 logger.warning(
                     "workflow_project_level_review project_id=%s reason=%s",
                     project_id,
                     failure_reason,
                 )
-                _try_notify_workflow_error(db, project_id, failure_reason)
+                _try_notify_workflow_error(db, project_id, failure_reason, active_conv)
             return
 
         # ── Project completed ──────────────────────────────────────────────────
-        completion = notify_project_completed(db, project_id)
+        completion = check_project_completed(db, project_id)
         if completion:
-            manager.broadcast_sync(
-                project_id,
-                assistant_message(
-                    content=completion.message,
-                    event=completion.event,
-                    phase=completion.phase,
-                    conversation_id=completion.conversation_id,
-                    project_id=project_id,
-                ),
-            )
+            _broadcast_aria_response(project_id, completion)
+
     except ProjectWorkflowServiceError as exc:
         logger.error("Workflow error for project %s: %s", project_id, exc)
         _try_notify_workflow_error(db, project_id, str(exc))
@@ -252,10 +257,49 @@ def _run_workflow_background(project_id: int) -> None:
         logger.exception("Unexpected workflow error for project %s: %s", project_id, exc)
         _try_notify_workflow_error(db, project_id, str(exc))
     finally:
-        # Container teardown always happens here — after all Aria notifications — so the
-        # conversation is already in AWAITING_REVIEW/PAUSED before the container stops.
         teardown_project_environment(project_id)
         db.close()
+
+
+def _try_notify_workflow_error(
+    db: Session,
+    project_id: int,
+    failure_reason: str,
+    active_conv: Conversation | None = None,
+) -> None:
+    """Best-effort: route a workflow error through Aria."""
+    try:
+        if active_conv is None:
+            active_conv = _find_active_conversation(db, project_id)
+        if active_conv is None:
+            logger.warning(
+                "workflow_error_no_conv project_id=%s — no active conversation to notify",
+                project_id,
+            )
+            return
+        resp = process_with_pre_transitions(
+            db,
+            active_conv.id,
+            AriaInput(
+                source="system",
+                system_event=SystemEvent(
+                    event_type=SystemEventType.WORKFLOW_ERROR,
+                    data={"failure_reason": failure_reason},
+                ),
+            ),
+        )
+        manager.broadcast_sync(
+            project_id,
+            review_required(
+                content=resp.message,
+                task_id=None,
+                conversation_id=active_conv.id,
+            ),
+        )
+    except Exception as notify_exc:  # noqa: BLE001
+        logger.warning(
+            "workflow_error_notify_failed project_id=%s error=%s", project_id, notify_exc
+        )
 
 
 _HISTORY_LIMIT = 100
@@ -273,7 +317,6 @@ async def websocket_chat(
     await manager.connect(websocket, project_id)
 
     try:
-        # Sync to DB: get or create conversation and send current state
         conversation = get_or_create_conversation(db, project_id)
         await _send_conversation_state(websocket, db, conversation)
 
@@ -298,12 +341,12 @@ async def websocket_chat(
                 continue
 
             try:
-                response = process_user_message(
+                response = process_with_pre_transitions(
                     db,
-                    conversation_id=conversation.id,
-                    user_message=content,
+                    conversation.id,
+                    AriaInput(source="user", user_message=content),
                 )
-            except (ProjectAssistantError, ActiveTasksError) as exc:
+            except (AriaOrchestratorError, ActiveTasksError) as exc:
                 await websocket.send_json(error_message(str(exc)))
                 continue
 
@@ -330,7 +373,7 @@ async def websocket_chat(
         manager.disconnect(websocket, project_id)
 
 
-# ── REST: push review notification from execution layer ───────────────────────
+# ── REST: notify review (from execution layer) ────────────────────────────────
 
 
 class NotifyReviewRequest(BaseModel):
@@ -352,26 +395,41 @@ def notify_review(
     payload: NotifyReviewRequest,
     db: Session = Depends(get_db),
 ) -> NotifyReviewResponse:
-    """
-    Called by the execution layer when a task enters AWAITING_REVIEW status.
-    Updates the conversation phase and pushes a review_required event to
-    any connected WebSocket clients.
-    """
+    """Called by the execution layer when a task enters AWAITING_REVIEW status."""
+    task = db.get(Task, payload.task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task {payload.task_id} not found")
+
+    validation_notes = _get_task_validation_notes(db, payload.task_id)
+
     try:
-        response = notify_review_started(
+        response = process_with_pre_transitions(
             db,
-            conversation_id=payload.conversation_id,
-            task_id=payload.task_id,
+            payload.conversation_id,
+            AriaInput(
+                source="system",
+                system_event=SystemEvent(
+                    event_type=SystemEventType.MANUAL_REVIEW_REQUIRED,
+                    data={
+                        "task_id": task.id,
+                        "task_title": task.title,
+                        "task_description": task.description,
+                        "validation_notes": validation_notes,
+                    },
+                ),
+            ),
         )
-    except ProjectAssistantError as exc:
+    except AriaOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    broadcast_payload = review_required(
-        content=response.message,
-        task_id=payload.task_id,
-        conversation_id=payload.conversation_id,
+    manager.broadcast_sync(
+        project_id,
+        review_required(
+            content=response.message,
+            task_id=payload.task_id,
+            conversation_id=payload.conversation_id,
+        ),
     )
-    manager.broadcast_sync(project_id, broadcast_payload)
 
     return NotifyReviewResponse(
         message=response.message,
@@ -379,7 +437,7 @@ def notify_review(
     )
 
 
-# ── REST: push execution event from workflow layer ────────────────────────────
+# ── REST: notify task event ───────────────────────────────────────────────────
 
 
 class NotifyTaskEventRequest(BaseModel):
@@ -394,11 +452,7 @@ def notify_task_event(
     payload: NotifyTaskEventRequest,
     db: Session = Depends(get_db),
 ) -> dict:
-    """
-    Pushes a task status update to connected WebSocket clients.
-    Called after task execution completes (completed, failed, partial).
-    Also checks for project completion and broadcasts Aria's closing message.
-    """
+    """Pushes a task status update to connected WebSocket clients."""
     broadcast_payload = execution_event(
         task_id=payload.task_id,
         task_title=payload.task_title,
@@ -408,23 +462,14 @@ def notify_task_event(
     manager.broadcast_sync(project_id, broadcast_payload)
 
     if payload.status in TERMINAL_TASK_STATUSES:
-        completion = notify_project_completed(db, project_id)
+        completion = check_project_completed(db, project_id)
         if completion:
-            manager.broadcast_sync(
-                project_id,
-                assistant_message(
-                    content=completion.message,
-                    event=completion.event,
-                    phase=completion.phase,
-                    conversation_id=completion.conversation_id,
-                    project_id=project_id,
-                ),
-            )
+            _broadcast_aria_response(project_id, completion)
 
     return {"broadcast_sent": manager.has_connections(project_id)}
 
 
-# ── REST: confirm project start (called by the Start button) ─────────────────
+# ── REST: confirm project start ───────────────────────────────────────────────
 
 
 class ConfirmStartRequest(BaseModel):
@@ -442,20 +487,37 @@ def confirm_start(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> dict:
-    """
-    Called when the user clicks the Start button in the UI.
-    Updates project details, kicks off planning, and runs the full workflow in background.
-    """
+    """Called when the user clicks the Start button in the UI."""
+    from app.models.project import Project
+
+    # Update project metadata directly (before routing through Aria)
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+
+    if payload.name:
+        project.name = payload.name
+    if payload.description:
+        project.description = payload.description
+    db.add(project)
+    db.flush()
+
     try:
-        response = start_project_manually(
+        response = process_with_pre_transitions(
             db,
-            conversation_id=payload.conversation_id,
-            name=payload.name,
-            description=payload.description,
-            source_path=payload.source_path,
-            manual_update=payload.manual_update,
+            payload.conversation_id,
+            AriaInput(
+                source="system",
+                system_event=SystemEvent(
+                    event_type=SystemEventType.CONFIRM_START,
+                    data={
+                        "source_path": payload.source_path,
+                        "manual_update": payload.manual_update,
+                    },
+                ),
+            ),
         )
-    except ProjectAssistantError as exc:
+    except AriaOrchestratorError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -471,7 +533,8 @@ def confirm_start(
         ),
     )
 
-    background_tasks.add_task(_run_workflow_background, project_id)
+    if response.event == "project_started":
+        background_tasks.add_task(_run_workflow_background, project_id)
 
     return {
         "message": response.message,
@@ -489,6 +552,7 @@ class ConversationStateResponse(BaseModel):
     status: str
     review_episode_attempts: int
     requirements_draft: str | None
+    requirements_ready: bool
     messages: list[MessageRecord]
 
 
@@ -519,6 +583,7 @@ def get_active_conversation(
         status=conversation.status,
         review_episode_attempts=conversation.review_episode_attempts,
         requirements_draft=conversation.requirements_draft,
+        requirements_ready=conversation.requirements_ready,
         messages=messages,
     )
 
@@ -531,10 +596,7 @@ def pause_workflow(
     project_id: int,
     db: Session = Depends(get_db),
 ) -> dict:
-    """
-    Signal the workflow loop to stop after the current task finishes.
-    The loop stops cooperatively — the task in progress is not interrupted.
-    """
+    """Signal the workflow loop to stop after the current task finishes."""
     request_workflow_stop(project_id)
     manager.broadcast_sync(
         project_id, {"type": "workflow_pause_requested", "project_id": project_id}
@@ -555,25 +617,10 @@ def resume_workflow(
     payload: ResumeWorkflowRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict:
-    """
-    Resume a paused or interrupted workflow.
-
-    Works for:
-    - Manually paused projects (phase=paused)
-    - Projects stuck in executing after a server crash (phase=executing, no active thread)
-    - Projects after a review is resolved via REST (edge case)
-    """
+    """Resume a paused or interrupted workflow."""
     clear_workflow_stop(project_id)
 
-    active_conv = (
-        db.query(Conversation)
-        .filter(
-            Conversation.project_id == project_id,
-            Conversation.status == CONVERSATION_STATUS_ACTIVE,
-        )
-        .first()
-    )
-
+    active_conv = _find_active_conversation(db, project_id)
     if active_conv is None:
         return {"status": "no_active_conversation", "project_id": project_id}
 
@@ -632,4 +679,4 @@ def _load_messages(db: Session, conversation_id: int) -> list[MessageRecord]:
         .limit(_HISTORY_LIMIT)
         .all()
     )
-    return [MessageRecord(role=m.role, content=m.content, task_id=m.task_id) for m in rows]
+    return [MessageRecord(role=m.role, content=m.content, task_id=None) for m in rows]

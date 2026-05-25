@@ -93,6 +93,11 @@ When status is "sufficient":
   Include all technical decisions, domain rules, acceptance criteria, and constraints.
   Write it in third person ("The system must...", "The application must...").
 
+Language rule:
+- Detect the language of the user's messages in the conversation history.
+- Write next_question and updated_draft in that same language.
+- Never mix languages within a single response.
+
 Return ONLY JSON matching the provided schema.
 """.strip()
 

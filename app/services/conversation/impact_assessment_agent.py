@@ -176,6 +176,11 @@ Rules:
     and it is not negotiable. Use "preferred" when a version is mentioned but alternatives
     are acceptable. Use "any_compatible" (default) when no version is specified.
 
+Language rule:
+- Detect the language of the user clarification.
+- Write all text output fields (title, description, objective, implementation_steps, acceptance_criteria, technical_constraints, reason, reasoning) in that same language.
+- Never mix languages within a single response.
+
 Return ONLY JSON matching the provided schema.
 """.strip()
 

@@ -112,6 +112,11 @@ Rules:
 - next_question must be null when status is "ready_to_confirm" or "abandoned".
 - Do not reach "ready_to_confirm" unless you can write a specific, concrete action_summary.
   Vague or general plans do not qualify.
+
+Language rule:
+- Detect the language of the user's messages in the episode history.
+- Write next_question and action_summary in that same language.
+- Never mix languages within a single response.
 """.strip()
 
 
