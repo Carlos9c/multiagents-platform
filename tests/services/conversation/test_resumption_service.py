@@ -111,7 +111,9 @@ def _disruptive_assessment() -> ImpactAssessmentResult:
 
 def test_narrow_resets_blocked_task_to_pending(db_session, make_project):
     project = make_project()
-    blocked = _make_task(db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=1)
+    blocked = _make_task(
+        db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=1
+    )
     db_session.commit()
 
     with patch(
@@ -152,7 +154,9 @@ def test_narrow_raises_if_task_not_in_awaiting_review(db_session, make_project):
 
 def test_moderate_revises_pending_task_and_resets_blocked(db_session, make_project):
     project = make_project()
-    blocked = _make_task(db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=2)
+    blocked = _make_task(
+        db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=2
+    )
     pending = _make_task(db_session, project.id, status=TASK_STATUS_PENDING, sequence_order=3)
     db_session.commit()
 
@@ -181,7 +185,9 @@ def test_moderate_revises_pending_task_and_resets_blocked(db_session, make_proje
 
 def test_moderate_inserts_new_task_in_correct_position(db_session, make_project):
     project = make_project()
-    blocked = _make_task(db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=1)
+    blocked = _make_task(
+        db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=1
+    )
     t2 = _make_task(db_session, project.id, status=TASK_STATUS_PENDING, sequence_order=2)
     t3 = _make_task(db_session, project.id, status=TASK_STATUS_PENDING, sequence_order=3)
     db_session.commit()
@@ -234,18 +240,21 @@ def test_moderate_inserts_new_task_in_correct_position(db_session, make_project)
 
 def test_disruptive_supersedes_non_terminal_tasks(db_session, make_project):
     project = make_project()
-    blocked = _make_task(db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=3)
+    blocked = _make_task(
+        db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=3
+    )
     pending1 = _make_task(db_session, project.id, status=TASK_STATUS_PENDING, sequence_order=4)
     pending2 = _make_task(db_session, project.id, status=TASK_STATUS_PENDING, sequence_order=5)
     done = _make_task(db_session, project.id, status=TASK_STATUS_COMPLETED)
     db_session.commit()
 
-    with patch(
-        "app.services.conversation.resumption_service.assess_impact",
-        return_value=_disruptive_assessment(),
-    ), patch(
-        "app.services.conversation.resumption_service.ProjectStartService"
-    ) as mock_svc_class:
+    with (
+        patch(
+            "app.services.conversation.resumption_service.assess_impact",
+            return_value=_disruptive_assessment(),
+        ),
+        patch("app.services.conversation.resumption_service.ProjectStartService") as mock_svc_class,
+    ):
         mock_svc = MagicMock()
         mock_svc.start.return_value = MagicMock()
         mock_svc_class.return_value = mock_svc
@@ -274,15 +283,20 @@ def test_disruptive_supersedes_non_terminal_tasks(db_session, make_project):
 
 def test_disruptive_updates_project_description(db_session, make_project):
     project = make_project()
-    blocked = _make_task(db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=1)
+    blocked = _make_task(
+        db_session, project.id, status=TASK_STATUS_AWAITING_REVIEW, sequence_order=1
+    )
     db_session.commit()
 
     new_goal = "Completely revised project goal"
 
-    with patch(
-        "app.services.conversation.resumption_service.assess_impact",
-        return_value=_disruptive_assessment(),
-    ), patch("app.services.conversation.resumption_service.ProjectStartService") as mock_svc_class:
+    with (
+        patch(
+            "app.services.conversation.resumption_service.assess_impact",
+            return_value=_disruptive_assessment(),
+        ),
+        patch("app.services.conversation.resumption_service.ProjectStartService") as mock_svc_class,
+    ):
         mock_svc = MagicMock()
         mock_svc.start.return_value = MagicMock()
         mock_svc_class.return_value = mock_svc

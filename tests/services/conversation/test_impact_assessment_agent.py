@@ -29,8 +29,18 @@ def _make_input(**overrides) -> ImpactAssessmentInput:
             CompletedTaskSummary(task_id=2, title="Define API routes"),
         ],
         pending_tasks=[
-            PendingTaskSummary(task_id=6, sequence_order=6, title="Create user model", description="SQLite ORM model"),
-            PendingTaskSummary(task_id=7, sequence_order=7, title="Write migration scripts", description="SQLite migrations"),
+            PendingTaskSummary(
+                task_id=6,
+                sequence_order=6,
+                title="Create user model",
+                description="SQLite ORM model",
+            ),
+            PendingTaskSummary(
+                task_id=7,
+                sequence_order=7,
+                title="Write migration scripts",
+                description="SQLite migrations",
+            ),
         ],
     )
     defaults.update(overrides)
@@ -90,7 +100,9 @@ def _raw_disruptive() -> dict:
 
 
 def test_assess_impact_narrow():
-    with patch("app.services.conversation.impact_assessment_agent.get_llm_provider") as mock_factory:
+    with patch(
+        "app.services.conversation.impact_assessment_agent.get_llm_provider"
+    ) as mock_factory:
         mock_provider = MagicMock()
         mock_provider.generate_structured.return_value = _raw_narrow()
         mock_factory.return_value = mock_provider
@@ -105,7 +117,9 @@ def test_assess_impact_narrow():
 
 
 def test_assess_impact_moderate():
-    with patch("app.services.conversation.impact_assessment_agent.get_llm_provider") as mock_factory:
+    with patch(
+        "app.services.conversation.impact_assessment_agent.get_llm_provider"
+    ) as mock_factory:
         mock_provider = MagicMock()
         mock_provider.generate_structured.return_value = _raw_moderate()
         mock_factory.return_value = mock_provider
@@ -122,7 +136,9 @@ def test_assess_impact_moderate():
 
 
 def test_assess_impact_disruptive():
-    with patch("app.services.conversation.impact_assessment_agent.get_llm_provider") as mock_factory:
+    with patch(
+        "app.services.conversation.impact_assessment_agent.get_llm_provider"
+    ) as mock_factory:
         mock_provider = MagicMock()
         mock_provider.generate_structured.return_value = _raw_disruptive()
         mock_factory.return_value = mock_provider
@@ -135,7 +151,9 @@ def test_assess_impact_disruptive():
 
 
 def test_assess_impact_raises_on_invalid_llm_output():
-    with patch("app.services.conversation.impact_assessment_agent.get_llm_provider") as mock_factory:
+    with patch(
+        "app.services.conversation.impact_assessment_agent.get_llm_provider"
+    ) as mock_factory:
         mock_provider = MagicMock()
         mock_provider.generate_structured.return_value = {"not": "valid"}
         mock_factory.return_value = mock_provider
@@ -147,7 +165,9 @@ def test_assess_impact_raises_on_invalid_llm_output():
 def test_assess_impact_with_no_completed_or_pending_tasks():
     inp = _make_input(completed_tasks=[], pending_tasks=[])
 
-    with patch("app.services.conversation.impact_assessment_agent.get_llm_provider") as mock_factory:
+    with patch(
+        "app.services.conversation.impact_assessment_agent.get_llm_provider"
+    ) as mock_factory:
         mock_provider = MagicMock()
         mock_provider.generate_structured.return_value = _raw_narrow()
         mock_factory.return_value = mock_provider

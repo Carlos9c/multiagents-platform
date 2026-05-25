@@ -26,6 +26,16 @@ VALID_CHANGE_TYPES = {
     CHANGE_TYPE_DELETED,
 }
 
+# ---------------------------------------------------------------------------
+# Observation type constants
+# Used by subagents when writing structured observations to ExecutionEvidence.
+# ---------------------------------------------------------------------------
+
+OBSERVATION_TYPE_ERROR_DIAGNOSIS = "error_diagnosis"
+OBSERVATION_TYPE_TEST_COVERAGE = "test_coverage_observation"
+OBSERVATION_TYPE_DEPENDENCY_REQUIRED = "dependency_required"
+OBSERVATION_TYPE_DOCUMENT_WARNING = "document_quality_warning"
+
 ChangeType = Literal["created", "modified"]
 
 
@@ -57,6 +67,8 @@ class HistoricalTaskRunContext(BaseModel):
     description: str | None = None
     summary: str | None = None
     objective: str | None = None
+    acceptance_criteria: str | None = None
+    proposed_solution: str | None = None
 
     run_summary: str | None = None
     completed_scope: str | None = None
@@ -162,6 +174,13 @@ class ExecutionEvidence(BaseModel):
     - This object is append-only during the orchestrator loop.
     - Callers should use the add_* methods instead of mutating the underlying lists directly.
     - Validation consumes the final accumulated state through ExecutionResult.evidence.
+
+    Observation contract:
+    - `observations` is the neutral, centralised channel for any structured subagent output
+      that does not fit the typed evidence fields above.
+    - Each subagent appends at most one observation per meaningful event using add_observation().
+    - Multiple observations from the same producer are valid and distinguished by evidence_type.
+    - Use the OBSERVATION_TYPE_* constants defined in this module as evidence_type values.
     """
 
     changed_files: list[ChangedFile] = Field(default_factory=list)
@@ -170,6 +189,7 @@ class ExecutionEvidence(BaseModel):
     commands: list[CommandExecution] = Field(default_factory=list)
     notes: list[NoteEvidence] = Field(default_factory=list)
     artifacts_created: list[ArtifactCreatedEvidence] = Field(default_factory=list)
+    observations: list[EvidenceItem] = Field(default_factory=list)
 
     def add_changed_file(
         self,
@@ -273,6 +293,25 @@ class ExecutionEvidence(BaseModel):
             )
         )
 
+    def add_observation(
+        self,
+        *,
+        evidence_type: str,
+        producer: str,
+        summary: str,
+        path: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self.observations.append(
+            EvidenceItem(
+                evidence_type=evidence_type,
+                producer=producer,
+                summary=summary,
+                path=path,
+                payload=payload or {},
+            )
+        )
+
     def add_artifact_created(
         self,
         *,
@@ -298,6 +337,7 @@ class ExecutionEvidence(BaseModel):
             or self.commands
             or self.notes
             or self.artifacts_created
+            or self.observations
         )
 
     def to_evidence_items(self) -> list[EvidenceItem]:
@@ -368,6 +408,8 @@ class ExecutionEvidence(BaseModel):
                     payload=item.model_dump(),
                 )
             )
+
+        items.extend(self.observations)
 
         return items
 

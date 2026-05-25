@@ -273,6 +273,7 @@ def test_android_bootstrap_writes_wrapper_scripts_when_gradlew_missing(
     assert "GradleWrapperMain" in gradlew_path.read_text()
     # chmod is a no-op on Windows; just verify the file is readable/writable
     import sys
+
     if sys.platform != "win32":
         assert oct(gradlew_path.stat().st_mode & 0o777) == oct(0o755)
 
@@ -296,7 +297,7 @@ def test_android_bootstrap_seeds_jar_only_when_gradlew_present(
     """When gradlew exists but JAR is missing, bootstrap falls straight to JAR extraction."""
     paths = storage.ensure_project_storage(2)
     gradlew_path = paths.source_dir / "gradlew"
-    gradlew_path.write_text("#!/bin/sh\nexec gradle \"$@\"\n", encoding="utf-8")
+    gradlew_path.write_text('#!/bin/sh\nexec gradle "$@"\n', encoding="utf-8")
 
     registry = DriverRegistry()
     registry.register("android_gradle", android_driver)
@@ -368,7 +369,7 @@ def test_android_bootstrap_skips_seeding_when_wrapper_already_complete(
     paths = storage.ensure_project_storage(2)
     # Pre-seed gradlew script
     gradlew_path = paths.source_dir / "gradlew"
-    gradlew_path.write_text("#!/bin/sh\nexec gradle \"$@\"\n", encoding="utf-8")
+    gradlew_path.write_text('#!/bin/sh\nexec gradle "$@"\n', encoding="utf-8")
     # Pre-seed JAR (must be >10KB to pass the size check)
     jar_path = paths.source_dir / "gradle" / "wrapper" / "gradle-wrapper.jar"
     jar_path.parent.mkdir(parents=True, exist_ok=True)

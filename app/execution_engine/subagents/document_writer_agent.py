@@ -10,6 +10,7 @@ from app.execution_engine.agent_runtime import BaseAgentRuntime
 from app.execution_engine.contracts import (
     CHANGE_TYPE_CREATED,
     CHANGE_TYPE_MODIFIED,
+    OBSERVATION_TYPE_DOCUMENT_WARNING,
     ExecutionRequest,
 )
 from app.execution_engine.execution_plan import ExecutionStep
@@ -160,6 +161,8 @@ def _build_historical_context_summary(request: ExecutionRequest) -> str:
         parts.append(f"  selection_reason: {item.selection_reason}")
         parts.append(f"  summary: {item.summary}")
         parts.append(f"  objective: {item.objective}")
+        parts.append(f"  acceptance_criteria: {item.acceptance_criteria}")
+        parts.append(f"  proposed_solution: {item.proposed_solution}")
         parts.append(f"  run_summary: {item.run_summary}")
         parts.append(f"  completed_scope: {item.completed_scope}")
         parts.append(f"  changed_files: {item.changed_files}")
@@ -457,9 +460,7 @@ class DocumentWriterAgent(BaseSubagent):
                 step.id,
                 str(exc),
             )
-            raise SubagentRejectedStepError(
-                f"Invalid document writer output: {str(exc)}"
-            ) from exc
+            raise SubagentRejectedStepError(f"Invalid document writer output: {str(exc)}") from exc
 
         logger.info(
             "document_writer_agent_files_planned task_id=%s step_id=%s file_count=%s",
@@ -534,9 +535,14 @@ class DocumentWriterAgent(BaseSubagent):
             state.evidence.add_note(message=note, producer=self.name)
 
         state.add_risk_flags(materialization.warnings)
-        state.add_note(
-            f"Document materialization completed for {len(ordered_files)} file(s)."
-        )
+        if materialization.warnings:
+            state.evidence.add_observation(
+                evidence_type=OBSERVATION_TYPE_DOCUMENT_WARNING,
+                producer=self.name,
+                summary=f"{len(materialization.warnings)} document quality warning(s) detected",
+                payload={"warnings": materialization.warnings},
+            )
+        state.add_note(f"Document materialization completed for {len(ordered_files)} file(s).")
 
         logger.info(
             "document_writer_agent_completed task_id=%s step_id=%s files_written=%s",

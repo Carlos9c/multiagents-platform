@@ -3,6 +3,7 @@
 Replaces the previous keyword-matching approach with a structured LLM call that
 understands project context and selects the most appropriate curated base image.
 """
+
 from __future__ import annotations
 
 import logging

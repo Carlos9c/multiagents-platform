@@ -362,7 +362,9 @@ def build_execution_plan_input(
 
     ordering_hints = _compute_ordering_hints(candidate_tasks)
     candidate_atomic_tasks = [
-        _build_candidate_atomic_task(task, task.parent_task, ordering_hints.get(task.id, "standard"))
+        _build_candidate_atomic_task(
+            task, task.parent_task, ordering_hints.get(task.id, "standard")
+        )
         for task in candidate_tasks
     ]
 

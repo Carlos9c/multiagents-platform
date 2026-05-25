@@ -10,6 +10,7 @@ from app.execution_engine.agent_runtime import BaseAgentRuntime
 from app.execution_engine.contracts import (
     CHANGE_TYPE_CREATED,
     CHANGE_TYPE_MODIFIED,
+    OBSERVATION_TYPE_DEPENDENCY_REQUIRED,
     ExecutionRequest,
 )
 from app.execution_engine.execution_plan import ExecutionStep
@@ -55,6 +56,18 @@ Hard rules:
 - Use the provided project context and historical execution context when relevant.
 - Do not validate final completion. Validation happens outside the execution engine.
 
+Scope restriction — test files:
+- Do NOT write test files (files meant to be run by pytest, jest, mocha, or any test runner).
+  Test file creation and modification is the exclusive responsibility of test_builder_agent.
+- Write ONLY implementation artifacts: source code, scripts, configuration files, migration
+  files, and other non-test executable or importable artifacts.
+- If the task context includes acceptance_criteria that appear to require test verification,
+  implement the code that satisfies those criteria — but leave test file writing to
+  test_builder_agent.
+- Exception: if the task explicitly instructs you to modify an existing test file as part
+  of an implementation fix (e.g. updating a fixture or a helper used across tests), that
+  modification is within scope. New test files are not.
+
 Important execution scope rule:
 - The provided files and workspace inventory are an initial context set, not a hard boundary.
 - You may modify any additional files that are necessary to complete the task correctly and coherently.
@@ -84,7 +97,7 @@ Implementation quality expectations:
 - Avoid fragile coupling to incidental file names, hidden side effects, or unnecessary indirection.
 - If a task can be completed inside an existing module or structure cleanly, prefer that over creating extra layers.
 - Only introduce configuration when it is required for the implementation to work inside the repository.
-- When a test or executable artifact is required, make the implementation compatible with straightforward repository-local execution.
+- When executable verification of the implementation is required, make it compatible with the project's existing test runner configuration. Do not create new test files — test_builder_agent handles that.
 - Avoid partial structural moves that force follow-up cleanups.
 - Do not create auxiliary verification scripts, smoke-test scripts, or throwaway entrypoints whose only purpose is to check if the implementation runs. Operational verification is the responsibility of the command_runner_agent using existing project tooling.
 
@@ -220,6 +233,8 @@ def _build_historical_context_summary(request: ExecutionRequest) -> str:
         parts.append(f"  selection_reason: {item.selection_reason}")
         parts.append(f"  summary: {item.summary}")
         parts.append(f"  objective: {item.objective}")
+        parts.append(f"  acceptance_criteria: {item.acceptance_criteria}")
+        parts.append(f"  proposed_solution: {item.proposed_solution}")
         parts.append(f"  run_summary: {item.run_summary}")
         parts.append(f"  completed_scope: {item.completed_scope}")
         parts.append(f"  validation_notes: {item.validation_notes}")
@@ -637,6 +652,12 @@ class CodeChangeAgent(BaseSubagent):
             state.evidence.add_note(
                 message=f"needs_dependency: {materialization.needs_dependency}",
                 producer=self.name,
+            )
+            state.evidence.add_observation(
+                evidence_type=OBSERVATION_TYPE_DEPENDENCY_REQUIRED,
+                producer=self.name,
+                summary=f"Dependency required: {materialization.needs_dependency}",
+                payload={"package_description": materialization.needs_dependency},
             )
             return state
 

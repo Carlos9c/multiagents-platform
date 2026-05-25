@@ -193,9 +193,7 @@ def test_ready_to_start_message_launches_project(db_session, make_project):
     mock_start_response = MagicMock()
     mock_start_response.tasks_created = 5
 
-    with patch(
-        "app.services.conversation.project_assistant.ProjectStartService"
-    ) as mock_svc_class:
+    with patch("app.services.conversation.project_assistant.ProjectStartService") as mock_svc_class:
         mock_svc = MagicMock()
         mock_svc.start.return_value = mock_start_response
         mock_svc_class.return_value = mock_svc
@@ -224,9 +222,7 @@ def test_notify_review_started_switches_phase(db_session, make_project):
     task = _make_task(db_session, project.id)
     db_session.commit()
 
-    response = notify_review_started(
-        db_session, conversation_id=conv.id, task_id=task.id
-    )
+    response = notify_review_started(db_session, conversation_id=conv.id, task_id=task.id)
 
     db_session.refresh(conv)
     assert conv.phase == CONVERSATION_PHASE_AWAITING_REVIEW
@@ -251,12 +247,15 @@ def test_review_insufficient_asks_question_without_limit(db_session, make_projec
     conv.review_episode_attempts = 10  # well past the old limit of 3
     db_session.commit()
 
-    with patch(
-        "app.services.conversation.project_assistant.evaluate_review",
-        return_value=_review_insufficient(),
-    ), patch(
-        "app.services.conversation.project_assistant._get_task_validation_notes",
-        return_value=None,
+    with (
+        patch(
+            "app.services.conversation.project_assistant.evaluate_review",
+            return_value=_review_insufficient(),
+        ),
+        patch(
+            "app.services.conversation.project_assistant._get_task_validation_notes",
+            return_value=None,
+        ),
     ):
         response = process_user_message(
             db_session, conversation_id=conv.id, user_message="Todavía no lo sé"
@@ -282,12 +281,15 @@ def test_review_ready_to_confirm_requests_confirmation(db_session, make_project)
     conv.review_subphase = REVIEW_SUBPHASE_GATHERING
     db_session.commit()
 
-    with patch(
-        "app.services.conversation.project_assistant.evaluate_review",
-        return_value=_review_ready_to_confirm(),
-    ), patch(
-        "app.services.conversation.project_assistant._get_task_validation_notes",
-        return_value=None,
+    with (
+        patch(
+            "app.services.conversation.project_assistant.evaluate_review",
+            return_value=_review_ready_to_confirm(),
+        ),
+        patch(
+            "app.services.conversation.project_assistant._get_task_validation_notes",
+            return_value=None,
+        ),
     ):
         response = process_user_message(
             db_session, conversation_id=conv.id, user_message="Usa PostgreSQL"
@@ -312,16 +314,17 @@ def test_review_confirmation_confirmed_resolves_review(db_session, make_project)
     conv.pending_clarification_summary = "Use PostgreSQL instead of SQLite"
     db_session.commit()
 
-    mock_resumption = ResumptionResult(
-        scope="narrow", message="Task retried.", reasoning="ok"
-    )
+    mock_resumption = ResumptionResult(scope="narrow", message="Task retried.", reasoning="ok")
 
-    with patch(
-        "app.services.conversation.project_assistant.evaluate_confirmation",
-        return_value=_confirmation_confirmed(),
-    ), patch(
-        "app.services.conversation.project_assistant.resume_after_review",
-        return_value=mock_resumption,
+    with (
+        patch(
+            "app.services.conversation.project_assistant.evaluate_confirmation",
+            return_value=_confirmation_confirmed(),
+        ),
+        patch(
+            "app.services.conversation.project_assistant.resume_after_review",
+            return_value=mock_resumption,
+        ),
     ):
         response = process_user_message(
             db_session, conversation_id=conv.id, user_message="Sí, adelante"
@@ -375,12 +378,15 @@ def test_review_abandoned_fails_task(db_session, make_project):
     conv.review_subphase = REVIEW_SUBPHASE_GATHERING
     db_session.commit()
 
-    with patch(
-        "app.services.conversation.project_assistant.evaluate_review",
-        return_value=_review_abandoned(),
-    ), patch(
-        "app.services.conversation.project_assistant._get_task_validation_notes",
-        return_value=None,
+    with (
+        patch(
+            "app.services.conversation.project_assistant.evaluate_review",
+            return_value=_review_abandoned(),
+        ),
+        patch(
+            "app.services.conversation.project_assistant._get_task_validation_notes",
+            return_value=None,
+        ),
     ):
         response = process_user_message(
             db_session, conversation_id=conv.id, user_message="Abandona esto"
@@ -500,9 +506,11 @@ def test_project_level_review_gathering_calls_evaluator_with_is_project_level_fl
     assert len(captured) == 1
     assert captured[0].is_project_level_error is True
     # The synthetic BlockedTaskContext must include the failure reason
-    assert "bootstrap" in captured[0].blocked_task.description.lower() or \
-           "bootstrap" in (captured[0].blocked_task.title or "").lower() or \
-           "bootstrap" in captured[0].blocked_task.description.lower()
+    assert (
+        "bootstrap" in captured[0].blocked_task.description.lower()
+        or "bootstrap" in (captured[0].blocked_task.title or "").lower()
+        or "bootstrap" in captured[0].blocked_task.description.lower()
+    )
 
 
 def test_project_level_review_resolution_transitions_to_executing(db_session, make_project):

@@ -41,6 +41,8 @@ class HistoricalTaskCatalogEntry(BaseModel):
     description: str | None = None
     summary: str | None = None
     objective: str | None = None
+    acceptance_criteria: str | None = None
+    proposed_solution: str | None = None
 
     task_type: str
     executor_type: str

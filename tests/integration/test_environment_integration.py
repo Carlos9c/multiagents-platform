@@ -316,9 +316,9 @@ def test_android_gradle_wrapper_jar_seeded_in_source_dir(
         jar_path = paths.source_dir / "gradle" / "wrapper" / "gradle-wrapper.jar"
         assert jar_path.exists(), "gradle-wrapper.jar missing from source_dir"
         # Verify the downloaded file is a valid JAR (ZIP format)
-        assert jar_path.stat().st_size > 10_000, (
-            f"gradle-wrapper.jar is suspiciously small ({jar_path.stat().st_size} bytes)"
-        )
+        assert (
+            jar_path.stat().st_size > 10_000
+        ), f"gradle-wrapper.jar is suspiciously small ({jar_path.stat().st_size} bytes)"
     finally:
         bootstrapper.teardown(project_id=400)
 
@@ -338,9 +338,9 @@ def test_android_gradle_run_command_uses_bash_login_shell(
         # `$BASH_VERSION` is only set inside a real bash process; sh returns empty
         result = driver.run_command(session, "echo $BASH_VERSION", tmp_path)
         assert result.succeeded
-        assert result.stdout.strip(), (
-            "Expected BASH_VERSION to be non-empty — run_command should use bash for android_gradle"
-        )
+        assert (
+            result.stdout.strip()
+        ), "Expected BASH_VERSION to be non-empty — run_command should use bash for android_gradle"
     finally:
         driver.stop_session(session)
 
@@ -392,7 +392,7 @@ def test_android_gradlew_runs_with_seeded_jar(
         gradlew.write_bytes(
             b"#!/bin/sh\n"
             b'APP_HOME=$(cd "$(dirname "$0")" && pwd)\n'
-            b'exec java \\\n'
+            b"exec java \\\n"
             b'    -classpath "$APP_HOME/gradle/wrapper/gradle-wrapper.jar" \\\n'
             b'    -Dgradle.user.home="$HOME/.gradle" \\\n'
             b'    org.gradle.wrapper.GradleWrapperMain "$@"\n'

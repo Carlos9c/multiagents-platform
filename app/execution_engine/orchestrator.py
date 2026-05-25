@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
@@ -12,6 +13,8 @@ from app.execution_engine.capabilities import render_executor_capabilities_for_p
 from app.execution_engine.contracts import (
     EXECUTION_DECISION_COMPLETED,
     EXECUTION_DECISION_FAILED,
+    OBSERVATION_TYPE_ERROR_DIAGNOSIS,
+    ExecutionEvidence,
     ExecutionRequest,
     ExecutionResult,
 )
@@ -68,7 +71,8 @@ Return ONLY JSON matching the provided schema.
 
 JSON field rules (enforced by the validator — violations cause the whole run to fail):
 - When decision_type is "finish", "reject", or "invalid": subagent_name MUST be null and target_paths MUST be an empty list.
-- When decision_type is "call_subagent": subagent_name MUST be a non-null string from {context_selection_agent, code_change_agent, command_runner_agent, document_writer_agent}.
+- When decision_type is "call_subagent": subagent_name MUST be a non-null string from
+  {context_selection_agent, code_change_agent, command_runner_agent, document_writer_agent, test_builder_agent, environment_manager_agent}.
 
 Core responsibility:
 - Look at the task, the current phase, the accumulated evidence, and the last executed subagent.
@@ -104,9 +108,34 @@ Phase model:
 
    Normal behavior:
    - Call context_selection_agent only if execution reveals a real and hard context gap.
-   - Call code_change_agent only if implementation work is needed: source code, tests, scripts, configuration files, or any file whose primary content is executable logic.
+   - Call code_change_agent only if implementation work is needed: source code, scripts, configuration files, or any file whose primary content is executable logic. Do not use it for pure test-writing tasks.
+   - Call test_builder_agent when task_type is "testing" or when the primary goal is writing test
+     files. test_builder_agent writes ONLY test files and produces a secondary coverage assessment.
+     For testing tasks, routing must be derived from the task's objective and acceptance_criteria —
+     not from whether test files already exist in the workspace:
+     * If the acceptance_criteria define success as test files being written and covering certain
+       cases → test_builder_agent is the primary deliverable-producing subagent.
+     * If the acceptance_criteria also require tests to run and pass (verification_level="runtime")
+       → plan to call command_runner_agent after test_builder_agent completes.
+     * If no new test files are needed and the task objective is to verify already-written test
+       behavior → command_runner_agent may be the appropriate first execution subagent.
+     The repair loop for testing tasks that require execution:
+       test_builder_agent → command_runner_agent → (on repairable failure, see fault_side below)
+       → repair subagent → command_runner_agent.
+       fault_side from error_diagnosis tells you which repair subagent to call:
+         "implementation" → code_change_agent (implementation has gaps the tests expose)
+         "test"           → test_builder_agent (test expectations are stale or wrong)
+         "both"           → code_change_agent first, then re-run tests
+         "environment"    → environment_manager_agent (missing package / system dep)
+         "uncertain"      → use overall_error_class and is_recoverable to decide
+   - Call environment_manager_agent when error_diagnosis.fault_side is "environment", or when
+     overall_error_class is "missing_dependency" and the failure is recoverable. This subagent
+     installs missing packages and updates the runtime manifest. Do not call code_change_agent
+     to fix dependency errors — route those to environment_manager_agent instead.
    - Call document_writer_agent only if the primary deliverable is a documentation or design artifact: README, architecture docs, ADRs, API specs, design documents, onboarding guides, specification files, or diagram-as-code files. document_writer_agent may embed code snippets inside those documents (e.g., examples in a README) but its output must be a text artifact, not a source code file meant to be executed or imported.
    - Do not call code_change_agent for tasks whose deliverable is a documentation or design artifact — route those to document_writer_agent instead.
+   - Do not call code_change_agent for tasks whose primary goal is writing test files — route those to test_builder_agent instead.
+   - Do not call test_builder_agent for implementation tasks whose deliverable is source code or configuration — route those to code_change_agent.
    - Do not call document_writer_agent for implementation tasks whose deliverable is a source code file, test file, or configuration file meant to be executed or imported.
    - Call command_runner_agent only if repository-local verification would materially improve the evidence.
    - Finish when the completion checklist says the pass is sufficient.
@@ -129,8 +158,44 @@ How to choose subagents:
 - Repository-local verification is not automatically required just because files changed.
 - For documentation, requirements, specification, README, or design-note tasks, use document_writer_agent — not code_change_agent. document_writer_agent may include code snippets inside those documents.
 - For documentation, requirements, specification, README, or design-note tasks, repository-local command execution is often not materially useful unless the task explicitly asks for a check, test, lint, build, or other executable verification step.
+- For tasks with task_type="testing", derive routing from the task's objective and
+  acceptance_criteria — not from file existence in the workspace. If success requires test
+  files to be written → test_builder_agent first. If success also requires tests to pass →
+  command_runner_agent after. On repairable failure → use fault_side from error_diagnosis
+  to pick the repair subagent (implementation → code_change_agent, test → test_builder_agent,
+  environment → environment_manager_agent) → command_runner_agent.
 - A failed verification attempt does not by itself prove that the task still has a concrete product gap.
 - If verification later succeeds and covers the task materially, do not continue the loop just because earlier attempts failed.
+
+Error diagnosis routing (when error_diagnosis observations are present in evidence_items):
+- When evidence_items contains observations with evidence_type="error_diagnosis", read them
+  as structured, reliable information produced by a two-step LLM analysis of an actual failure.
+- Do NOT ignore error_diagnosis observations. They contain more actionable information than
+  raw stdout/stderr text.
+- The "latest_error_diagnosis" section in this prompt surfaces the most recent one.
+- Use fault_side (PRIMARY) to guide which repair subagent to call:
+  - "implementation" → call code_change_agent to repair the identified issue in source code.
+  - "test"           → call test_builder_agent to fix stale or incorrect test expectations.
+  - "both"           → call code_change_agent first (fix implementation), then re-verify.
+  - "environment"    → call environment_manager_agent to install missing packages or fix deps.
+  - "uncertain"      → fall back to overall_error_class rules below.
+- When fault_side is absent or "uncertain", use overall_error_class as fallback:
+  - "compilation_failure", "assertion_failure", "lint_violation", "syntax_error",
+    "runtime_error", "script_error" → call code_change_agent to repair.
+  - "missing_dependency" with is_recoverable=true → call environment_manager_agent.
+  - "missing_dependency" with is_recoverable=false → reject (cannot be fixed here).
+  - "permission_error", "network_error", "timeout", "command_not_found" with
+    is_recoverable=false → the error is not repairable. Use reject.
+- confidence informs how certain you should be about the fault_side routing:
+  - "high" → trust fault_side and route accordingly.
+  - "medium" → follow fault_side but be ready to reconsider if the repair doesn't help.
+  - "low" → fault_side is a best guess; prefer reject over a potentially wrong repair loop.
+- Use repair_directive as the specific goal for the repair subagent call.
+- root_cause_errors (is_cascade=false) are the real errors to fix — fix those, not cascade errors.
+- cross_file_root_cause (if non-null) identifies a shared cause — repair the root once instead
+  of patching each cascade file individually.
+- newly_discovered_files are automatically loaded into preloaded_dependency_files before this
+  decision — they are already available to the next subagent.
 
 Binary completion checklist:
 You must explicitly reason over these four fields before deciding:
@@ -261,6 +326,8 @@ def _last_attempted_subagent_name(runtime_state: ExecutionState) -> str | None:
             "code_change_agent",
             "command_runner_agent",
             "document_writer_agent",
+            "test_builder_agent",
+            "environment_manager_agent",
         }:
             return agent_name
     return None
@@ -297,6 +364,8 @@ def _allowed_subagents_for_phase(phase: str) -> list[str]:
             "code_change_agent",
             "command_runner_agent",
             "document_writer_agent",
+            "test_builder_agent",
+            "environment_manager_agent",
         ]
 
     return []
@@ -496,6 +565,13 @@ def _document_writer_agent_completed_a_step(resolution_state: ResolutionState) -
     )
 
 
+def _test_builder_agent_completed_a_step(resolution_state: ResolutionState) -> bool:
+    return any(
+        _extract_subagent_name_from_step_id(step_id) == "test_builder_agent"
+        for step_id in resolution_state.completed_steps
+    )
+
+
 def _changed_files_look_documentation_only(resolution_state: ResolutionState) -> bool:
     changed_files = resolution_state.evidence.changed_files
     if not changed_files:
@@ -592,9 +668,8 @@ def _verification_would_materially_improve(
         # A setup command (chmod, mkdir, cp, etc.) enables subsequent work but does NOT
         # verify the task objective. When the task explicitly requires repo-local
         # verification, fall through so the actual test/build command still runs.
-        if (
-            _task_explicitly_requests_repo_local_verification(request)
-            and _command_is_setup_only(latest_command)
+        if _task_explicitly_requests_repo_local_verification(request) and _command_is_setup_only(
+            latest_command
         ):
             pass  # treat as if no real verification has run yet
         else:
@@ -634,12 +709,56 @@ def _failed_verification_is_repairable_by_repo_changes(
     resolution_state: ResolutionState,
     command,
 ) -> bool:
+    """
+    Return True when the latest failed verification command indicates an error
+    that can be repaired by changing repository files.
+
+    Priority 1 — Structured error diagnosis (Phase 2/3):
+      When an error_diagnosis observation is present in evidence, use its
+      `is_recoverable` and `overall_error_class` fields instead of string-matching.
+      This is more reliable because it reflects a two-step LLM analysis of the
+      actual failure output with access to referenced file contents.
+
+    Priority 2 — String-matching fallback:
+      When no structured diagnosis is available (tool failed or wasn't called),
+      fall back to heuristic markers in stdout/stderr.  This preserves the
+      original behaviour for cases where the diagnostic tool is unavailable.
+
+    In both paths, the function only returns True when repository files have
+    already been changed (resolution_state.evidence.changed_files is non-empty),
+    which ensures the repair signal is grounded in real evidence.
+    """
     if command is None:
         return False
 
     if _command_succeeded(command):
         return False
 
+    # --- Priority 1: structured diagnosis ---
+    diagnosis = _latest_error_diagnosis_observation(resolution_state.evidence)
+    if diagnosis is not None:
+        is_recoverable: bool = bool(diagnosis.get("is_recoverable", True))
+        if not is_recoverable:
+            # Explicitly non-recoverable (network, permission, command_not_found, etc.)
+            return False
+
+        fault_side: str = diagnosis.get("fault_side") or "uncertain"
+
+        # Environment failures are recoverable but NOT by changing repository files.
+        # They are handled by environment_manager_agent, not code_change_agent.
+        if fault_side == "environment":
+            return False
+
+        # Implementation / test / both failures are repairable by repo changes when
+        # there are already changed files that provide a basis for the repair.
+        if fault_side in ("implementation", "test", "both"):
+            return bool(resolution_state.evidence.changed_files)
+
+        # "uncertain" or missing fault_side → fall through to string-matching below.
+        # If there are changed files we optimistically treat it as repairable.
+        return bool(resolution_state.evidence.changed_files)
+
+    # --- Priority 2: string-matching fallback ---
     stdout = (getattr(command, "stdout", "") or "").lower()
     stderr = (getattr(command, "stderr", "") or "").lower()
     summary = (getattr(command, "observed_outcome_summary", "") or "").lower()
@@ -676,8 +795,25 @@ def _latest_step_failure_indicates_repairable_gap(
     if last_attempted_subagent == "context_selection_agent":
         return True
 
-    if last_attempted_subagent in {"code_change_agent", "document_writer_agent"}:
+    if last_attempted_subagent in {
+        "code_change_agent",
+        "document_writer_agent",
+        "test_builder_agent",
+    }:
         return True
+
+    if last_attempted_subagent == "environment_manager_agent":
+        # Distinguish between two cases:
+        # (a) env_manager SUCCEEDED: only prior command_runner failures remain in failed_steps.
+        #     There is a real gap — command_runner needs to re-run to verify the fixed env.
+        # (b) env_manager FAILED (SubagentRejectedStepError): its step ID is in failed_steps.
+        #     This is a terminal condition; no repair subagent can resolve a failed install.
+        #     (In practice Fix 4 returns immediately on env_manager failure, so this path
+        #     acts as defense-in-depth only.)
+        env_manager_step_failed = any(
+            "environment_manager_agent" in s for s in resolution_state.failed_steps
+        )
+        return not env_manager_step_failed
 
     if last_attempted_subagent == "command_runner_agent":
         latest_command = _latest_command_execution(resolution_state)
@@ -687,6 +823,15 @@ def _latest_step_failure_indicates_repairable_gap(
 
         if _command_succeeded(latest_command):
             return False
+
+        # Environment failures are repairable (by environment_manager_agent) even though
+        # _failed_verification_is_repairable_by_repo_changes returns False for them.
+        diagnosis = _latest_error_diagnosis_observation(resolution_state.evidence)
+        if diagnosis is not None:
+            fault_side = diagnosis.get("fault_side") or "uncertain"
+            is_recoverable = bool(diagnosis.get("is_recoverable", True))
+            if fault_side == "environment" and is_recoverable:
+                return True
 
         return _failed_verification_is_repairable_by_repo_changes(
             request=request,
@@ -713,6 +858,7 @@ def _build_completion_checklist(
         # implementation pass ran, even when keyword detection is ambiguous
         or _code_change_agent_completed_a_step(resolution_state)
         or _document_writer_agent_completed_a_step(resolution_state)
+        or _test_builder_agent_completed_a_step(resolution_state)
     )
 
     verification_needed = _verification_would_materially_improve(request, resolution_state)
@@ -727,9 +873,7 @@ def _build_completion_checklist(
             and _command_is_setup_only(latest_command)
         )
     )
-    local_verification_done_if_material = (
-        not verification_needed or latest_cmd_is_real_verification
-    )
+    local_verification_done_if_material = not verification_needed or latest_cmd_is_real_verification
 
     new_concrete_gap_detected = _latest_step_failure_indicates_repairable_gap(
         request,
@@ -857,8 +1001,24 @@ Completion checklist (use as a reasoning aid, not a hard rule):
 
 Checklist guidance:
 - When the first three fields are yes and the last is no, that is a strong signal to finish — but always verify against task_type and the actual accumulated evidence before deciding.
-- For implementation, testing, or configuration task types, do not finish unless at least one of code_change_agent or command_runner_agent has executed.
+- For implementation or configuration task types, do not finish unless at least one of code_change_agent or command_runner_agent has executed.
+- For testing task types:
+  * Do not finish unless at least one of test_builder_agent or code_change_agent has executed.
+  * When verification_level="runtime", local_verification_done_if_material requires
+    command_runner_agent to have executed successfully — test_builder_agent completing alone
+    does not satisfy it. If no command has run yet after test_builder_agent, continue.
+  * If command_runner_agent failed with a repairable error and new_concrete_gap_detected=yes,
+    consult error_diagnosis.fault_side to pick the repair subagent:
+      fault_side="implementation" → code_change_agent → command_runner_agent
+      fault_side="test"           → test_builder_agent → command_runner_agent
+      fault_side="both"           → code_change_agent → command_runner_agent
+      fault_side="environment"    → environment_manager_agent → command_runner_agent
+      fault_side="uncertain"      → use overall_error_class and is_recoverable to decide
+    Do not finish here — call the appropriate repair subagent first.
 - A checklist that looks satisfied but contradicts the task_type or the visible evidence means a subagent step was likely skipped — call the appropriate subagent instead of finishing.
+
+Latest error diagnosis (structured, from error_diagnostic_tool — use for routing decisions):
+{_render_error_diagnosis_for_prompt(resolution_state.evidence)}
 
 Accumulated execution evidence:
 - changed_files: {[item.model_dump() for item in resolution_state.evidence.changed_files]}
@@ -1020,6 +1180,136 @@ def _normalize_decision(
     return decision
 
 
+def _latest_error_diagnosis_observation(evidence: ExecutionEvidence) -> dict | None:
+    """
+    Return the payload dict of the most recent error_diagnosis observation, or None.
+
+    Scans observations in reverse so the most recently appended item is returned first.
+    """
+    for item in reversed(evidence.observations):
+        if item.evidence_type == OBSERVATION_TYPE_ERROR_DIAGNOSIS:
+            return item.payload
+    return None
+
+
+def _expand_context_from_error_diagnosis(
+    *,
+    resolution_state: ResolutionState,
+) -> bool:
+    """
+    Inspect the latest error_diagnosis observation for newly_discovered_files that are not
+    yet loaded in preloaded_dependency_files.  Read each missing file from the workspace
+    overlay (priority) or source baseline, then call replace_execution_request() so the
+    updated context is visible to all subsequent subagents and orchestrator decisions.
+
+    Called once at the top of every orchestrator loop iteration, before building the prompt
+    or checking forced-terminal conditions.
+
+    Returns True when at least one file was newly loaded, False when no expansion occurred.
+    The expansion is idempotent: files already present in preloaded_dependency_files are
+    skipped without re-reading.
+    """
+    diagnosis_payload = _latest_error_diagnosis_observation(resolution_state.evidence)
+    if not diagnosis_payload:
+        return False
+
+    newly_discovered: list[str] = diagnosis_payload.get("newly_discovered_files") or []
+    if not newly_discovered:
+        return False
+
+    active_request = resolution_state.execution_request
+    already_loaded = set(active_request.context.preloaded_dependency_files.keys())
+    missing = [p.strip() for p in newly_discovered if p and p.strip() not in already_loaded]
+    if not missing:
+        return False
+
+    workspace_root = active_request.context.workspace_path
+    source_root = active_request.context.source_path
+
+    new_files: dict[str, str] = {}
+    for rel_path in missing:
+        for base in filter(None, [workspace_root, source_root]):
+            base_path = Path(base).resolve()
+            candidate = (base_path / rel_path).resolve()
+            try:
+                candidate.relative_to(base_path)
+            except ValueError:
+                continue
+            if candidate.is_file():
+                try:
+                    content = candidate.read_text(encoding="utf-8", errors="replace")
+                    new_files[rel_path] = content
+                    break
+                except Exception:
+                    pass
+
+    if not new_files:
+        return False
+
+    expanded = {**active_request.context.preloaded_dependency_files, **new_files}
+    new_context = active_request.context.model_copy(update={"preloaded_dependency_files": expanded})
+    new_request = active_request.model_copy(update={"context": new_context})
+    resolution_state.replace_execution_request(new_request)
+
+    logger.info(
+        "orchestrator_error_diagnosis_context_expanded task_id=%s new_files_count=%s paths=%s",
+        active_request.task_id,
+        len(new_files),
+        list(new_files.keys()),
+    )
+    return True
+
+
+def _render_error_diagnosis_for_prompt(evidence: ExecutionEvidence) -> str:
+    """
+    Return a concise, prompt-ready summary of the latest error_diagnosis observation.
+    Returns a placeholder string when no diagnosis is present.
+    """
+    diagnosis = _latest_error_diagnosis_observation(evidence)
+    if not diagnosis:
+        return "latest_error_diagnosis: none"
+
+    overall_error_class = diagnosis.get("overall_error_class", "unknown")
+    fault_side = diagnosis.get("fault_side", "uncertain")
+    confidence = diagnosis.get("confidence", "medium")
+    is_recoverable = diagnosis.get("is_recoverable", True)
+    repair_directive = diagnosis.get("repair_directive", "")
+    cross_file_root_cause = diagnosis.get("cross_file_root_cause")
+    newly_discovered_files = diagnosis.get("newly_discovered_files") or []
+
+    root_cause_errors = [
+        e for e in (diagnosis.get("root_cause_errors") or []) if not e.get("is_cascade")
+    ]
+    cascade_errors = [e for e in (diagnosis.get("root_cause_errors") or []) if e.get("is_cascade")]
+
+    lines = [
+        "latest_error_diagnosis:",
+        f"  overall_error_class: {overall_error_class}",
+        f"  fault_side: {fault_side}",
+        f"  confidence: {confidence}",
+        f"  is_recoverable: {is_recoverable}",
+        f"  repair_directive: {repair_directive}",
+        f"  cross_file_root_cause: {cross_file_root_cause or 'null'}",
+        f"  newly_discovered_files_count: {len(newly_discovered_files)}",
+        f"  root_cause_errors_count: {len(root_cause_errors)}",
+        f"  cascade_errors_count: {len(cascade_errors)}",
+    ]
+
+    if root_cause_errors:
+        lines.append("  root_cause_errors:")
+        for err in root_cause_errors[:3]:  # cap at 3 to avoid prompt bloat
+            lines.append(f"    - file: {err.get('file_path', 'unknown')}")
+            lines.append(f"      message: {err.get('message', '')}")
+            lines.append(f"      error_type: {err.get('error_type', '')}")
+
+    if newly_discovered_files:
+        lines.append("  newly_discovered_files (already loaded into context):")
+        for path in newly_discovered_files[:8]:  # cap at 8
+            lines.append(f"    - {path}")
+
+    return "\n".join(lines)
+
+
 def _build_terminal_decision(
     *,
     rationale: str,
@@ -1055,8 +1345,18 @@ def _maybe_build_forced_terminal_decision(
     last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
     latest_command = _latest_command_execution(resolution_state)
 
+    # environment_manager_agent is intentionally excluded from this set.
+    # It installs packages but does NOT write repository files — it must not be treated
+    # as a file-writing pass, otherwise the forced-FINISH logic fires before
+    # command_runner_agent can re-verify the environment.
+    _file_writing_agents = {
+        "code_change_agent",
+        "document_writer_agent",
+        "test_builder_agent",
+    }
+
     if (
-        last_attempted_subagent in {"code_change_agent", "document_writer_agent"}
+        last_attempted_subagent in _file_writing_agents
         and bool(resolution_state.evidence.changed_files)
         and _verification_would_materially_improve(request, resolution_state) is False
         and not _latest_step_failure_indicates_repairable_gap(
@@ -1115,7 +1415,7 @@ def _maybe_build_forced_terminal_decision(
         )
 
     if (
-        last_attempted_subagent in {"code_change_agent", "document_writer_agent"}
+        last_attempted_subagent in _file_writing_agents
         and not resolution_state.evidence.changed_files
         and not resolution_state.failed_steps
         and resolution_state.completed_steps
@@ -1207,6 +1507,10 @@ class ExecutionOrchestrator:
         )
 
         while runtime_state.step_count < self.budget.max_steps:
+            # Expand context from any unprocessed error_diagnosis observations before
+            # building the prompt or checking forced-terminal conditions.
+            _expand_context_from_error_diagnosis(resolution_state=resolution_state)
+
             active_request = resolution_state.execution_request
 
             forced_terminal_decision = _maybe_build_forced_terminal_decision(
@@ -1529,6 +1833,42 @@ class ExecutionOrchestrator:
                         "error": str(exc),
                     },
                 )
+
+                # environment_manager_agent rejects are terminal: a failed package install
+                # cannot be resolved by calling any other subagent in the repair loop.
+                # Route immediately to manual review rather than consuming repair budget.
+                if decision.subagent_name == "environment_manager_agent":
+                    _append_trace_notes_to_evidence(resolution_state)
+                    logger.warning(
+                        "execution_orchestrator_env_manager_rejected_terminal task_id=%s error=%s",
+                        active_request.task_id,
+                        str(exc),
+                    )
+                    return (
+                        ExecutionResult(
+                            task_id=active_request.task_id,
+                            decision=EXECUTION_DECISION_FAILED,
+                            summary=(
+                                f"Environment package installation failed and cannot be "
+                                f"resolved automatically: {str(exc)}"
+                            ),
+                            details=(
+                                "The environment_manager_agent could not install the required "
+                                "packages. This requires manual intervention (e.g. user approval "
+                                "for a new package version or manual environment configuration)."
+                            ),
+                            remaining_scope=active_request.task_description
+                            or active_request.task_title,
+                            blockers_found=[f"ENV_INSTALL_FAILED:{str(exc)}"],
+                            validation_notes=[
+                                "environment_manager_agent rejected — package installation failed. "
+                                "Task forwarded for manual review."
+                            ],
+                            execution_agent_sequence=list(executed_subagents),
+                            evidence=resolution_state.evidence,
+                        ),
+                        active_request,
+                    )
 
             except Exception as exc:
                 logger.exception(

@@ -93,13 +93,16 @@ class DocumentationEngine:
                 request.task_id,
                 str(exc),
             )
-            return ExecutionResult(
-                task_id=request.task_id,
-                decision="failed",
-                summary=f"Document writer failed: {str(exc)}",
-                execution_agent_sequence=["context_selection_agent", "document_writer_agent"],
-                evidence=state.evidence,
-            ), request
+            return (
+                ExecutionResult(
+                    task_id=request.task_id,
+                    decision="failed",
+                    summary=f"Document writer failed: {str(exc)}",
+                    execution_agent_sequence=["context_selection_agent", "document_writer_agent"],
+                    evidence=state.evidence,
+                ),
+                request,
+            )
 
         files_written = state.evidence.changed_files
         file_count = len(files_written)
@@ -109,13 +112,16 @@ class DocumentationEngine:
                 "documentation_engine_no_files_produced task_id=%s",
                 request.task_id,
             )
-            return ExecutionResult(
-                task_id=request.task_id,
-                decision="failed",
-                summary="Document writer produced no output files.",
-                execution_agent_sequence=["context_selection_agent", "document_writer_agent"],
-                evidence=state.evidence,
-            ), request
+            return (
+                ExecutionResult(
+                    task_id=request.task_id,
+                    decision="failed",
+                    summary="Document writer produced no output files.",
+                    execution_agent_sequence=["context_selection_agent", "document_writer_agent"],
+                    evidence=state.evidence,
+                ),
+                request,
+            )
 
         completed_scope = ", ".join(f.path for f in files_written)
 
@@ -125,11 +131,14 @@ class DocumentationEngine:
             file_count,
         )
 
-        return ExecutionResult(
-            task_id=request.task_id,
-            decision="completed",
-            summary=f"Documentation generated: {file_count} file(s) written.",
-            completed_scope=completed_scope,
-            execution_agent_sequence=["context_selection_agent", "document_writer_agent"],
-            evidence=state.evidence,
-        ), request
+        return (
+            ExecutionResult(
+                task_id=request.task_id,
+                decision="completed",
+                summary=f"Documentation generated: {file_count} file(s) written.",
+                completed_scope=completed_scope,
+                execution_agent_sequence=["context_selection_agent", "document_writer_agent"],
+                evidence=state.evidence,
+            ),
+            request,
+        )

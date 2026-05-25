@@ -31,7 +31,9 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket, project_id: int) -> None:
         await websocket.accept()
         self._connections.setdefault(project_id, set()).add(websocket)
-        logger.info("ws_connected project_id=%s total=%s", project_id, len(self._connections[project_id]))
+        logger.info(
+            "ws_connected project_id=%s total=%s", project_id, len(self._connections[project_id])
+        )
 
     def disconnect(self, websocket: WebSocket, project_id: int) -> None:
         bucket = self._connections.get(project_id)

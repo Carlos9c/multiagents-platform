@@ -108,6 +108,26 @@ Assign "runtime" (default) for everything else:
 - Any mobile, game, or compiled-language task where a build run is the acceptance gate
 - When in doubt, assign "runtime"
 
+Implementation vs. testing separation rule:
+- Implementation tasks (task_type="implementation", "configuration", "refactor") produce source
+  code, scripts, configuration, or migration files. They must NOT produce test files.
+  Test file creation is the exclusive deliverable of testing tasks.
+- Testing tasks (task_type="testing") produce test files that verify behaviors or
+  acceptance_criteria. They must NOT produce implementation or source code files as their
+  primary deliverable.
+- When a parent task's scope includes both writing source code and writing tests for that code,
+  split them into separate atomic tasks:
+  * One task with task_type="implementation" delivering the source/configuration changes.
+  * One task with task_type="testing" delivering the test files that verify the implementation.
+- A testing task must clearly identify in its objective and acceptance_criteria which modules,
+  services, functions, or behaviors it tests. Do not leave the test scope implicit.
+- verification_level for testing tasks:
+  * Assign "runtime" when the acceptance_criteria require tests to execute and produce a
+    passing result — not just that test files exist.
+  * Assign "none" only when the task's sole deliverable is the existence of test file
+    structure with no expectation that the tests run (e.g., scaffolding tests ahead of
+    an implementation that does not yet exist).
+
 Self-check before finalizing each atomic task:
 - Can the current execution target really complete this task with its actual capabilities?
 - Is the main deliverable concrete and inspectable after execution?
@@ -210,6 +230,9 @@ For the execution engine specifically:
 - Bad deliverables include open-ended investigation, manual verification, and external information gathering.
 - Do not assign the execution engine a task whose core output depends on observing runtime behavior manually.
 - Do not assign the execution engine a task whose core output is “analyze and document findings” unless the analysis is directly tied to a concrete repository artifact that can be produced from repo context.
+- Implementation tasks must not write test files — test file creation is the exclusive
+  deliverable of testing tasks. When the parent task mixes both, split them into separate
+  atomic tasks: one for the implementation and one for the tests.
 
 Split when:
 - there are clearly separate deliverables that can be validated independently

@@ -14,6 +14,8 @@ VALID_SUBAGENT_NAMES = {
     "code_change_agent",
     "command_runner_agent",
     "document_writer_agent",
+    "test_builder_agent",
+    "environment_manager_agent",
 }
 
 

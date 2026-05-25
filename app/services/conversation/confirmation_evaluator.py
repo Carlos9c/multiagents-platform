@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ConfirmationEvaluatorInput:
-    action_summary: str    # The plan Aria proposed
-    user_response: str     # Latest user message
+    action_summary: str  # The plan Aria proposed
+    user_response: str  # Latest user message
 
 
 class ConfirmationEvaluatorLLMOutput(BaseModel):

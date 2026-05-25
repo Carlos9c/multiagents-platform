@@ -137,11 +137,7 @@ def mark_tasks_superseded(
     if not task_ids:
         return 0
 
-    updated = (
-        db.query(Task)
-        .filter(Task.id.in_(task_ids))
-        .all()
-    )
+    updated = db.query(Task).filter(Task.id.in_(task_ids)).all()
     for task in updated:
         task.status = TASK_STATUS_SUPERSEDED
 

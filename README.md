@@ -34,6 +34,10 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Cambios recientes significativos
 
+- **EnvironmentManager — cobertura completa de ecosistemas**: el `EnvironmentManager` ahora soporta instalación incremental de dependencias en todos los ecosistemas del catálogo. Nuevas estrategias: `GoStrategy` (`go get` + `go mod tidy`), `RustStrategy` (`cargo add` + `cargo fetch`), `DotnetStrategy` (`dotnet add package`). `JvmStrategy` completamente reescrita: edita `pom.xml` con `xml.etree.ElementTree`, edita `build.gradle` / `build.gradle.kts` con conteo de llaves (soporta Groovy DSL y Kotlin DSL), y detecta proyectos Flutter por `pubspec.yaml` (`flutter pub add`). Los archivos de manifiesto modificados en disco (`pom.xml`, `Cargo.toml`, `go.mod`, `.csproj`, `pubspec.yaml`) se propagan a `InstallResult.manifest_files_changed` → `EnvironmentManagerOutput.manifest_files_changed` → evidence del orquestador.
+
+- **EnvironmentManagerAgent + ErrorDiagnosis (`fault_side`)**: nuevo subagente `environment_manager_agent` que el orquestador invoca cuando `error_diagnosis.fault_side == "environment"`. Extrae los paquetes a instalar via LLM con un prompt que conoce la convención de nomenclatura de cada ecosistema (coordenadas Maven, rutas de módulo Go, nombres de crate, NuGet IDs). Registra los archivos de manifiesto como `changed_files` en evidencia. `ErrorDiagnosis` incorpora los campos `fault_side` (`"code"` | `"environment"` | `"uncertain"`) y `confidence` con valores por defecto para compatibilidad con payloads legacy.
+
 - **Catálogo de imágenes Docker v2 (11 imágenes, selector LLM)**: reemplaza la detección por keywords por una llamada LLM estructurada que selecciona la imagen más adecuada del catálogo. Imágenes cubren Python, Node, Java, Rust, Go, .NET, Android, Flutter, React Native, y dos fullstack (py+node, java+node). Todas las imágenes llevan labels OCI (`org.opencontainers.image.*`) y `agente.catalog.*`. Script `scripts/build-catalog-images.sh` para construir y smoke-testear el catálogo completo.
 
 - **`verification_level` en tareas atómicas**: nuevo campo `"runtime"` | `"none"` (default `"runtime"`) en `Task`. Cuando `"none"`, el orquestador nunca invoca `command_runner_agent`, eliminando loops de verificación costosos para cambios puramente estructurales en proyectos compilados (Android, Flutter, .NET, etc.). Threaded a través de `AtomicTaskOutput` → `Task` → `ExecutionRequest` → orchestrator.
@@ -51,7 +55,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Números actuales
 
-- **492 tests unitarios** — todos passing
+- **733 tests unitarios** — todos passing
 - **12 tests de integración** (Docker) — se ejecutan con `-m integration`
 - **0 failures** en CI
 
@@ -277,6 +281,31 @@ Todas las imágenes incluyen labels OCI (`org.opencontainers.image.*`) y `agente
 
 **Ecosistemas build-system** (Gradle, Maven, Cargo, Go, .NET, Flutter): el bootstrapper no instala dependencias de la aplicación — se declaran en los archivos del proyecto y se resuelven en el primer build. El smoke test verifica el toolchain.
 
+### EnvironmentManager — instalación incremental
+
+El `EnvironmentManager` (`manager.py`) instala paquetes de forma incremental en un contenedor en ejecución, sin teardown. Se invoca desde:
+- `EnvironmentManagerAgent`: cuando el orquestador diagnostica `fault_side == "environment"` durante una tarea
+- `_apply_environment_delta()` en `ResumptionService`: cuando el `ImpactAssessmentAgent` detecta `environment_changes` en la clarificación del usuario
+
+**Estrategias por ecosistema (`manager_strategies/`):**
+
+| Estrategia | runtime_type | Mecanismo |
+|---|---|---|
+| `PythonStrategy` | `python_venv`, `fullstack_py_node` | `pip install` con fallback sin versión |
+| `NodeStrategy` | `node_npm`, `react_native` | `npm install` con fallback sin versión |
+| `GoStrategy` | `go` | `go get pkg@vX.Y.Z` + `go mod tidy`; requiere `go.mod` en workspace |
+| `RustStrategy` | `rust_cargo` | `cargo add pkg@version` + `cargo fetch`; requiere `Cargo.toml` |
+| `DotnetStrategy` | `dotnet` | `dotnet add "x.csproj" package Pkg --version V`; busca `.csproj`/`.fsproj` |
+| `JvmStrategy` | `java_maven`, `java_gradle`, `android_gradle` | Maven: edita `pom.xml` con `xml.etree.ElementTree` → `mvn dependency:resolve`; Gradle: edita `build.gradle[.kts]` con conteo de llaves → `./gradlew dependencies`; Flutter: `flutter pub add` (detectado por `pubspec.yaml`) |
+| `GenericStrategy` | (fallback) | `pip install` genérico |
+
+Los archivos de manifiesto modificados en disco (`pom.xml`, `Cargo.toml`, `go.mod`, `.csproj`, `pubspec.yaml`) se registran en `InstallResult.manifest_files_changed` y propagados hasta `EnvironmentManagerOutput.manifest_files_changed`. El `EnvironmentManagerAgent` los añade a `evidence.changed_files` para que los validadores y el orquestador los detecten como cambios de repositorio.
+
+**Políticas de versión:**
+- `exact_only` — falla si la versión exacta no está disponible; escala a `needs_user_input`
+- `preferred` — intenta la versión solicitada; instala la última disponible si falla
+- `any_compatible` — instala directamente la última versión compatible (modo del orquestador)
+
 ### Componentes
 
 | Archivo | Rol |
@@ -290,6 +319,9 @@ Todas las imágenes incluyen labels OCI (`org.opencontainers.image.*`) y `agente
 | `validator.py` | Ejecuta el smoke test y decide si el entorno está listo |
 | `session_store.py` | Persiste y recupera `EnvironmentSession` activas por proyecto |
 | `contracts.py` | Tipos compartidos: `RuntimeSpec`, `EnvironmentSession`, `EnvironmentCommandResult` |
+| `manager.py` | `EnvironmentManager`: selección de estrategia, loop de instalación, rollback, actualización del `RuntimeSpec` en memoria |
+| `manager_contracts.py` | `EnvironmentManagerRequest`, `EnvironmentManagerOutput`, `PackageRequest`, `PackageInstallation` |
+| `manager_strategies/` | Estrategias por ecosistema: `python`, `node`, `go`, `rust`, `dotnet`, `jvm`, `generic` |
 
 ### Tipos clave
 
@@ -351,11 +383,18 @@ class LoopBudget:
 
 | Subagente | Rol |
 |---|---|
-| `context_selection_agent` | Selecciona tareas históricas completadas relevantes como contexto |
-| `code_change_agent` | Materializa cambios de código (create/modify files) |
+| `context_selection_agent` | Selecciona tareas históricas completadas relevantes como contexto (fase discovery) |
+| `code_change_agent` | Materializa cambios de código y de aplicación (create/modify files) |
 | `command_runner_agent` | Ejecuta y verifica comandos shell en dos fases: selección de archivos → planificación del comando |
+| `document_writer_agent` | Produce documentación y artefactos de diseño: Markdown, YAML/JSON (OpenAPI, AsyncAPI), RST, AsciiDoc, diagramas como código (PlantUML, Mermaid) |
+| `test_builder_agent` | Escribe ficheros de test basándose en los `acceptance_criteria` de la tarea; evalúa la cobertura en una fase separada e informa de gaps |
+| `environment_manager_agent` | Instala paquetes faltantes diagnosticados como `fault_side=="environment"`; invoca `EnvironmentManager`, persiste `RuntimeSpec`, registra archivos de manifiesto modificados en evidencia |
 
 Cada subagente recibe `(ExecutionRequest, ExecutionStep, ResolutionState)` y retorna un `ResolutionState` actualizado.
+
+**`environment_manager_agent`** es un agente de infraestructura, no un productor de entregables: está incluido en `IGNORED_VALIDATION_PRODUCERS` para que su evidencia no pase a los validadores. Si falla, el orquestador lo trata como terminal (`SubagentRejectedStepError` → `EXECUTION_DECISION_FAILED`) en lugar de entrar en un loop de reparación.
+
+**`ErrorDiagnosis`** (`app/execution_engine/error_diagnosis.py`): los campos `fault_side` (`"code"` | `"environment"` | `"uncertain"`) y `confidence` (`"low"` | `"medium"` | `"high"`) guían la decisión del orquestador sobre si invocar `environment_manager_agent` o `code_change_agent`. Ambos campos tienen valores por defecto para compatibilidad con payloads sin estos campos.
 
 ---
 
@@ -701,13 +740,14 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**469 tests unitarios + 12 tests de integración — todos passing.**
+**733 tests unitarios + 12 tests de integración — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
 | Task execution service | `test_task_execution_service.py`, `test_task_execution_invariants.py`, `test_task_execution_validation_flow.py` |
 | Validation | `test_validation_service.py`, `test_code_change_agent_validator.py`, `test_command_runner_agent_validator.py`, `test_aggregation.py` |
 | Orchestrator + engine | `test_execution_engine.py`, `test_command_runner_agent_subagent.py`, `test_command_tool.py` |
+| ErrorDiagnosis + env_manager | `test_phase6_error_diagnosis.py` |
 | Recovery | `test_recovery_service.py`, `test_task_hierarchy_service.py` |
 | Post-batch | `test_post_batch_service.py`, `test_post_batch_service_problematic_outcomes.py`, `test_post_batch_decision_service.py` |
 | Live plan mutation | `test_live_plan_mutation_service.py` |
@@ -718,6 +758,7 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 | Workspace runtime | `test_local_workspace_runtime.py` |
 | Execution plan service | `test_execution_plan_service.py` |
 | Agente conversacional | `test_project_assistant.py` |
+| Environment — manager | `test_environment_manager.py`, `test_manager_strategies.py` |
 | Environment (integración) | `tests/integration/test_environment_integration.py` |
 | API | `test_projects.py` |
 
@@ -730,8 +771,8 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 **1. Soporte multi-stage**
 El sistema ejecuta un único stage por proyecto. Para proyectos reales con múltiples stages secuenciales (ej. "backend" → "frontend" → "integración"), el `ProjectWorkflowService` necesita un loop externo que cierre el stage actual, genere el siguiente, y reutilice el contexto acumulado. Las bases ya están: `project_stage_closed`, `stage_goal`, y la memoria de proyecto (`ProjectOperationalContext`) son stage-aware.
 
-**2. Pre-fetch de dependencias en bootstrap para proyectos existentes**
-Para proyectos con archivos de dependencias ya escritos por los code agents (`build.gradle`, `pom.xml`, `Cargo.toml`, `go.mod`, `*.csproj`, `pubspec.yaml`), el bootstrapper podría ejecutar un pre-fetch opcional (`./gradlew dependencies`, `mvn dependency:resolve`, `cargo fetch`, `go mod download`, `dotnet restore`, `flutter pub get`) antes de comenzar la ejecución de tareas. Reduciría el tiempo de primera build y daría feedback temprano sobre dependencias rotas.
+**2. Pre-fetch de dependencias en el bootstrapper para ecosistemas compilados**
+Cuando los `code_change_agent` escriben archivos de manifiesto (`pom.xml`, `Cargo.toml`, `go.mod`, `.csproj`, `pubspec.yaml`) durante la ejecución, el bootstrapper del siguiente run no ejecuta pre-fetch. Añadir una fase opcional en `bootstrapper.py` que detecte la presencia de estos archivos y ejecute el comando de descarga antes del smoke test (`mvn dependency:resolve -q`, `cargo fetch`, `go mod download`, `dotnet restore`, `./gradlew dependencies -q`, `flutter pub get`). Reduciría el tiempo de primera compilación y daría feedback temprano sobre manifests rotos, antes de que el code agent empiece a escribir código que los use.
 
 **3. Tests de integración end-to-end del flujo conversacional**
 Tests de `project_assistant` mockeando el WebSocket y el workflow en background para verificar el flujo completo: inicio de conversación → gathering → proyecto iniciado → revisión manual → confirmación → reanudación. Actualmente los tests del agente conversacional usan DB real pero mockean todos los evaluadores LLM.
@@ -785,3 +826,4 @@ Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter s
 | Jerarquía | Propagación determinista; rollback si falla algún paso; sin efectos parciales sobre padres |
 | Descomposición | `MAX_ATOMIC_TASKS_PER_PARENT = 8`; `MAX_IMPLEMENTATION_STEPS_PER_ATOMIC = 20` |
 | Entorno | Smoke test obligatorio antes de usar el contenedor; repair automático con LLM ante fallo de bootstrap; selección de imagen via LLM con fallback a imagen libre si ninguna del catálogo encaja |
+| EnvironmentManager | `environment_manager_agent` no produce entregables validables (en `IGNORED_VALIDATION_PRODUCERS`); su fallo es terminal (no entra en loop de reparación); `exact_only` + conflicto de versión → `needs_user_input`; archivos de manifiesto modificados en disco siempre se registran en evidencia independientemente del éxito de la instalación |

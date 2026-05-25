@@ -95,10 +95,13 @@ The orchestrator does **not** judge quality — it only coordinates operationall
 - `ResolutionState` tracks phase, evidence, subagent call history, and decision history across the loop
 - **Budget exhaustion** → result is `COMPLETED` (not `FAILED`) so accumulated work is forwarded to validation
 
-**Three subagents** (`app/execution_engine/subagents/`):
-- `context_selection_agent` — selects historical completed tasks for execution context
-- `code_change_agent` — materializes code changes (create/modify files)
+**Six subagents** (`app/execution_engine/subagents/`):
+- `context_selection_agent` — selects historical completed tasks for execution context (discovery phase)
+- `code_change_agent` — materializes code and application file changes (create/modify)
 - `command_runner_agent` — runs and verifies shell commands, records evidence
+- `document_writer_agent` — produces documentation and design artifacts: Markdown, YAML/JSON (OpenAPI, AsyncAPI), RST, AsciiDoc, diagram-as-code (PlantUML, Mermaid)
+- `test_builder_agent` — writes test files driven by task `acceptance_criteria`; runs a separate coverage-assessment phase and emits gap observations
+- `environment_manager_agent` — installs missing packages when `error_diagnosis.fault_side == "environment"`; calls `EnvironmentManager`, persists `RuntimeSpec`, registers modified manifest files in evidence; failure is terminal (no repair loop); listed in `IGNORED_VALIDATION_PRODUCERS`
 
 Each subagent receives `(ExecutionRequest, ExecutionStep, ResolutionState)` and returns an updated `ResolutionState`.
 
@@ -110,14 +113,25 @@ Docker-based execution environment. Key components:
 - `docker_driver.py` — Docker SDK wrapper; handles 409 Conflict on concurrent container removal
 - `session_store.py` — persists active `EnvironmentSession` per project
 - `contracts.py` — `RuntimeSpec`, `EnvironmentSession`, `EnvironmentCommandResult`
+- `manager.py` — `EnvironmentManager`: incremental package install into a running container; selects strategy by `RuntimeSpec.runtime_type`, loops over packages, rolls back on `exact_only` conflict, updates `RuntimeSpec` in memory
+- `manager_contracts.py` — `EnvironmentManagerRequest`, `EnvironmentManagerOutput`, `PackageRequest`, `PackageInstallation`
+- `manager_strategies/` — per-ecosystem strategies: `PythonStrategy` (pip), `NodeStrategy` (npm), `GoStrategy` (go get + go mod tidy), `RustStrategy` (cargo add + cargo fetch), `DotnetStrategy` (dotnet add package + .csproj discovery), `JvmStrategy` (pom.xml XML editing → mvn, build.gradle text editing → gradlew, flutter pub add for Flutter projects), `GenericStrategy` (fallback pip)
+
+**EnvironmentManager design contracts:**
+- Strategies receive `workspace_path` so compiled-ecosystem strategies (JVM, Go, Rust, .NET) can edit manifest files on the host filesystem; the Docker volume mount makes changes immediately visible inside the container
+- `InstallResult.manifest_files_changed` — list of relative paths modified on disk (populated by compiled strategies; empty for pip/npm)
+- `EnvironmentManagerOutput.manifest_files_changed` — propagated up from strategy results; the agent registers these as `evidence.changed_files` so validators see them
+- Version fallback: `preferred` / `any_compatible` retry without pinned version; `exact_only` surfaces `needs_user_input` without retry
 
 Schema note: `RuntimeEnvironmentPlanOutput.environment_variables` is `list[EnvVar]` (not `dict[str, str]`) to comply with OpenAI strict JSON schema requirements.
+
+**ErrorDiagnosis** (`app/execution_engine/error_diagnosis.py`): `fault_side: FaultSideLiteral = "uncertain"` and `confidence: DiagnosisConfidenceLiteral = "medium"` have defaults for backward compatibility with old evidence payloads. The orchestrator reads `fault_side` to decide whether to call `environment_manager_agent` (value `"environment"`) or `code_change_agent` (value `"code"`).
 
 ### Validation Layer (`app/services/validation/`)
 
 Independent from the execution layer. Runs after the engine returns:
 
-1. **Selection** (`selection.py`) — picks validators based on which subagents ran (1:1 mapping)
+1. **Selection** (`selection.py`) — picks validators based on which subagents ran (1:1 mapping). `IGNORED_VALIDATION_PRODUCERS = {"context_selection_agent", "execution_orchestrator", "environment_manager_agent"}` — evidence from these agents is excluded from validation input.
 2. **Execution** — each validator independently judges `TaskValidationInput` (request + result)
 3. **Aggregation** — merges results with priority: `failed > manual_review > partial > completed`
 
@@ -235,6 +249,6 @@ Note: Redis is **not used** — the `REDIS_URL` variable has been removed.
 
 Tests use SQLite in-memory (`:memory:`) via pytest fixtures in `tests/conftest.py`. Key fixtures: `db_session`, `make_project`, `make_task`, `make_execution_run`. The conftest sets `DATABASE_URL=sqlite+pysqlite:///:memory:` and `AGENTS_PROJECTS_ROOT=.pytest_agents_projects`. The execution engine is typically monkeypatched in service tests. Conversation evaluators (LLM calls) are always monkeypatched in conversation tests.
 
-**Current count: 469 unit tests + 12 integration tests — all passing.**
+**Current count: 733 unit tests + 12 integration tests — all passing.**
 
 Integration tests (`tests/integration/`) require a live Docker daemon and are skipped by default. Run with `poetry run pytest -m integration`.

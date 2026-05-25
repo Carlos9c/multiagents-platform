@@ -86,6 +86,11 @@ class EnvironmentDependency(BaseModel):
     package_name: str
     version_constraint: str | None
     reason: str
+    version_strictness: str = "any_compatible"
+    # Allowed values: "exact_only" | "preferred" | "any_compatible"
+    # exact_only    — user explicitly requires this exact version; escalate if unavailable
+    # preferred     — install this version if possible, fall back to compatible one with a note
+    # any_compatible — any version that satisfies the dependency is acceptable (default)
 
 
 class ImpactAssessmentLLMOutput(BaseModel):
@@ -162,8 +167,14 @@ Rules:
 - environment_changes: populate this list if the clarification implies new libraries,
   frameworks, tools, or runtime dependencies that are not already part of the project.
   This applies to ALL scopes (narrow, moderate, disruptive). Leave empty if no new
-  dependencies are required. Each entry needs: package_name, version_constraint (or
-  null if any version is acceptable), and reason (why this dependency is needed).
+  dependencies are required. Each entry needs:
+  * package_name: the installable package name.
+  * version_constraint: the version string (e.g. "2.31.0") or null if any version is fine.
+  * reason: why this dependency is needed.
+  * version_strictness: how strictly to enforce the version ("exact_only" | "preferred" |
+    "any_compatible"). Use "exact_only" when the user explicitly requires a specific version
+    and it is not negotiable. Use "preferred" when a version is mentioned but alternatives
+    are acceptable. Use "any_compatible" (default) when no version is specified.
 
 Return ONLY JSON matching the provided schema.
 """.strip()
@@ -246,8 +257,7 @@ def assess_impact(inp: ImpactAssessmentInput) -> ImpactAssessmentResult:
         ) from exc
 
     logger.info(
-        "impact_assessment_complete scope=%s resequence=%s "
-        "tasks_to_modify=%d tasks_to_add=%d",
+        "impact_assessment_complete scope=%s resequence=%s " "tasks_to_modify=%d tasks_to_add=%d",
         llm_output.change_scope,
         llm_output.resequence_needed,
         len(llm_output.tasks_to_modify),

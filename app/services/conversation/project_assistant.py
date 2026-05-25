@@ -277,14 +277,15 @@ def start_project_manually(
     db.add(project)
 
     effective_description = (
-        description
-        or conversation.requirements_draft
-        or project.description
-        or ""
+        description or conversation.requirements_draft or project.description or ""
     )
     return _start_project(
-        db, conversation, project, effective_description,
-        source_path=source_path, manual_update=manual_update,
+        db,
+        conversation,
+        project,
+        effective_description,
+        source_path=source_path,
+        manual_update=manual_update,
     )
 
 
@@ -531,13 +532,20 @@ def _handle_review_gathering(
     if result.status == "ready_to_confirm":
         if is_project_level:
             return _request_review_confirmation(
-                db, conversation, task=None, project=project,
+                db,
+                conversation,
+                task=None,
+                project=project,
                 clarification_summary=result.clarification_summary or user_message,
-                action_summary=result.action_summary or "Actualizar la configuración del proyecto y reanudar.",
+                action_summary=result.action_summary
+                or "Actualizar la configuración del proyecto y reanudar.",
             )
         task = _get_review_task_or_raise(db, conversation)
         return _request_review_confirmation(
-            db, conversation, task=task, project=project,
+            db,
+            conversation,
+            task=task,
+            project=project,
             clarification_summary=result.clarification_summary or user_message,
             action_summary=result.action_summary or "Proceder con los cambios necesarios.",
         )
@@ -796,7 +804,9 @@ def _handle_project_query(
         )
     except ProjectQueryError as exc:
         logger.warning("project_query_failed conversation_id=%s error=%s", conversation.id, exc)
-        reply = "Lo siento, no pude procesar tu pregunta en este momento. ¿Puedes intentarlo de nuevo?"
+        reply = (
+            "Lo siento, no pude procesar tu pregunta en este momento. ¿Puedes intentarlo de nuevo?"
+        )
 
     _append_message(db, conversation.id, MESSAGE_ROLE_ASSISTANT, reply)
     db.commit()
@@ -829,9 +839,7 @@ def _get_project_or_raise(db: Session, project_id: int) -> Project:
 
 def _get_review_task_or_raise(db: Session, conversation: Conversation) -> Task:
     if conversation.review_task_id is None:
-        raise ProjectAssistantError(
-            f"Conversation {conversation.id} has no review_task_id set"
-        )
+        raise ProjectAssistantError(f"Conversation {conversation.id} has no review_task_id set")
     task = db.get(Task, conversation.review_task_id)
     if task is None:
         raise ProjectAssistantError(f"Review task {conversation.review_task_id} not found")
@@ -944,9 +952,7 @@ def _build_task_summary_for_review(
     if not tasks:
         return None
 
-    completed = [
-        t for t in tasks if t.status == TASK_STATUS_COMPLETED and t.id != blocked_task_id
-    ]
+    completed = [t for t in tasks if t.status == TASK_STATUS_COMPLETED and t.id != blocked_task_id]
     failed = [t for t in tasks if t.status == TASK_STATUS_FAILED and t.id != blocked_task_id]
     pending = [
         t for t in tasks if t.status not in TERMINAL_TASK_STATUSES and t.id != blocked_task_id
@@ -967,9 +973,7 @@ def _build_task_summary_for_review(
 
 
 def _build_review_opening(task: Task, validation_notes: str | None) -> str:
-    base = (
-        f"He detectado un problema con la tarea «{task.title}» que necesita tu ayuda para continuar."
-    )
+    base = f"He detectado un problema con la tarea «{task.title}» que necesita tu ayuda para continuar."
     if validation_notes:
         base += f"\n\nMotivo del bloqueo: {validation_notes}"
     base += "\n\n¿Podrías indicarme cómo quieres resolver esta situación?"
@@ -985,19 +989,27 @@ def _build_workflow_error_opening(failure_reason: str) -> str:
     # Classify the failure type from the reason string so we can offer targeted options.
     reason_lower = failure_reason.lower()
 
-    if any(kw in reason_lower for kw in ("environment", "docker", "bootstrap", "entorno", "imagen")):
+    if any(
+        kw in reason_lower for kw in ("environment", "docker", "bootstrap", "entorno", "imagen")
+    ):
         options = (
             "• Cambia la imagen base o las dependencias del entorno (descríbeme qué stack técnico necesita tu proyecto)\n"
             "• Ajusta los requisitos técnicos del proyecto para usar una configuración diferente\n"
             "• Si el problema es de conectividad temporal, puedo volver a intentarlo con las mismas opciones"
         )
-    elif any(kw in reason_lower for kw in ("empty", "vacío", "no batches", "no tasks", "sin tareas", "empty_execution_plan")):
+    elif any(
+        kw in reason_lower
+        for kw in ("empty", "vacío", "no batches", "no tasks", "sin tareas", "empty_execution_plan")
+    ):
         options = (
             "• Describe más concretamente qué queda por hacer en el proyecto\n"
             "• Indica si hay tareas específicas que deben ejecutarse aunque ya estén marcadas como completadas\n"
             "• Actualiza el objetivo del proyecto para reflejar el trabajo pendiente real"
         )
-    elif any(kw in reason_lower for kw in ("iteration", "iteraci", "limit", "límite", "exhausted", "agotado")):
+    elif any(
+        kw in reason_lower
+        for kw in ("iteration", "iteraci", "limit", "límite", "exhausted", "agotado")
+    ):
         options = (
             "• Indica criterios de aceptación más concretos para determinar cuándo una tarea está completa\n"
             "• Describe qué resultados son aceptables aunque no sean perfectos\n"
@@ -1025,12 +1037,19 @@ def _build_project_level_block_context(conversation: Conversation) -> BlockedTas
     reason is retrieved from review_failure_context (persists across gathering/confirmation
     round-trips, unlike pending_clarification_summary which gets overwritten).
     """
-    failure_reason = conversation.review_failure_context or "Error desconocido en el flujo de trabajo."
+    failure_reason = (
+        conversation.review_failure_context or "Error desconocido en el flujo de trabajo."
+    )
 
     reason_lower = failure_reason.lower()
-    if any(kw in reason_lower for kw in ("environment", "docker", "bootstrap", "entorno", "imagen")):
+    if any(
+        kw in reason_lower for kw in ("environment", "docker", "bootstrap", "entorno", "imagen")
+    ):
         title = "Error de configuración del entorno de ejecución"
-    elif any(kw in reason_lower for kw in ("empty", "vacío", "no batches", "sin tareas", "empty_execution_plan")):
+    elif any(
+        kw in reason_lower
+        for kw in ("empty", "vacío", "no batches", "sin tareas", "empty_execution_plan")
+    ):
         title = "Plan de ejecución vacío — sin tareas ejecutables"
     elif any(kw in reason_lower for kw in ("iteration", "iteraci", "limit", "límite", "exhausted")):
         title = "Límite de iteraciones del flujo de trabajo alcanzado"

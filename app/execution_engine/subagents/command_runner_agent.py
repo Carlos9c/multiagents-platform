@@ -8,11 +8,13 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy.orm import Session
 
 from app.execution_engine.agent_runtime import BaseAgentRuntime
-from app.execution_engine.contracts import ExecutionRequest
+from app.execution_engine.contracts import OBSERVATION_TYPE_ERROR_DIAGNOSIS, ExecutionRequest
+from app.execution_engine.error_diagnosis import ErrorDiagnosis
 from app.execution_engine.execution_plan import ExecutionStep
 from app.execution_engine.resolution_state import ResolutionState
 from app.execution_engine.subagents.base import BaseSubagent, SubagentRejectedStepError
 from app.execution_engine.tools.command_tool import CommandToolError, run_command
+from app.execution_engine.tools.error_diagnostic_tool import run_error_diagnosis
 from app.execution_engine.tools.file_reader_tool import read_text_file
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
 from app.services.environment.registry import get_driver_registry
@@ -596,6 +598,91 @@ def _validate_planned_command(plan: CommandVerificationPlan) -> None:
         )
 
 
+def _read_files_for_context_expansion(
+    *,
+    paths: list[str],
+    workspace_root: str,
+    source_root: str,
+) -> dict[str, str]:
+    """
+    Read repository files from the workspace overlay or source baseline.
+
+    Called after the ephemeral run tree is cleaned up to preload the files listed
+    in ErrorDiagnosis.newly_discovered_files into the execution context so the next
+    subagent (e.g. code_change_agent) has immediate access to them.
+
+    Workspace overlay takes priority over source baseline (same lookup order as the
+    file-writing subagents). Files that cannot be found in either layer are skipped
+    silently.
+    """
+    workspace = Path(workspace_root).resolve()
+    source = Path(source_root).resolve()
+    contents: dict[str, str] = {}
+
+    for rel_path in paths:
+        if not rel_path or not rel_path.strip():
+            continue
+        clean = rel_path.strip()
+        if clean in contents:
+            continue
+        for root in (workspace, source):
+            candidate = (root / clean).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            if candidate.is_file():
+                try:
+                    contents[clean] = candidate.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+                break
+
+    return contents
+
+
+def _try_run_error_diagnosis(
+    *,
+    command: str,
+    exit_code: int,
+    stdout: str,
+    stderr: str,
+    run_dir: Path,
+    request: ExecutionRequest,
+    runtime: BaseAgentRuntime,
+    changed_files: list | None = None,
+) -> ErrorDiagnosis | None:
+    """
+    Attempt error diagnosis while the run tree is still available.
+
+    changed_files: the current evidence.changed_files list, forwarded to the
+      diagnostic tool so the LLM can determine fault_side (implementation vs. test
+      vs. environment) using recent repository changes as context.
+
+    Any exception raised by the tool is caught and logged so that a diagnosis
+    failure never prevents command_runner_agent from completing its own step.
+    """
+    try:
+        return run_error_diagnosis(
+            command=command,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            run_dir=run_dir,
+            request=request,
+            runtime=runtime,
+            changed_files=changed_files,
+        )
+    except Exception as exc:
+        logger.warning(
+            "command_runner_agent_error_diagnosis_failed command=%s error=%s",
+            command,
+            str(exc),
+            exc_info=True,
+        )
+        return None
+
+
 class CommandRunnerAgent(BaseSubagent):
     name = "command_runner_agent"
 
@@ -792,6 +879,7 @@ class CommandRunnerAgent(BaseSubagent):
         inspection_plan: CommandInspectionPlan | None = None
         inspected_files: list[dict] = []
         plan: CommandVerificationPlan | None = None
+        diagnosis: ErrorDiagnosis | None = None
 
         try:
             run_dir = self.workspace_runtime.materialize_run_tree(
@@ -895,6 +983,22 @@ class CommandRunnerAgent(BaseSubagent):
                 result_stdout = local_result.stdout
                 result_stderr = local_result.stderr
 
+            # Run error diagnosis while the run tree is still available (before finally cleanup).
+            # Only triggered on unexpected exit codes — successes need no diagnosis.
+            # Pass changed_files so the LLM can determine fault_side (implementation /
+            # test / environment) using the recent repository changes as context.
+            if run_dir is not None and result_exit_code not in plan.expected_exit_codes:
+                diagnosis = _try_run_error_diagnosis(
+                    command=result_command,
+                    exit_code=result_exit_code,
+                    stdout=result_stdout or "",
+                    stderr=result_stderr or "",
+                    run_dir=run_dir,
+                    request=request,
+                    runtime=self.runtime,
+                    changed_files=list(state.evidence.changed_files),
+                )
+
         except WorkspaceRuntimeError as exc:
             raise SubagentRejectedStepError(
                 f"Could not materialize ephemeral execution tree for command step: {str(exc)}"
@@ -983,5 +1087,38 @@ class CommandRunnerAgent(BaseSubagent):
                 ),
                 producer=self.name,
             )
+
+            if diagnosis is not None:
+                state.evidence.add_observation(
+                    evidence_type=OBSERVATION_TYPE_ERROR_DIAGNOSIS,
+                    producer=self.name,
+                    summary=diagnosis.repair_directive,
+                    payload=diagnosis.model_dump(mode="json"),
+                )
+
+                if diagnosis.newly_discovered_files:
+                    new_files = _read_files_for_context_expansion(
+                        paths=diagnosis.newly_discovered_files,
+                        workspace_root=request.context.workspace_path,
+                        source_root=request.context.source_path,
+                    )
+                    if new_files:
+                        expanded = {
+                            **request.context.preloaded_dependency_files,
+                            **new_files,
+                        }
+                        new_context = request.context.model_copy(
+                            update={"preloaded_dependency_files": expanded}
+                        )
+                        new_request = request.model_copy(update={"context": new_context})
+                        state.replace_execution_request(new_request)
+                        state.evidence.add_note(
+                            message=(
+                                f"Error diagnosis expanded execution context with "
+                                f"{len(new_files)} newly_discovered file(s): "
+                                f"{list(new_files.keys())}"
+                            ),
+                            producer=self.name,
+                        )
 
         return state

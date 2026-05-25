@@ -172,7 +172,9 @@ def _run_workflow_background(project_id: int) -> None:
             active_conv = _find_active_conversation(db, project_id)
             if active_conv is not None:
                 try:
-                    resp = notify_review_started(db, conversation_id=active_conv.id, task_id=awaiting_task.id)
+                    resp = notify_review_started(
+                        db, conversation_id=active_conv.id, task_id=awaiting_task.id
+                    )
                     manager.broadcast_sync(
                         project_id,
                         review_required(
@@ -534,7 +536,9 @@ def pause_workflow(
     The loop stops cooperatively — the task in progress is not interrupted.
     """
     request_workflow_stop(project_id)
-    manager.broadcast_sync(project_id, {"type": "workflow_pause_requested", "project_id": project_id})
+    manager.broadcast_sync(
+        project_id, {"type": "workflow_pause_requested", "project_id": project_id}
+    )
     return {"status": "pause_requested", "project_id": project_id}
 
 
@@ -548,7 +552,7 @@ class ResumeWorkflowRequest(BaseModel):
 @router.post("/projects/{project_id}/conversations/resume-workflow")
 def resume_workflow(
     project_id: int,
-    payload: ResumeWorkflowRequest = ResumeWorkflowRequest(),
+    payload: ResumeWorkflowRequest | None = None,
     db: Session = Depends(get_db),
 ) -> dict:
     """

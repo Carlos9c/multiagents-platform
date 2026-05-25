@@ -84,9 +84,7 @@ def plan_runtime_environment(
     # --- Step 2: dependency planning via LLM ---
     # Pass the catalog choice as a hint so the planner selects compatible packages.
     catalog_hint = (
-        f"{catalog_entry.image_name} ({catalog_entry.description})"
-        if catalog_entry
-        else None
+        f"{catalog_entry.image_name} ({catalog_entry.description})" if catalog_entry else None
     )
 
     output = call_environment_planner(

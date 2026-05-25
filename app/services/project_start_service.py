@@ -79,7 +79,11 @@ class ProjectStartService:
     def _validate_request(self, request: ProjectStartRequest) -> None:
         if request.project_id is None and not request.name:
             raise ValueError("name is required when creating a new project")
-        if request.project_id is not None and request.source_path is None and not request.use_existing_source:
+        if (
+            request.project_id is not None
+            and request.source_path is None
+            and not request.use_existing_source
+        ):
             raise ValueError(
                 "source_path is required when project_id is provided "
                 "(or set use_existing_source=True to reuse the existing source_dir)"

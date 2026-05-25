@@ -53,7 +53,14 @@ def _build_install_command(spec: RuntimeSpec) -> str:
     # Build-system-managed ecosystems: dependencies are declared in project files
     # (pom.xml, build.gradle, Cargo.toml, go.mod, .csproj, pubspec.yaml) by code agents.
     # No bootstrap-time installation is needed or possible before those files exist.
-    if spec.runtime_type in ("java_maven", "java_gradle", "android_gradle", "rust_cargo", "dotnet", "go"):
+    if spec.runtime_type in (
+        "java_maven",
+        "java_gradle",
+        "android_gradle",
+        "rust_cargo",
+        "dotnet",
+        "go",
+    ):
         return ""
 
     return ""
@@ -126,13 +133,15 @@ _PROXY_ERROR_HINT = (
 
 
 def _raise_pull_error(image: str, error_text: str) -> None:
-    if "no HTTPS proxy" in error_text or "direct connection" in error_text or "dial tcp" in error_text:
+    if (
+        "no HTTPS proxy" in error_text
+        or "direct connection" in error_text
+        or "dial tcp" in error_text
+    ):
         detail = f"{error_text}\n\n{_PROXY_ERROR_HINT}"
     else:
         detail = f"{error_text}\nTry running manually: docker pull {image}"
-    raise EnvironmentBootstrapError(
-        f"Failed to pull Docker image {image!r}: {detail}"
-    )
+    raise EnvironmentBootstrapError(f"Failed to pull Docker image {image!r}: {detail}")
 
 
 class DockerDriver(BaseEnvironmentDriver):
@@ -245,8 +254,7 @@ class DockerDriver(BaseEnvironmentDriver):
                     )
         except docker.errors.BuildError as exc:
             raise EnvironmentBootstrapError(
-                f"Docker build failed for image {image!r}: {exc}\n"
-                f"Dockerfile: {dockerfile_path}"
+                f"Docker build failed for image {image!r}: {exc}\n" f"Dockerfile: {dockerfile_path}"
             ) from exc
 
         logger.info("docker_driver_catalog_image_built image=%s", image)

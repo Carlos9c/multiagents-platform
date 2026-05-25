@@ -12,6 +12,8 @@ from app.execution_engine.subagents.code_change_agent import CodeChangeAgent
 from app.execution_engine.subagents.command_runner_agent import CommandRunnerAgent
 from app.execution_engine.subagents.context_selection_agent import ContextSelectionAgent
 from app.execution_engine.subagents.document_writer_agent import DocumentWriterAgent
+from app.execution_engine.subagents.environment_manager_agent import EnvironmentManagerAgent
+from app.execution_engine.subagents.test_builder_agent import TestBuilderAgent
 
 
 class OrchestratedExecutionEngine(BaseExecutionEngine):
@@ -37,6 +39,10 @@ class OrchestratedExecutionEngine(BaseExecutionEngine):
             model=settings.documentation_agent_model,
             provider=settings.documentation_agent_provider,
         )
+        test_agent_runtime = StructuredLLMRuntime(
+            model=settings.test_agent_model,
+            provider=settings.test_agent_provider,
+        )
 
         registry = SubagentRegistry(
             subagents=[
@@ -44,6 +50,8 @@ class OrchestratedExecutionEngine(BaseExecutionEngine):
                 CodeChangeAgent(runtime=code_agent_runtime),
                 CommandRunnerAgent(runtime=command_agent_runtime),
                 DocumentWriterAgent(runtime=doc_writer_runtime),
+                TestBuilderAgent(runtime=test_agent_runtime),
+                EnvironmentManagerAgent(runtime=orchestrator_runtime),
             ]
         )
 

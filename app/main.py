@@ -38,6 +38,7 @@ logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
 logging.getLogger("sqlalchemy.dialects").setLevel(logging.WARNING)
 logging.getLogger("sqlalchemy").propagate = False
 
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     ws_manager.set_event_loop(asyncio.get_running_loop())

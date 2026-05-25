@@ -90,7 +90,8 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                 role=(
                     "Implements the task by deciding which repository files to create or modify "
                     "and materializing full final contents in the execution workspace. "
-                    "Handles source code, tests, scripts, and configuration files."
+                    "Handles source code, scripts, configuration files, and migration files. "
+                    "Does NOT write test files — those are the responsibility of test_builder_agent."
                 ),
                 uses_tools=[
                     "list_workspace_files",
@@ -105,18 +106,23 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                     "Writes full final file content for create/modify operations.",
                     "Uses snapshots to support rollback on failure.",
                     "Produces repository-local candidate changes that later verification can inspect when verification is materially useful.",
-                    "Handles source code, tests, scripts, and configuration files.",
+                    "Handles source code, scripts, configuration files, and migration files.",
+                    "Can repair implementation gaps identified by error_diagnosis observations.",
                 ],
                 limits=[
+                    "Does not write test files — test file creation and modification is the exclusive responsibility of test_builder_agent.",
                     "Does not validate task completion.",
                     "Does not decide final external acceptance.",
                     "Must write only inside the execution workspace root.",
                     "Must preserve operation integrity: modify for existing files, create for new files.",
                     "Should not be used for tasks whose primary deliverable is a documentation or design artifact — use document_writer_agent instead.",
+                    "Should not be used for tasks whose primary goal is writing test files — use test_builder_agent instead.",
                 ],
                 usage_guidance=[
-                    "Use when the task requires creating or modifying source code, tests, scripts, or configuration files.",
+                    "Use when the task requires creating or modifying source code, scripts, or configuration files.",
+                    "Use when an error_diagnosis observation indicates a code-level repair is needed (compilation_failure, import_error, type_error, assertion_error).",
                     "Do not use for tasks whose deliverable is a documentation or design artifact — route those to document_writer_agent.",
+                    "Do not use for tasks whose primary goal is writing test files — route those to test_builder_agent.",
                     "Do not use when the current best next step is context recovery or operational verification.",
                 ],
             ),
@@ -163,6 +169,85 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                     "Do not use just because files changed.",
                     "Usually skip this subagent for documentation, requirements, and specification work unless the task explicitly asks for a repository-local executable check.",
                     "Prefer one narrow verification step with clear value for downstream validation.",
+                ],
+            ),
+            SubagentCapability(
+                name="test_builder_agent",
+                role=(
+                    "Writes test files for one atomic task by producing complete, executable "
+                    "test coverage of the task's acceptance_criteria. "
+                    "Tests are written against the acceptance_criteria, not inferred from "
+                    "observed implementation behaviour. "
+                    "Performs a secondary coverage assessment (TestCoverageObservation) after "
+                    "materialisation and surfaces potential_implementation_gaps as risk flags."
+                ),
+                uses_tools=[
+                    "list_workspace_files",
+                    "read_text_file",
+                    "capture_file_snapshot",
+                    "restore_file_snapshot",
+                    "write_text_file",
+                ],
+                strengths=[
+                    "Writes tests derived from acceptance_criteria rather than from observed code.",
+                    "Detects potential_implementation_gaps and surfaces them as risk flags.",
+                    "Follows existing test structure, naming conventions, and runner configuration.",
+                    "Produces a secondary TestCoverageObservation (covered/uncovered/gaps) after materialisation.",
+                    "Writes only test files — implementation code is left to code_change_agent.",
+                    "Uses snapshots to support rollback on failure.",
+                ],
+                limits=[
+                    "Does not write implementation or source code — test files only.",
+                    "Does not execute commands or run the tests.",
+                    "Does not validate final task completion — that is handled by the validator.",
+                    "Must write only inside the execution workspace root.",
+                    "Must preserve operation integrity: modify for existing files, create for new files.",
+                    "Should not be used for tasks whose deliverable is source code or documentation.",
+                ],
+                usage_guidance=[
+                    "Use when the task requires writing test files for a testing objective.",
+                    "Use for tasks with task_type='testing' or tasks whose acceptance_criteria are best verified by a test suite.",
+                    "Do not use for tasks whose deliverable is source code — route those to code_change_agent.",
+                    "Do not use for documentation or design artifact tasks — route those to document_writer_agent.",
+                    "Do not use for tasks that require running tests — command_runner_agent handles execution.",
+                    "When potential_implementation_gaps are flagged, a follow-up code_change_agent call may be needed.",
+                ],
+            ),
+            SubagentCapability(
+                name="environment_manager_agent",
+                role=(
+                    "Installs missing packages or system dependencies into the active runtime "
+                    "environment when error_diagnosis.fault_side is 'environment' or "
+                    "overall_error_class is 'missing_dependency' with is_recoverable=true. "
+                    "Extracts the required packages from the latest error_diagnosis observation, "
+                    "runs the install via the runtime's package manager (pip, npm, etc.), and "
+                    "updates the RuntimeSpec manifest. Does NOT modify source code or test files."
+                ),
+                uses_tools=[],
+                strengths=[
+                    "Resolves ImportError, ModuleNotFoundError, and command_not_found failures "
+                    "caused by missing packages without requiring full environment rebuild.",
+                    "Follows version_constraint='any_compatible' when called from the orchestrator "
+                    "(no user input required).",
+                    "Updates RuntimeSpec.dependencies so the installed package is reflected in the manifest.",
+                    "Adds structured observations to evidence describing what was installed.",
+                    "Supports Python (pip), Node (npm), JVM (maven/gradle), and a generic fallback.",
+                ],
+                limits=[
+                    "Does not modify source code or test files.",
+                    "Does not perform full environment teardown/rebuild — use the bootstrapper for that.",
+                    "Cannot resolve dependency conflicts that require user input when called from the orchestrator "
+                    "(always uses any_compatible).",
+                    "On failure (needs_user_input, failed, rolled_back) it raises SubagentRejectedStepError — "
+                    "the orchestrator must reject and surface to manual review.",
+                    "Requires an active error_diagnosis observation in evidence to identify the packages.",
+                ],
+                usage_guidance=[
+                    "Use when error_diagnosis.fault_side='environment' and is_recoverable=true.",
+                    "Use when overall_error_class='missing_dependency' and is_recoverable=true.",
+                    "Do not use for code-level errors (assertion, compilation, syntax) — route those to "
+                    "code_change_agent instead.",
+                    "After environment_manager_agent succeeds, call command_runner_agent to re-verify.",
                 ],
             ),
             SubagentCapability(

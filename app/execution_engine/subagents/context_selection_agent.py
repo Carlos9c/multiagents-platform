@@ -106,6 +106,8 @@ def _catalog_entry_to_prompt_payload(
         "description": entry.description,
         "summary": entry.summary,
         "objective": entry.objective,
+        "acceptance_criteria": entry.acceptance_criteria,
+        "proposed_solution": entry.proposed_solution,
         "task_type": entry.task_type,
         "executor_type": entry.executor_type,
         "run_summary": entry.run_summary,

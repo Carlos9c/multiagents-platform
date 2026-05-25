@@ -13,6 +13,10 @@ from app.services.validation.registry import ValidationRegistry
 IGNORED_VALIDATION_PRODUCERS = {
     "context_selection_agent",
     "execution_orchestrator",
+    # environment_manager_agent is an infrastructure repair subagent, not a task deliverable
+    # producer. It installs packages but does not write repository files or produce artifacts.
+    # Its evidence (install observations, manifest notes) is informational only.
+    "environment_manager_agent",
 }
 
 

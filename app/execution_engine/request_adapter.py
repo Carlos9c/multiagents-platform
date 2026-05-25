@@ -312,6 +312,8 @@ def _build_historical_execution_context(
                 description=selected_task.description,
                 summary=selected_task.summary,
                 objective=selected_task.objective,
+                acceptance_criteria=selected_task.acceptance_criteria,
+                proposed_solution=selected_task.proposed_solution,
                 run_summary=selected_run.work_summary,
                 completed_scope=selected_run.completed_scope,
                 validation_notes=_split_semicolon_or_multiline_text(selected_run.validation_notes),

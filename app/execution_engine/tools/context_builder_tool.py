@@ -173,6 +173,8 @@ def _build_completed_task_catalog(
                 description=task.description,
                 summary=task.summary,
                 objective=task.objective,
+                acceptance_criteria=task.acceptance_criteria,
+                proposed_solution=task.proposed_solution,
                 task_type=task.task_type,
                 executor_type=task.executor_type,
                 run_summary=completion_run.work_summary,

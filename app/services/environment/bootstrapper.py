@@ -246,9 +246,7 @@ class EnvironmentBootstrapper:
             version,
         )
 
-    def _write_wrapper_scripts(
-        self, source_dir: Path, version: str, project_id: int
-    ) -> None:
+    def _write_wrapper_scripts(self, source_dir: Path, version: str, project_id: int) -> None:
         """Write gradlew, gradlew.bat and gradle-wrapper.properties to source_dir.
 
         These are plain text files so they are written directly on the host without

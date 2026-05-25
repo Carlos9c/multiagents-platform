@@ -95,11 +95,8 @@ def resume_after_review(
             f"Expected one of: {', '.join(sorted(_RESUMABLE_STATUSES))}"
         )
 
-    project_goal = updated_project_goal or (
-        db.query(Task).filter(Task.id == blocked_task.project_id).first()  # fallback handled below
-    )
-
     from app.models.project import Project  # local import to avoid circular
+
     project = db.get(Project, project_id)
     if project is None:
         raise ResumptionError(f"Project {project_id} not found")
@@ -301,7 +298,7 @@ def _resolve_insert_sequence_order(
             .order_by(Task.sequence_order.desc())
             .scalar()
         )
-        return (max_order or 0)
+        return max_order or 0
 
     ref_task = db.get(Task, insert_after_task_id)
     if ref_task is None or ref_task.sequence_order is None:
@@ -311,7 +308,7 @@ def _resolve_insert_sequence_order(
             .order_by(Task.sequence_order.desc())
             .scalar()
         )
-        return (max_order or 0)
+        return max_order or 0
 
     return ref_task.sequence_order
 
@@ -477,16 +474,28 @@ def _apply_environment_delta(
     env_changes: list[EnvironmentDependency],
 ) -> None:
     """
-    Update project.runtime_spec with new dependencies and eagerly rebuild
-    the Docker environment so failures surface before the task is retried.
+    Incrementally install new packages into the active runtime environment.
+
+    Uses EnvironmentManager for Level A (app packages) and Level B (system
+    packages) changes — installs into the running container without teardown.
+
+    Full teardown + bootstrap is only needed for Level C (runtime type change),
+    which is always a disruptive ImpactAssessmentAgent scope change and is
+    handled at the project-restart level, not here.
+
+    On version conflict with version_strictness="exact_only": raises ResumptionError
+    so the conversation layer can surface the blocker to the user.
     """
-    from app.services.environment.bootstrapper import EnvironmentBootstrapper
-    from app.services.environment.contracts import PinnedDependency, RuntimeSpec
+    from app.services.environment.contracts import RuntimeSpec
+    from app.services.environment.manager import EnvironmentManager
+    from app.services.environment.manager_contracts import EnvironmentManagerRequest, PackageRequest
+
+    project_id: int = project.id  # type: ignore[attr-defined]
 
     if not getattr(project, "runtime_spec", None):
         logger.warning(
             "env_delta_skipped project_id=%s reason=no_runtime_spec",
-            project.id,  # type: ignore[attr-defined]
+            project_id,
         )
         return
 
@@ -495,42 +504,67 @@ def _apply_environment_delta(
     except Exception as exc:
         logger.warning(
             "env_delta_skipped project_id=%s reason=parse_error error=%s",
-            project.id,  # type: ignore[attr-defined]
+            project_id,
             exc,
         )
         return
 
+    # Deduplicate: only install packages that are not already in the manifest
     existing_names = {d.name.lower() for d in spec.dependencies}
-    added: list[str] = []
+    packages_to_install: list[PackageRequest] = []
     for dep in env_changes:
         if dep.package_name.lower() not in existing_names:
-            spec.dependencies.append(
-                PinnedDependency(
+            packages_to_install.append(
+                PackageRequest(
                     name=dep.package_name,
-                    version=dep.version_constraint or "*",
+                    version=dep.version_constraint or None,
+                    package_type="app",
                 )
             )
-            existing_names.add(dep.package_name.lower())
-            added.append(dep.package_name)
 
-    if not added:
+    if not packages_to_install:
         return  # nothing new to install
 
-    project.runtime_spec = spec.model_dump_json()  # type: ignore[attr-defined]
-    db.add(project)  # type: ignore[arg-type]
-    db.flush()
+    # Determine the most restrictive version_strictness across all changes
+    strictness_rank = {"exact_only": 2, "preferred": 1, "any_compatible": 0}
+    max_strictness = max(
+        (getattr(dep, "version_strictness", "any_compatible") for dep in env_changes),
+        key=lambda s: strictness_rank.get(s, 0),
+        default="any_compatible",
+    )
 
-    bootstrapper = EnvironmentBootstrapper()
-    bootstrapper.teardown(project.id)  # type: ignore[attr-defined]
+    workspace_path = getattr(project, "workspace_path", "") or ""
 
-    try:
-        bootstrapper.bootstrap(project_id=project.id, spec=spec)  # type: ignore[attr-defined]
-        logger.info(
-            "env_delta_applied project_id=%s added=%s",
-            project.id,  # type: ignore[attr-defined]
-            added,
-        )
-    except Exception as exc:
+    mgr_request = EnvironmentManagerRequest(
+        packages=packages_to_install,
+        version_constraint=max_strictness,
+        project_id=project_id,
+        workspace_path=workspace_path,
+        context_description="resumption_service environment delta",
+    )
+
+    manager = EnvironmentManager()
+    output = manager.install(request=mgr_request, spec=spec)
+
+    added_names = [p.name for p in output.installed_packages]
+
+    if output.status in ("needs_user_input", "failed", "rolled_back"):
         raise ResumptionError(
-            f"Failed to rebuild environment after adding {added}: {exc}"
-        ) from exc
+            f"Failed to apply environment changes for project {project_id}: "
+            f"{output.blocker_message or output.status}. "
+            f"Conflicts: {output.dependency_conflicts}"
+        )
+
+    # Persist updated RuntimeSpec if install succeeded (fully or partially)
+    if output.updated_runtime_spec_json:
+        project.runtime_spec = output.updated_runtime_spec_json  # type: ignore[attr-defined]
+        db.add(project)  # type: ignore[arg-type]
+        db.flush()
+
+    logger.info(
+        "env_delta_applied project_id=%s status=%s added=%s conflicts=%s",
+        project_id,
+        output.status,
+        added_names,
+        output.dependency_conflicts,
+    )

@@ -64,9 +64,7 @@ def test_skips_non_pending_task(db_session, make_project):
 
 
 def test_skips_nonexistent_task(db_session, make_project):
-    result = apply_task_revisions(
-        db_session, [TaskRevision(task_id=99999, description="ghost")]
-    )
+    result = apply_task_revisions(db_session, [TaskRevision(task_id=99999, description="ghost")])
 
     assert result.revised_count == 0
     assert 99999 in result.skipped_ids

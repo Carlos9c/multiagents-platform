@@ -22,6 +22,7 @@ class IncomingMessage(BaseModel):
 
 class MessageRecord(BaseModel):
     """Single message from conversation history."""
+
     role: str
     content: str
     task_id: int | None = None
@@ -29,6 +30,7 @@ class MessageRecord(BaseModel):
 
 class OutgoingMessage(BaseModel):
     """Base outgoing envelope — serialised to JSON and sent over the wire."""
+
     type: str
     conversation_id: int | None = None
     phase: str | None = None

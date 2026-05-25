@@ -339,9 +339,7 @@ class DocumentWriterAgentValidator(BaseTaskValidator):
         producer_items = producer_view.items
 
         # Structural guard: if no changed_file evidence, fail immediately without LLM call
-        has_file_evidence = any(
-            item.evidence_type == "changed_file" for item in producer_items
-        )
+        has_file_evidence = any(item.evidence_type == "changed_file" for item in producer_items)
         if not has_file_evidence:
             return ValidationResult(
                 validator_key=self.validator_key,
@@ -363,7 +361,10 @@ class DocumentWriterAgentValidator(BaseTaskValidator):
                 recommended_next_validator_keys=[],
                 partial_validation_summary=None,
                 partial_annotations=[],
-                metadata={"producer_key": self.producer_key, "structural_check": "no_file_evidence"},
+                metadata={
+                    "producer_key": self.producer_key,
+                    "structural_check": "no_file_evidence",
+                },
             )
 
         context_paths = _collect_context_paths(validation_input)

@@ -234,7 +234,7 @@ def _make_db_mock(*, awaiting_task=None, failed_task=None, conversation=None):
     mock_db = MagicMock()
     mock_db.query.return_value.filter.return_value.order_by.return_value.first.side_effect = [
         awaiting_task,  # first call: AWAITING_REVIEW task search
-        failed_task,    # second call: FAILED/PARTIAL task search
+        failed_task,  # second call: FAILED/PARTIAL task search
     ]
     mock_db.query.return_value.filter.return_value.first.return_value = conversation
     return mock_db
@@ -261,14 +261,18 @@ def test_run_workflow_background_notifies_review_when_manual_review_and_failed_t
     with (
         patch("app.api.ws.router.SessionLocal", return_value=mock_db),
         patch("app.api.ws.router.run_project_workflow", return_value=workflow_result),
-        patch("app.api.ws.router.notify_review_started", return_value=mock_review_response) as mock_notify,
+        patch(
+            "app.api.ws.router.notify_review_started", return_value=mock_review_response
+        ) as mock_notify,
         patch("app.api.ws.router.manager") as mock_manager,
     ):
         from app.api.ws.router import _run_workflow_background
 
         _run_workflow_background(84)
 
-    mock_notify.assert_called_once_with(mock_db, conversation_id=mock_conv.id, task_id=mock_failed.id)
+    mock_notify.assert_called_once_with(
+        mock_db, conversation_id=mock_conv.id, task_id=mock_failed.id
+    )
     mock_manager.broadcast_sync.assert_called_once()
 
 
@@ -335,8 +339,10 @@ def test_run_workflow_background_calls_notify_workflow_error_when_no_failed_task
     mock_task_notify.assert_not_called()
     mock_error_notify.assert_called_once()
     call_kwargs = mock_error_notify.call_args.kwargs
-    assert "bootstrap" in call_kwargs["failure_reason"].lower() or \
-           "environment" in call_kwargs["failure_reason"].lower()
+    assert (
+        "bootstrap" in call_kwargs["failure_reason"].lower()
+        or "environment" in call_kwargs["failure_reason"].lower()
+    )
 
 
 def test_run_workflow_background_notifies_aria_on_workflow_service_error():
