@@ -21,65 +21,14 @@ from app.services.environment.registry import get_driver_registry
 from app.services.environment.session_store import get_session_store
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_storage import ProjectStorageService
+from app.services.prompt_loader import prompt_loader
 from app.services.workspace_runtime import WorkspaceRuntimeError
 
 logger = logging.getLogger(__name__)
 
-COMMAND_FILE_SELECTION_SYSTEM_PROMPT = """
-You are a repository-local verification context selector.
+COMMAND_FILE_SELECTION_SYSTEM_PROMPT = prompt_loader.get("command_runner_agent", "file_selection")
 
-Your job is to inspect the candidate run-tree inventory for ONE already-atomic task and select
-the smallest set of repository-relative files that should be read before deciding whether an
-executable repository-local verification command is appropriate.
-
-Hard rules:
-- Select only files that appear in the provided candidate run-tree inventory.
-- Select only repository-relative file paths.
-- Do not select directories.
-- Do not select duplicate paths.
-- Select the smallest useful file set.
-- Do not guess hidden files or tools that are not present in the inventory.
-- Prefer files that clarify:
-  - test layout
-  - executable entrypoints
-  - repository-local verification conventions
-  - build/test configuration
-  - changed implementation files relevant to the task
-- If very little file inspection is needed, return only a few files.
-- If executable verification is likely not applicable, you may still select zero or very few files.
-""".strip()
-
-COMMAND_RUNNER_AGENT_SYSTEM_PROMPT = """
-You are a repository-local verification planner.
-
-Your job is to inspect the candidate run tree for ONE already-atomic task and decide between exactly one of these two outcomes:
-1. run_command
-   - choose the single concrete command that should be executed
-   - choose the working directory inside the candidate run tree
-   - explain what that command is meant to verify for later external validation
-
-2. verification_not_applicable
-   - choose this when no meaningful repository-local executable verification would materially improve the evidence for the current task
-
-Hard rules:
-- Do not force a command when no meaningful repository-local verification exists.
-- Repository-local verification is not automatically required just because files changed.
-- Documentation, requirements, specification, README, and design-note tasks often do not need executable verification unless the task explicitly asks for it.
-- If you choose run_command, choose exactly one concrete command.
-- The command must be repo-local and narrow in purpose.
-- Do not use shell chaining, pipes, redirection, or multiple commands.
-- Prefer project-standard commands already supported by the repository layout.
-- Use the smallest useful verification command.
-- Determine the working directory from the inventory: locate build configs, test runner configs, Makefiles, package manifests, or entrypoints that signal where the command belongs. '.' is the default; use a subdirectory only when you find concrete evidence in the inventory that the tooling requires it.
-- When test or spec files appear in the inventory under a subdirectory (e.g., tests/, spec/, __tests__/, test/), the command must explicitly reference that path — pass the subdirectory as an argument to the runner (e.g., pytest tests/, go test ./tests/..., jest tests/, rspec spec/, python -m unittest discover -s tests). Do not use a bare runner invocation that relies on root-level auto-discovery; if the test files are not at the project root, auto-discovery from '.' will produce zero results and the command will be useless.
-- Do not invent tools, executables, frameworks, entrypoints, or files that are not grounded in the provided inventory/context.
-- The goal is to produce operational evidence for external validation, not to perform open-ended exploration.
-
-Planning policy:
-- Base your command decision on the actual candidate run-tree inventory and the inspected file contents.
-- Prefer commands supported by the files and configuration actually present in the run tree.
-- If the executable verification path is ambiguous, choose verification_not_applicable rather than guessing.
-""".strip()
+COMMAND_RUNNER_AGENT_SYSTEM_PROMPT = prompt_loader.get("command_runner_agent")
 
 
 def _format_runtime_spec_for_prompt(runtime_spec: dict | None) -> str:
@@ -243,6 +192,33 @@ def _build_file_selection_prompt(
 
     runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
 
+    prompt_loader.validate_builder_inputs(
+        "command_runner_agent",
+        "file_selection",
+        {
+            "task_id": request.task_id,
+            "task_title": request.task_title,
+            "task_description": request.task_description,
+            "objective": request.objective,
+            "acceptance_criteria": request.acceptance_criteria,
+            "technical_constraints": request.technical_constraints,
+            "out_of_scope": request.out_of_scope,
+            "tests_required": request.tests_required,
+            "executor_type": request.executor_type,
+            "runtime_spec_context": runtime_spec_context,
+            "step_id": step.id,
+            "step_instructions": step.instructions,
+            "step_target_paths": step.target_paths,
+            "run_dir_path": str(run_dir),
+            "run_tree_inventory": inventory_text,
+            "changed_files": changed_files,
+            "prior_commands": commands,
+            "evidence_notes": notes,
+            "risk_flags": state.risk_flags,
+            "step_notes": state.step_notes,
+            "relevant_files": request.context.relevant_files,
+        },
+    )
     return f"""
 Task:
 - task_id: {request.task_id}
@@ -383,6 +359,37 @@ def _build_command_planning_prompt(
     notes = [item.message for item in state.evidence.notes if item.message]
     runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
 
+    prompt_loader.validate_builder_inputs(
+        "command_runner_agent",
+        "main",
+        {
+            "task_id": request.task_id,
+            "task_title": request.task_title,
+            "task_description": request.task_description,
+            "objective": request.objective,
+            "acceptance_criteria": request.acceptance_criteria,
+            "technical_constraints": request.technical_constraints,
+            "out_of_scope": request.out_of_scope,
+            "tests_required": request.tests_required,
+            "executor_type": request.executor_type,
+            "runtime_spec_context": runtime_spec_context,
+            "step_id": step.id,
+            "step_instructions": step.instructions,
+            "step_target_paths": step.target_paths,
+            "run_dir_path": str(run_dir),
+            "run_tree_inventory": inventory_text,
+            "inspection_selected_paths": inspection_plan.selected_paths,
+            "inspection_selection_rationale": inspection_plan.selection_rationale,
+            "inspection_verification_hypothesis": inspection_plan.verification_hypothesis,
+            "inspected_files": inspected_files,
+            "changed_files": changed_files,
+            "files_read": files_read,
+            "prior_commands": commands,
+            "evidence_notes": notes,
+            "risk_flags": state.risk_flags,
+            "step_notes": state.step_notes,
+        },
+    )
     return f"""
 Task:
 - task_id: {request.task_id}
@@ -448,6 +455,39 @@ def _build_file_selection_retry_prompt(
     inventory: list[str],
     validation_error: str,
 ) -> str:
+    inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
+    changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
+    commands = [item.model_dump(mode="json") for item in state.evidence.commands]
+    notes = [item.message for item in state.evidence.notes if item.message]
+    runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
+    prompt_loader.validate_builder_inputs(
+        "command_runner_agent",
+        "file_selection_retry",
+        {
+            "task_id": request.task_id,
+            "task_title": request.task_title,
+            "task_description": request.task_description,
+            "objective": request.objective,
+            "acceptance_criteria": request.acceptance_criteria,
+            "technical_constraints": request.technical_constraints,
+            "out_of_scope": request.out_of_scope,
+            "tests_required": request.tests_required,
+            "executor_type": request.executor_type,
+            "runtime_spec_context": runtime_spec_context,
+            "step_id": step.id,
+            "step_instructions": step.instructions,
+            "step_target_paths": step.target_paths,
+            "run_dir_path": str(run_dir),
+            "run_tree_inventory": inventory_text,
+            "changed_files": changed_files,
+            "prior_commands": commands,
+            "evidence_notes": notes,
+            "risk_flags": state.risk_flags,
+            "step_notes": state.step_notes,
+            "relevant_files": request.context.relevant_files,
+            "validation_error": validation_error,
+        },
+    )
     base = _build_file_selection_prompt(
         request=request, step=step, state=state, run_dir=run_dir, inventory=inventory
     )
@@ -477,6 +517,44 @@ def _build_command_planning_retry_prompt(
     inspected_files: list[dict],
     validation_error: str,
 ) -> str:
+    inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
+    changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
+    files_read = [item.model_dump(mode="json") for item in state.evidence.files_read]
+    commands = [item.model_dump(mode="json") for item in state.evidence.commands]
+    notes = [item.message for item in state.evidence.notes if item.message]
+    runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
+    prompt_loader.validate_builder_inputs(
+        "command_runner_agent",
+        "main_retry",
+        {
+            "task_id": request.task_id,
+            "task_title": request.task_title,
+            "task_description": request.task_description,
+            "objective": request.objective,
+            "acceptance_criteria": request.acceptance_criteria,
+            "technical_constraints": request.technical_constraints,
+            "out_of_scope": request.out_of_scope,
+            "tests_required": request.tests_required,
+            "executor_type": request.executor_type,
+            "runtime_spec_context": runtime_spec_context,
+            "step_id": step.id,
+            "step_instructions": step.instructions,
+            "step_target_paths": step.target_paths,
+            "run_dir_path": str(run_dir),
+            "run_tree_inventory": inventory_text,
+            "inspection_selected_paths": inspection_plan.selected_paths,
+            "inspection_selection_rationale": inspection_plan.selection_rationale,
+            "inspection_verification_hypothesis": inspection_plan.verification_hypothesis,
+            "inspected_files": inspected_files,
+            "changed_files": changed_files,
+            "files_read": files_read,
+            "prior_commands": commands,
+            "evidence_notes": notes,
+            "risk_flags": state.risk_flags,
+            "step_notes": state.step_notes,
+            "validation_error": validation_error,
+        },
+    )
     base = _build_command_planning_prompt(
         request=request,
         step=step,
@@ -514,6 +592,44 @@ def _build_command_planning_constraint_retry_prompt(
     inspected_files: list[dict],
     constraint_error: str,
 ) -> str:
+    inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
+    changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
+    files_read = [item.model_dump(mode="json") for item in state.evidence.files_read]
+    commands = [item.model_dump(mode="json") for item in state.evidence.commands]
+    notes = [item.message for item in state.evidence.notes if item.message]
+    runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
+    prompt_loader.validate_builder_inputs(
+        "command_runner_agent",
+        "main_constraint_retry",
+        {
+            "task_id": request.task_id,
+            "task_title": request.task_title,
+            "task_description": request.task_description,
+            "objective": request.objective,
+            "acceptance_criteria": request.acceptance_criteria,
+            "technical_constraints": request.technical_constraints,
+            "out_of_scope": request.out_of_scope,
+            "tests_required": request.tests_required,
+            "executor_type": request.executor_type,
+            "runtime_spec_context": runtime_spec_context,
+            "step_id": step.id,
+            "step_instructions": step.instructions,
+            "step_target_paths": step.target_paths,
+            "run_dir_path": str(run_dir),
+            "run_tree_inventory": inventory_text,
+            "inspection_selected_paths": inspection_plan.selected_paths,
+            "inspection_selection_rationale": inspection_plan.selection_rationale,
+            "inspection_verification_hypothesis": inspection_plan.verification_hypothesis,
+            "inspected_files": inspected_files,
+            "changed_files": changed_files,
+            "files_read": files_read,
+            "prior_commands": commands,
+            "evidence_notes": notes,
+            "risk_flags": state.risk_flags,
+            "step_notes": state.step_notes,
+            "constraint_error": constraint_error,
+        },
+    )
     base = _build_command_planning_prompt(
         request=request,
         step=step,
@@ -681,6 +797,52 @@ def _try_run_error_diagnosis(
             exc_info=True,
         )
         return None
+
+
+def _write_command_runner_trace(
+    *,
+    request: "ExecutionRequest",
+    call_type: str,
+    command: str = "",
+    exit_code: int | None = None,
+    success: bool | None = None,
+    timed_out: bool = False,
+    stdout_preview: str = "",
+    stderr_preview: str = "",
+    verification_goal: str = "",
+    rationale: str = "",
+) -> None:
+    """Append a command_runner_agent trace entry to execution_trace.jsonl.
+
+    The Supervisor reads these entries to assess command execution patterns
+    since command evidence is not separately persisted after runs complete.
+    """
+    from app.services.supervisor.trace_writer import append_execution_trace
+
+    commands: list[dict] = []
+    if call_type == "command_executed":
+        commands = [
+            {
+                "command": command,
+                "exit_code": exit_code,
+                "success": success,
+                "timed_out": timed_out,
+                "stdout_preview": stdout_preview[:200],
+                "stderr_preview": stderr_preview[:200],
+                "verification_goal": verification_goal,
+            }
+        ]
+
+    entry: dict = {
+        "agent": "command_runner_agent",
+        "project_id": request.project_id,
+        "task_id": request.task_id,
+        "run_id": request.execution_run_id,
+        "call_type": call_type,
+        "rationale": rationale,
+        "commands": commands,
+    }
+    append_execution_trace(project_id=request.project_id, entry=entry)
 
 
 class CommandRunnerAgent(BaseSubagent):
@@ -957,6 +1119,12 @@ class CommandRunnerAgent(BaseSubagent):
                     message=f"Verification goal assessment: {plan.verification_goal}",
                     producer=self.name,
                 )
+                _write_command_runner_trace(
+                    request=request,
+                    call_type="verification_not_applicable",
+                    verification_goal=plan.verification_goal,
+                    rationale=plan.rationale,
+                )
                 return state
 
             logger.info(
@@ -1121,4 +1289,16 @@ class CommandRunnerAgent(BaseSubagent):
                             producer=self.name,
                         )
 
+        _write_command_runner_trace(
+            request=request,
+            call_type="command_executed",
+            command=result_command,
+            exit_code=result_exit_code,
+            success=exit_code_matched_expectation,
+            timed_out=timed_out,
+            stdout_preview=result_stdout or "",
+            stderr_preview=result_stderr or "",
+            verification_goal=plan.verification_goal,
+            rationale=plan.rationale,
+        )
         return state

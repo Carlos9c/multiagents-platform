@@ -61,6 +61,7 @@ from app.services.conversation.aria.tools import (
 )
 from app.services.llm.factory import get_llm_provider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -70,60 +71,7 @@ _HISTORY_LIMIT = 40  # messages sent to Aria's prompt
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """\
-Eres Aria, el asistente conversacional de una plataforma de desarrollo de software autónomo.
-Tu rol es orquestar la conversación entre el usuario y el sistema de desarrollo.
-
-## Tus herramientas
-
-- **requirements_agent**: Evalúa si los requisitos del proyecto son suficientes para empezar.
-  Úsala cuando el usuario está describiendo lo que quiere construir (fase: gathering_requirements).
-
-- **query_agent**: Responde preguntas sobre el estado actual del proyecto (tareas, progreso, errores).
-  Disponible en CUALQUIER fase — el usuario siempre puede pedir información.
-
-- **review_agent**: Evalúa las aclaraciones del usuario cuando hay una tarea o error bloqueado.
-  Úsala cuando fase=reviewing y el usuario está aportando información para resolver el bloqueo.
-
-- **confirmation_agent**: Interpreta si el usuario confirma o rechaza un plan propuesto.
-  Úsala cuando proposed_plan tiene valor y el usuario acaba de responder al plan.
-
-- **start_project**: Inicia el proyecto creando el plan de tareas atómicas.
-  Úsala cuando requirements_ready=true y el usuario confirma que quiere empezar,
-  o cuando llega el evento de sistema confirm_start.
-
-- **resumption_agent**: Aplica la aclaración confirmada al grafo de tareas y reanuda la ejecución.
-  Úsala inmediatamente después de que confirmation_agent devuelva confirmed=true.
-
-## Restricciones
-
-- No puedes llamar a la misma herramienta más de una vez por turno.
-- Si no entiendes qué quiere el usuario, responde directamente sin llamar herramientas (fallback).
-- Las herramientas devuelven datos estructurados; tú sintetizas la respuesta final al usuario.
-
-## Hints de fase
-
-- **gathering_requirements**: Foco en requirements_agent y start_project.
-- **executing**: Foco en query_agent. No modifiques el plan.
-- **reviewing**: Foco en review_agent, confirmation_agent y resumption_agent.
-  El usuario también puede preguntar el estado — usa query_agent si lo pide.
-- **paused**: Foco en query_agent.
-- **completed**: Foco en query_agent.
-
-## Eventos de sistema
-
-Cuando source=system recibirás eventos del workflow. Responde al usuario en consecuencia:
-- execution_started: El proyecto ha comenzado a ejecutarse.
-- manual_review_required: Una tarea necesita la atención del usuario.
-- workflow_error: El flujo se ha detenido por un error de proyecto.
-- project_completed: El proyecto ha finalizado.
-- confirm_start: El usuario ha confirmado el inicio desde el botón — usa start_project.
-
-## Idioma
-
-Responde SIEMPRE en el mismo idioma que el último mensaje del usuario.
-Si el input es un evento de sistema, responde en el idioma de la conversación previa.
-"""
+_SYSTEM_PROMPT = prompt_loader.get("aria_orchestrator")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -325,13 +273,26 @@ def _handle_review_abandoned(
 
     is_project_level = review_data.get("is_project_level", False)
 
+    blocked_task_id: int | None = None
+    blocked_task_title: str | None = None
+
     if not is_project_level and conversation.review_context:
         try:
             ctx = review_context_from_json(conversation.review_context)
             if isinstance(ctx, TaskReviewContext):
+                blocked_task_id = ctx.task_id
+                blocked_task_title = ctx.task_title
                 mark_task_failed(db, ctx.task_id, auto_commit=False)
         except Exception:
             pass
+
+    _save_abandoned_episode_artifact(
+        db=db,
+        conversation=conversation,
+        is_project_level=is_project_level,
+        blocked_task_id=blocked_task_id,
+        blocked_task_title=blocked_task_title,
+    )
 
     conversation.proposed_plan = None
     conversation.review_context = None
@@ -342,6 +303,57 @@ def _handle_review_abandoned(
         conversation.phase = CONVERSATION_PHASE_PAUSED
     else:
         conversation.phase = CONVERSATION_PHASE_EXECUTING
+
+
+def _save_abandoned_episode_artifact(
+    db: Session,
+    conversation: Conversation,
+    *,
+    is_project_level: bool,
+    blocked_task_id: int | None,
+    blocked_task_title: str | None,
+) -> None:
+    """Persist a review_episode artifact (outcome=abandoned) for the Supervisor."""
+    import json
+
+    from app.models.artifact import Artifact
+
+    _ARTIFACT_TYPE = "review_episode"
+
+    try:
+        episode_index = (
+            db.query(Artifact)
+            .filter(
+                Artifact.project_id == conversation.project_id,
+                Artifact.artifact_type == _ARTIFACT_TYPE,
+            )
+            .count()
+        )
+        payload = {
+            "episode_index": episode_index,
+            "is_project_level": is_project_level,
+            "blocked_task_id": blocked_task_id,
+            "blocked_task_title": blocked_task_title,
+            "review_attempts": conversation.review_episode_attempts or 0,
+            "proposed_plan": None,
+            "outcome": "abandoned",
+            "impact_scope": None,
+            "tasks_modified_count": 0,
+            "tasks_added_count": 0,
+            "tasks_superseded_count": 0,
+            "impact_reasoning": None,
+        }
+        artifact = Artifact(
+            project_id=conversation.project_id,
+            task_id=blocked_task_id,
+            artifact_type=_ARTIFACT_TYPE,
+            content=json.dumps(payload),
+            created_by="aria_orchestrator",
+        )
+        db.add(artifact)
+        db.flush()
+    except Exception:
+        pass  # Supervisor instrumentation must never break the agent
 
 
 # ── System event handling ─────────────────────────────────────────────────────
@@ -489,6 +501,19 @@ def _build_user_prompt(
     tool_results: list[ToolResult],
     force_respond: bool,
 ) -> str:
+    from app.services.prompt_loader import prompt_loader
+
+    prompt_loader.validate_builder_inputs(
+        "aria_orchestrator",
+        "main",
+        {
+            "project_state": snapshot,
+            "conversation_history": conversation,
+            "current_input": aria_input,
+            "tool_results": tool_results,
+            "force_respond": force_respond,
+        },
+    )
     parts: list[str] = []
 
     # Project context snapshot

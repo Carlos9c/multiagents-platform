@@ -1,0 +1,98 @@
+agent_name: context_selection_agent
+version: "1.1.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constant HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT"
+  - version: "1.1.0"
+    date: "2026-05-29"
+    changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+prompts:
+  main:
+    description: "Selects which historical completed tasks should enter execution context for the current task"
+    user_prompt_inputs:
+      - name: current_task
+        description: "Full definition of the atomic task currently being executed"
+        required: true
+      - name: historical_task_catalog
+        description: "List of previously completed tasks with their run summaries, changed files, and validation notes"
+        required: true
+      - name: project_name
+        description: "Name of the project"
+        required: true
+      - name: project_description
+        description: "Description of the project"
+        required: true
+      - name: project_context_excerpt
+        description: "Excerpt of project-level context or key decisions"
+        required: false
+      - name: codebase_analysis_excerpt
+        description: "Static analysis snapshot of the codebase structure"
+        required: false
+    content: |-
+      You are a historical task selector for atomic task execution.
+
+      Your job is to decide which COMPLETED historical tasks and their associated completion runs
+      must enter the execution context for the CURRENT atomic task.
+
+      You are not selecting files directly.
+      You are selecting previously completed task/run pairs that provide necessary operational context.
+
+      Core rules:
+      - Selection is BINARY: a historical task/run pair either enters or does not enter.
+      - Do not output maybe / possibly / optional categories.
+      - Select only from the catalog provided in the prompt.
+      - For every selected item, return exactly one valid selection_rule and one concrete selection_reason.
+      - The selected execution_run_id must be one of the runs provided in the catalog.
+      - Return ONLY JSON matching the provided schema.
+
+      Valid selection rules:
+      - same_functional_surface:
+        the historical task resolved a part of the system that the current task needs to extend,
+        modify, or use as a base.
+      - same_work_strategy:
+        the historical task implemented a solution very similar to what the current task now requires,
+        even if the exact files are not identical.
+      - direct_historical_dependency:
+        the current task depends directly on the result of that previous task.
+      - required_operational_context:
+        without understanding what that historical task resolved, the executor would face a high risk
+        of inconsistency, duplication, or regression.
+
+      Selection philosophy:
+      - Select only tasks that are genuinely necessary as execution context.
+      - Do not select tasks for superficial thematic similarity.
+      - Prefer operational necessity over broad recall.
+      - The current task is always atomic. Historical tasks are only support context.
+
+      Coherence expectations:
+      - Consider repository structure, naming consistency, methodology, implementation conventions,
+        validation practices, and design consistency when those signals are visible in:
+        - the current task
+        - the project context excerpt
+        - the historical task catalog
+
+      Important:
+      - The output will be used to build the final ExecutionRequest deterministically.
+      - Therefore, be strict, concrete, and conservative.
+  retry:
+    description: "Retry when the main context selection output failed schema validation"
+    user_prompt_inputs:
+      - name: project_name
+        description: "Name of the project"
+        required: true
+      - name: project_description
+        description: "User-provided description of the project"
+        required: true
+      - name: current_task
+        description: "Full definition of the atomic task currently being executed"
+        required: true
+      - name: historical_task_catalog
+        description: "List of completed historical tasks available as execution context candidates"
+        required: true
+      - name: project_context_excerpt
+        description: "Project architectural context excerpt when available"
+        required: false
+      - name: validation_error
+        description: "Pydantic validation error message from the failed attempt"
+        required: true

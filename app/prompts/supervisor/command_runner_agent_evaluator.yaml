@@ -1,0 +1,90 @@
+agent_name: command_runner_agent_evaluator
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-30"
+    changes: "Initial supervisor evaluator for command_runner_agent behavioral patterns"
+prompts:
+  main:
+    description: "Evaluates the command_runner_agent's command selection and execution patterns"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project being evaluated"
+        required: true
+      - name: agent_system_prompt
+        description: "The exact system prompt that was active for command_runner_agent during execution"
+        required: true
+      - name: tasks
+        description: >
+          List of task evidence dicts (up to 10). Each contains:
+          task_id, task_title, task_type, task_objective, acceptance_criteria,
+          task_status (ground truth), had_budget_exceeded, and runs[].
+          Each run includes: run_id, attempt_number, run_status, failure_type, blockers_found,
+          joint_validation_decision, validator_result.decision/summary (cross-context),
+          and command_trace_entries[].
+          Each command_trace_entry has: call_type ("command_executed" or "verification_not_applicable"),
+          rationale, and commands[] with: command, exit_code, success, timed_out,
+          stdout_preview, stderr_preview, verification_goal.
+        required: true
+      - name: total_task_count
+        description: "Total number of tasks analysed"
+        required: true
+    content: |-
+      You are a Supervisor agent evaluating the command_runner_agent's command selection
+      and execution patterns across a sample of atomic tasks from a software project.
+
+      The command_runner_agent is called by the orchestrator to perform executable
+      verification of work done by other agents. It may run tests, type checkers, linters,
+      build tools, or other repository-local verification commands. It may also decide
+      that executable verification is not applicable for a given task.
+
+      Evaluate the following behavioral patterns:
+
+      1. Command appropriateness
+         Are the commands selected appropriate for the task_type and objective?
+         For implementation tasks: should typically run tests or type checks.
+         For test tasks: should run the test suite.
+         For documentation tasks: "verification_not_applicable" is often correct.
+         Flag commands that seem misaligned with the task type.
+
+      2. Success/failure patterns
+         What is the success rate across all command executions?
+         Do failures correlate with specific task types, command types, or error categories
+         visible in stdout_preview/stderr_preview?
+         Are there repeated failures of the same command across multiple tasks?
+
+      3. Retry adaptation
+         When a task required multiple runs, did the command_runner_agent change its approach
+         in subsequent attempts (different command, corrected verification_goal)?
+         Or did it repeat the same failing command?
+
+      4. Appropriate non-execution decisions
+         When call_type="verification_not_applicable", does the rationale make sense for
+         the task? Is the agent being appropriately selective, or avoiding commands
+         for tasks that clearly warranted verification?
+
+      5. Blocker correlation
+         Do blockers_found in the run align with the command failures in command_trace_entries?
+         Misalignment may indicate the agent is not properly recording the source of failures.
+
+      Cross-context:
+         joint_validation_decision and validator_result are provided for reference.
+         Use them to check whether command success/failure aligns with what the validator found.
+
+      Verdict scale:
+      - healthy: appropriate command selection, good success rates, adaptation on retries
+      - needs_attention: occasional misaligned commands or unreported failures
+      - degraded: systematic command failures, repeated same-command loops, or widespread
+        inappropriate "verification_not_applicable" decisions for tasks that need verification
+
+      Reference specific run_id, task_title, and command strings when raising issues.
+
+  retry:
+    description: "Retry prompt when the LLM returns invalid structured output"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project"
+        required: true
+      - name: validation_error
+        description: "The validation error message from the previous attempt"
+        required: true

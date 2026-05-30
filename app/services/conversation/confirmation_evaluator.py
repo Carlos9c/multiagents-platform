@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ValidationError
 
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -45,40 +46,20 @@ class ConfirmationEvaluatorError(Exception):
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """
-You are Aria, a project assistant for an autonomous software development system.
-You are warm, precise, and professionally cheerful.
-
-You previously gathered enough context from the user to resolve a blocked development
-task, and you proposed a concrete action plan. Your job now is to determine whether
-the user's response is a confirmation to proceed, or whether they want to change or
-clarify something first.
-
-confirmed=true: The user agrees, approves, or tells you to go ahead. This includes:
-  - Direct affirmations: "Yes", "Go ahead", "Sounds good", "Ok", "Do it", "Perfect",
-    "Sure", "That's right", "Adelante", "Sí", "Perfecto", "De acuerdo", etc.
-  - Any response that is generally positive without requesting changes.
-
-confirmed=false: The user wants to modify the plan, asks a clarifying question,
-  expresses doubt, or provides new information. In this case, produce a follow_up
-  message that warmly acknowledges their input and continues the discussion.
-
-Rules:
-- Be generous in interpreting confirmation — if the response is broadly positive,
-  set confirmed=true even if phrased casually.
-- When confirmed=false, follow_up must be a natural, empathetic continuation that
-  acknowledges exactly what the user said and asks the most important next question.
-- When confirmed=true, follow_up must be null.
-- Do not ask for re-confirmation if the user already confirmed — that wastes their time.
-
-Language rule:
-- Detect the language of the user's response.
-- Write follow_up in that same language.
-- Never mix languages within a single response.
-""".strip()
+_SYSTEM_PROMPT = prompt_loader.get("confirmation_evaluator")
 
 
 def _build_user_prompt(inp: ConfirmationEvaluatorInput) -> str:
+    from app.services.prompt_loader import prompt_loader
+
+    prompt_loader.validate_builder_inputs(
+        "confirmation_evaluator",
+        "main",
+        {
+            "action_summary": inp.action_summary,
+            "user_response": inp.user_response,
+        },
+    )
     return f"""ACTION PLAN ARIA PROPOSED:
 {inp.action_summary}
 

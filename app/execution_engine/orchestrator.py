@@ -34,8 +34,11 @@ from app.execution_engine.subagent_registry import (
     SubagentRegistryError,
 )
 from app.execution_engine.subagents.base import SubagentRejectedStepError
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
+
+ORCHESTRATOR_SYSTEM_PROMPT = prompt_loader.get("orchestrator", "decision")
 
 
 def _is_transient_infrastructure_error(exc: BaseException) -> bool:
@@ -53,212 +56,6 @@ def _is_transient_infrastructure_error(exc: BaseException) -> bool:
                 return True
         current = current.__cause__ or current.__context__
     return False
-
-
-ORCHESTRATOR_SYSTEM_PROMPT = """
-You are the execution orchestrator for one already-atomic task.
-
-Your job is to decide exactly one of these three things:
-1. call_subagent -> because there is a clear and safe next subagent contribution
-2. finish -> because the operational pass is sufficient and no clearly better next contribution remains
-3. reject -> because there is no safe operational contribution possible with the available subagents and tools
-
-You do not perform the work yourself.
-You coordinate subagents.
-You must never change the task itself.
-
-Return ONLY JSON matching the provided schema.
-
-JSON field rules (enforced by the validator — violations cause the whole run to fail):
-- When decision_type is "finish", "reject", or "invalid": subagent_name MUST be null and target_paths MUST be an empty list.
-- When decision_type is "call_subagent": subagent_name MUST be a non-null string from
-  {context_selection_agent, code_change_agent, command_runner_agent, document_writer_agent, test_builder_agent, environment_manager_agent}.
-
-Core responsibility:
-- Look at the task, the current phase, the accumulated evidence, and the last executed subagent.
-- Decide the single next best orchestration decision.
-- Keep the execution ordered, purposeful, and coherent.
-- Prefer the minimum next useful progress.
-- Finish as soon as the operational pass is sufficient.
-- Reject only when no safe operational route exists with the current execution engine.
-
-Critical boundary:
-- You are NOT a quality reviewer of subagent outputs.
-- You do NOT judge whether produced files are elegant, ideal, over-designed, or minimally perfect.
-- You do NOT request another subagent call just to polish or improve an already sufficient output.
-- You only decide whether another operational step is still required to move the task forward.
-- Risk notes and warnings are not, by themselves, concrete gaps.
-- A concrete gap exists only when a specific next subagent action is still operationally necessary.
-
-Phase model:
-1. discovery
-   Meaning:
-   - The task is still preparing the context needed for correct execution.
-   - If no subagent has acted yet, you must start by calling context_selection_agent.
-
-   Normal behavior:
-   - Call context_selection_agent.
-   - Do not finish from discovery.
-   - Do not call implementation or verification subagents before context has been selected.
-
-2. execution
-   Meaning:
-   - The task is in active operational execution.
-   - From here you may call subagents, finish, or reject.
-
-   Normal behavior:
-   - Call context_selection_agent only if execution reveals a real and hard context gap.
-   - Call code_change_agent only if implementation work is needed: source code, scripts, configuration files, or any file whose primary content is executable logic. Do not use it for pure test-writing tasks.
-   - Call test_builder_agent when task_type is "testing" or when the primary goal is writing test
-     files. test_builder_agent writes ONLY test files and produces a secondary coverage assessment.
-     For testing tasks, routing must be derived from the task's objective and acceptance_criteria —
-     not from whether test files already exist in the workspace:
-     * If the acceptance_criteria define success as test files being written and covering certain
-       cases → test_builder_agent is the primary deliverable-producing subagent.
-     * If the acceptance_criteria also require tests to run and pass (verification_level="runtime")
-       → plan to call command_runner_agent after test_builder_agent completes.
-     * If no new test files are needed and the task objective is to verify already-written test
-       behavior → command_runner_agent may be the appropriate first execution subagent.
-     The repair loop for testing tasks that require execution:
-       test_builder_agent → command_runner_agent → (on repairable failure, see fault_side below)
-       → repair subagent → command_runner_agent.
-       fault_side from error_diagnosis tells you which repair subagent to call:
-         "implementation" → code_change_agent (implementation has gaps the tests expose)
-         "test"           → test_builder_agent (test expectations are stale or wrong)
-         "both"           → code_change_agent first, then re-run tests
-         "environment"    → environment_manager_agent (missing package / system dep)
-         "uncertain"      → use overall_error_class and is_recoverable to decide
-   - Call environment_manager_agent when error_diagnosis.fault_side is "environment", or when
-     overall_error_class is "missing_dependency" and the failure is recoverable. This subagent
-     installs missing packages and updates the runtime manifest. Do not call code_change_agent
-     to fix dependency errors — route those to environment_manager_agent instead.
-   - Call document_writer_agent only if the primary deliverable is a documentation or design artifact: README, architecture docs, ADRs, API specs, design documents, onboarding guides, specification files, or diagram-as-code files. document_writer_agent may embed code snippets inside those documents (e.g., examples in a README) but its output must be a text artifact, not a source code file meant to be executed or imported.
-   - Do not call code_change_agent for tasks whose deliverable is a documentation or design artifact — route those to document_writer_agent instead.
-   - Do not call code_change_agent for tasks whose primary goal is writing test files — route those to test_builder_agent instead.
-   - Do not call test_builder_agent for implementation tasks whose deliverable is source code or configuration — route those to code_change_agent.
-   - Do not call document_writer_agent for implementation tasks whose deliverable is a source code file, test file, or configuration file meant to be executed or imported.
-   - Call command_runner_agent only if repository-local verification would materially improve the evidence.
-   - Finish when the completion checklist says the pass is sufficient.
-   - Reject only when no safe contribution is possible with the available subagents.
-
-Subagent sequencing rule:
-- You must not call the same subagent that was executed most recently.
-- If a subagent just acted, the next valid decision must either:
-  - call a different subagent, or
-  - finish, or
-  - reject.
-
-How to choose subagents:
-- Choose the subagent whose role best matches the current need.
-- Prefer the minimum next useful progress.
-- Do not call a subagent just because it exists.
-- Use the accumulated evidence to decide what is still missing.
-- Use context_selection_agent again only when a genuine context gap appears during execution.
-- Do not use command_runner_agent for exploration.
-- Repository-local verification is not automatically required just because files changed.
-- For documentation, requirements, specification, README, or design-note tasks, use document_writer_agent — not code_change_agent. document_writer_agent may include code snippets inside those documents.
-- For documentation, requirements, specification, README, or design-note tasks, repository-local command execution is often not materially useful unless the task explicitly asks for a check, test, lint, build, or other executable verification step.
-- For tasks with task_type="testing", derive routing from the task's objective and
-  acceptance_criteria — not from file existence in the workspace. If success requires test
-  files to be written → test_builder_agent first. If success also requires tests to pass →
-  command_runner_agent after. On repairable failure → use fault_side from error_diagnosis
-  to pick the repair subagent (implementation → code_change_agent, test → test_builder_agent,
-  environment → environment_manager_agent) → command_runner_agent.
-- A failed verification attempt does not by itself prove that the task still has a concrete product gap.
-- If verification later succeeds and covers the task materially, do not continue the loop just because earlier attempts failed.
-
-Error diagnosis routing (when error_diagnosis observations are present in evidence_items):
-- When evidence_items contains observations with evidence_type="error_diagnosis", read them
-  as structured, reliable information produced by a two-step LLM analysis of an actual failure.
-- Do NOT ignore error_diagnosis observations. They contain more actionable information than
-  raw stdout/stderr text.
-- The "latest_error_diagnosis" section in this prompt surfaces the most recent one.
-- Use fault_side (PRIMARY) to guide which repair subagent to call:
-  - "implementation" → call code_change_agent to repair the identified issue in source code.
-  - "test"           → call test_builder_agent to fix stale or incorrect test expectations.
-  - "both"           → call code_change_agent first (fix implementation), then re-verify.
-  - "environment"    → call environment_manager_agent to install missing packages or fix deps.
-  - "uncertain"      → fall back to overall_error_class rules below.
-- When fault_side is absent or "uncertain", use overall_error_class as fallback:
-  - "compilation_failure", "assertion_failure", "lint_violation", "syntax_error",
-    "runtime_error", "script_error" → call code_change_agent to repair.
-  - "missing_dependency" with is_recoverable=true → call environment_manager_agent.
-  - "missing_dependency" with is_recoverable=false → reject (cannot be fixed here).
-  - "permission_error", "network_error", "timeout", "command_not_found" with
-    is_recoverable=false → the error is not repairable. Use reject.
-- confidence informs how certain you should be about the fault_side routing:
-  - "high" → trust fault_side and route accordingly.
-  - "medium" → follow fault_side but be ready to reconsider if the repair doesn't help.
-  - "low" → fault_side is a best guess; prefer reject over a potentially wrong repair loop.
-- Use repair_directive as the specific goal for the repair subagent call.
-- root_cause_errors (is_cascade=false) are the real errors to fix — fix those, not cascade errors.
-- cross_file_root_cause (if non-null) identifies a shared cause — repair the root once instead
-  of patching each cascade file individually.
-- newly_discovered_files are automatically loaded into preloaded_dependency_files before this
-  decision — they are already available to the next subagent.
-
-Binary completion checklist:
-You must explicitly reason over these four fields before deciding:
-- context_ready: yes/no
-- implementation_done_if_needed: yes/no
-- local_verification_done_if_material: yes/no
-- new_concrete_gap_detected: yes/no
-
-Interpretation:
-- context_ready = yes when the execution context is already sufficient for the current task.
-- implementation_done_if_needed = yes when required repository changes have already been materialized, or when no material repository change is needed for this task.
-- local_verification_done_if_material = yes when repository-local verification has already been performed when it would materially improve confidence, or when such verification would not materially improve the evidence.
-- new_concrete_gap_detected = yes only when there is a specific, operationally actionable missing piece that another subagent can address now.
-- Warnings, smells, design preferences, and speculative concerns do not count as new concrete gaps unless they block the task objective or the required verification.
-
-Hard finish rule:
-- If context_ready=yes
-- and implementation_done_if_needed=yes
-- and local_verification_done_if_material=yes
-- and new_concrete_gap_detected=no
-- then you must choose finish.
-
-What to inspect before choosing finish:
-- Look at accumulated evidence_items.
-- Look at changed_files to see whether implementation work already happened.
-- Look at executed_commands to see whether operational verification already happened.
-- Look at the last attempted subagent to avoid repeating work.
-- Look at whether the latest command evidence succeeded or failed.
-- Do not keep the loop open merely because some warning or risk note exists.
-
-Important: setup commands are NOT acceptance-criteria verification.
-- Commands like chmod +x, mkdir, cp, mv, apt-get install, pip install are infrastructure prep.
-- Even if a setup command succeeded (exit_code=0), that does NOT satisfy local_verification_done_if_material.
-- When the task requires running a test, build, or other verification command, the actual test/build must have run and succeeded — a preceding chmod or mkdir does not count.
-- If the last command was a setup step and the acceptance-criteria test has not yet run, local_verification_done_if_material is NO. Call command_runner_agent to run the actual test.
-
-Do not finish just because some work exists.
-Finish because the checklist says the current operational pass is sufficient.
-
-How to use reject:
-- Reject is a last-resort orchestration decision.
-- Choose reject only when no available subagent can safely provide meaningful next progress.
-- Reject means there is no safe and meaningful operational route left inside this execution engine.
-
-Reject is correct when:
-- the task requires work outside the capabilities of all available subagents,
-- the task cannot be advanced through context selection, repository changes, or repository-local verification,
-- the current state is structurally compatible with the engine, but operationally no safe next step exists.
-
-Do not reject when:
-- you simply chose the wrong subagent in the previous iteration,
-- changes could still advance the task,
-- local verification could still improve the evidence,
-- the task is incomplete but still operationally actionable.
-
-Hard constraints:
-- Never change the task.
-- Decide exactly one orchestration decision.
-- Use only real subagents available in the system.
-- Do not invent hidden tools or hidden execution paths.
-- Do not call the same subagent twice in a row.
-- If no subagent has acted yet, call context_selection_agent.
-""".strip()
 
 
 def _append_trace_notes_to_evidence(resolution_state: ResolutionState) -> None:
@@ -954,6 +751,59 @@ def _build_orchestrator_prompt(
     last_attempted_subagent = _last_attempted_subagent_name(runtime_state)
     checklist = _build_completion_checklist(request, resolution_state, runtime_state)
 
+    prompt_loader.validate_builder_inputs(
+        "orchestrator",
+        "decision",
+        {
+            "task_id": request.task_id,
+            "task_type": request.task_type,
+            "task_title": request.task_title,
+            "task_description": request.task_description,
+            "objective": request.objective,
+            "acceptance_criteria": request.acceptance_criteria,
+            "technical_constraints": request.technical_constraints,
+            "out_of_scope": request.out_of_scope,
+            "executor_type": request.executor_type,
+            "execution_engine_capabilities": capability_text,
+            "step_count": runtime_state.step_count,
+            "agent_call_count": runtime_state.agent_call_count,
+            "repair_attempt_count": runtime_state.repair_attempt_count,
+            "historical_context_present": historical_context_present,
+            "historical_task_run_count": historical_task_run_count,
+            "relevant_files": request.context.relevant_files,
+            "key_decisions": request.context.key_decisions,
+            "related_tasks_count": len(request.context.related_tasks),
+            "orchestration_phase": resolution_state.phase,
+            "historical_task_selection_present": resolution_state.historical_task_selection
+            is not None,
+            "materialization_attempt_count": resolution_state.materialization_attempt_count,
+            "completed_steps": resolution_state.completed_steps,
+            "failed_steps": resolution_state.failed_steps,
+            "last_attempted_subagent_name": last_attempted_subagent,
+            "last_completed_subagent_name": last_completed_subagent,
+            "risk_flags": resolution_state.risk_flags,
+            "step_notes": resolution_state.step_notes,
+            "operational_state_summary": _build_operational_state_summary(
+                request, resolution_state, runtime_state
+            ),
+            "checklist_context_ready": checklist["context_ready"],
+            "checklist_implementation_done_if_needed": checklist["implementation_done_if_needed"],
+            "checklist_local_verification_done_if_material": checklist[
+                "local_verification_done_if_material"
+            ],
+            "checklist_new_concrete_gap_detected": checklist["new_concrete_gap_detected"],
+            "latest_error_diagnosis": _render_error_diagnosis_for_prompt(resolution_state.evidence),
+            "changed_files": [
+                item.model_dump() for item in resolution_state.evidence.changed_files
+            ],
+            "executed_commands": _render_commands_for_prompt(resolution_state),
+            "files_read": _render_files_read_for_prompt(resolution_state),
+            "change_dependencies": _render_change_dependencies_for_prompt(resolution_state),
+            "artifacts_created": _render_artifacts_created_for_prompt(resolution_state),
+            "evidence_notes": _render_notes_for_prompt(resolution_state),
+            "evidence_items": _render_evidence_items_for_prompt(resolution_state),
+        },
+    )
     return f"""
 Task:
 - task_id: {request.task_id}
@@ -1190,6 +1040,75 @@ def _latest_error_diagnosis_observation(evidence: ExecutionEvidence) -> dict | N
         if item.evidence_type == OBSERVATION_TYPE_ERROR_DIAGNOSIS:
             return item.payload
     return None
+
+
+def _extract_error_diagnoses_for_trace(evidence: ExecutionEvidence) -> list[dict]:
+    """Extract all error_diagnosis observations from evidence as compact dicts."""
+    diagnoses: list[dict] = []
+    for item in evidence.observations:
+        if item.evidence_type == OBSERVATION_TYPE_ERROR_DIAGNOSIS:
+            p = item.payload
+            diagnoses.append(
+                {
+                    "fault_side": p.get("fault_side", "uncertain"),
+                    "confidence": p.get("confidence", "medium"),
+                    "is_recoverable": p.get("is_recoverable", True),
+                    "overall_error_class": p.get("overall_error_class"),
+                }
+            )
+    return diagnoses
+
+
+def _count_trace_events(
+    orchestrator_trace: OrchestratorTrace | None,
+    event_type: str,
+) -> int:
+    if orchestrator_trace is None:
+        return 0
+    return sum(1 for e in orchestrator_trace.events if e.event_type == event_type)
+
+
+def _write_orchestrator_execution_trace(
+    *,
+    request: ExecutionRequest,
+    resolution_state: ResolutionState,
+    runtime_state: ExecutionState,
+    budget: LoopBudget,
+    executed_subagents: list[str],
+    final_decision: str,
+    forced_terminal: bool,
+) -> None:
+    """Append one orchestrator run summary to execution_trace.jsonl.
+
+    Never raises — trace failures must not interrupt execution.
+    """
+    from app.services.supervisor.trace_writer import append_execution_trace
+
+    entry: dict = {
+        "agent": "orchestrator",
+        "project_id": request.project_id,
+        "task_id": request.task_id,
+        "run_id": request.execution_run_id,
+        "execution_agent_sequence": list(executed_subagents),
+        "steps_used": runtime_state.step_count,
+        "agent_calls_used": runtime_state.agent_call_count,
+        "repair_attempts_used": runtime_state.repair_attempt_count,
+        "final_decision": final_decision,
+        "forced_terminal": forced_terminal,
+        "budget_max": {
+            "max_steps": budget.max_steps,
+            "max_agent_calls": budget.max_agent_calls,
+            "max_repair_attempts": budget.max_repair_attempts,
+        },
+        "invalid_decision_count": _count_trace_events(
+            resolution_state.orchestrator_trace, "orchestrator_decision_invalidated"
+        ),
+        "normalized_decision_count": _count_trace_events(
+            resolution_state.orchestrator_trace, "decision_normalized_by_guardrail"
+        ),
+        "error_diagnoses": _extract_error_diagnoses_for_trace(resolution_state.evidence),
+    }
+    append_execution_trace(project_id=request.project_id, entry=entry)
 
 
 def _expand_context_from_error_diagnosis(
@@ -1522,6 +1441,7 @@ class ExecutionOrchestrator:
             )
             if forced_terminal_decision is not None:
                 decision = forced_terminal_decision
+                _this_decision_was_forced = True
             else:
                 try:
                     raw_decision = self._decide_next_action(
@@ -1565,6 +1485,7 @@ class ExecutionOrchestrator:
                     runtime_state=runtime_state,
                     decision=raw_decision,
                 )
+                _this_decision_was_forced = False
 
                 if (
                     decision.decision_type != raw_decision.decision_type
@@ -1622,6 +1543,15 @@ class ExecutionOrchestrator:
                     },
                 )
                 _append_trace_notes_to_evidence(resolution_state)
+                _write_orchestrator_execution_trace(
+                    request=active_request,
+                    resolution_state=resolution_state,
+                    runtime_state=runtime_state,
+                    budget=self.budget,
+                    executed_subagents=executed_subagents,
+                    final_decision="finish",
+                    forced_terminal=_this_decision_was_forced,
+                )
 
                 logger.info(
                     "execution_orchestrator_finished task_id=%s changed_files=%s commands=%s repair_attempts=%s",
@@ -1700,6 +1630,15 @@ class ExecutionOrchestrator:
                     payload=decision.model_dump(),
                 )
                 _append_trace_notes_to_evidence(resolution_state)
+                _write_orchestrator_execution_trace(
+                    request=active_request,
+                    resolution_state=resolution_state,
+                    runtime_state=runtime_state,
+                    budget=self.budget,
+                    executed_subagents=executed_subagents,
+                    final_decision="reject",
+                    forced_terminal=_this_decision_was_forced,
+                )
 
                 return (
                     ExecutionResult(
@@ -1839,6 +1778,15 @@ class ExecutionOrchestrator:
                 # Route immediately to manual review rather than consuming repair budget.
                 if decision.subagent_name == "environment_manager_agent":
                     _append_trace_notes_to_evidence(resolution_state)
+                    _write_orchestrator_execution_trace(
+                        request=active_request,
+                        resolution_state=resolution_state,
+                        runtime_state=runtime_state,
+                        budget=self.budget,
+                        executed_subagents=executed_subagents,
+                        final_decision="env_manager_rejected",
+                        forced_terminal=True,
+                    )
                     logger.warning(
                         "execution_orchestrator_env_manager_rejected_terminal task_id=%s error=%s",
                         active_request.task_id,
@@ -1920,6 +1868,15 @@ class ExecutionOrchestrator:
             payload={"max_steps": self.budget.max_steps},
         )
         _append_trace_notes_to_evidence(resolution_state)
+        _write_orchestrator_execution_trace(
+            request=active_request,
+            resolution_state=resolution_state,
+            runtime_state=runtime_state,
+            budget=self.budget,
+            executed_subagents=executed_subagents,
+            final_decision="budget_exceeded",
+            forced_terminal=True,
+        )
 
         return (
             ExecutionResult(

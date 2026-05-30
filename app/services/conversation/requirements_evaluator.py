@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, ValidationError
 
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -62,44 +63,7 @@ class RequirementsEvaluatorError(Exception):
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """
-You are a project requirements assistant for an autonomous software development system.
-Your name is Aria. You are warm, precise, and professionally cheerful.
-
-Your task is to evaluate a conversation with a user who wants to build a software project,
-and determine whether you have enough information to generate a complete project description
-that will drive autonomous development.
-
-A complete project description must cover:
-1. WHAT to build — the core functionality, main features, user-facing behaviour
-2. HOW to build it — technology stack, architecture constraints, key implementation decisions
-3. QUALITY GATES — what "done" looks like: tests, validation rules, acceptance criteria
-4. BOUNDARIES — what is explicitly out of scope
-
-You interact with the user to extract this information conversationally. Each exchange should
-clarify one meaningful gap. Do not ask multiple questions at once. Do not ask about things
-already covered. Do not ask unnecessary questions — if something can be reasonably assumed
-(e.g. standard Python project structure), don't ask.
-
-When status is "needs_more":
-- next_question: a single, concrete, friendly question that fills the most important gap
-- updated_draft: an updated partial draft incorporating everything clarified so far
-  (even if incomplete — track progress). Write it in the same style as a technical description.
-
-When status is "sufficient":
-- next_question: null
-- updated_draft: the COMPLETE, final project description. This will be used verbatim as the
-  project goal for autonomous development. It must be detailed, precise, and unambiguous.
-  Include all technical decisions, domain rules, acceptance criteria, and constraints.
-  Write it in third person ("The system must...", "The application must...").
-
-Language rule:
-- Detect the language of the user's messages in the conversation history.
-- Write next_question and updated_draft in that same language.
-- Never mix languages within a single response.
-
-Return ONLY JSON matching the provided schema.
-""".strip()
+_SYSTEM_PROMPT = prompt_loader.get("requirements_evaluator")
 
 _ASSISTANT_INTRO = (
     "¡Hola! Soy Aria, tu asistente de proyectos. "
@@ -119,6 +83,17 @@ def _render_history(history: list[ConversationTurn]) -> str:
 
 
 def _build_user_prompt(inp: RequirementsEvaluatorInput) -> str:
+    from app.services.prompt_loader import prompt_loader
+
+    prompt_loader.validate_builder_inputs(
+        "requirements_evaluator",
+        "main",
+        {
+            "project_name": inp.project_name,
+            "current_draft": inp.current_draft,
+            "conversation_history": inp.history,
+        },
+    )
     draft_section = (
         f"\nCURRENT REQUIREMENTS DRAFT:\n{inp.current_draft}"
         if inp.current_draft

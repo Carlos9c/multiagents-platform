@@ -7,6 +7,7 @@ import json
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.git_utils import get_system_version
 from app.models.artifact import Artifact
 from app.models.execution_run import (
     EXECUTION_RUN_STATUS_FAILED,
@@ -77,6 +78,7 @@ def create_execution_run(
         status=EXECUTION_RUN_STATUS_PENDING,
         input_snapshot=input_snapshot,
         recovery_action=RECOVERY_ACTION_NONE,
+        system_version=get_system_version(),
     )
     db.add(run)
     _finalize_persistence(db, entity=run, auto_commit=auto_commit)

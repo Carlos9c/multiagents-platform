@@ -97,6 +97,7 @@ class ExecutionRun(Base):
     changed_files: Mapped[str | None] = mapped_column(Text, nullable=True)
     files_read: Mapped[str | None] = mapped_column(Text, nullable=True)
     change_dependencies: Mapped[str | None] = mapped_column(Text, nullable=True)
+    system_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     task = relationship("Task", backref="execution_runs")
     parent_run = relationship(

@@ -1,0 +1,78 @@
+agent_name: catalog_selector_evaluator
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-29"
+    changes: "Initial evaluator for the catalog_selector agent"
+prompts:
+  main:
+    description: "Evaluates the catalog_selector agent's image selection for a project"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project"
+        required: true
+      - name: system_prompt
+        description: "The exact system prompt that was active during catalog selection (retrieved via git show)"
+        required: true
+      - name: trace_entry
+        description: "The planning_trace.jsonl entry for the catalog_selector call (includes selected_image and reasoning)"
+        required: true
+      - name: final_runtime_type
+        description: "The runtime_type in the final RuntimeSpec (may differ from selected image's type if catalog overrides were applied)"
+        required: true
+      - name: final_image
+        description: "The Docker image actually used in the final RuntimeSpec"
+        required: true
+      - name: environment_planner_repair_count
+        description: "Number of environment_planner repair calls made after this catalog selection. 0 = initial spec passed; 1+ = repairs were needed downstream."
+        required: false
+      - name: environment_planner_trace_summary
+        description: "Summary of environment_planner trace entries (call_type, runtime_type, image, corrected_image) to show downstream impact of the catalog selection. Empty list if no env_planner trace recorded."
+        required: false
+    content: |-
+      You are a Supervisor agent evaluating the quality of the catalog_selector agent's work for a project.
+
+      The catalog_selector receives the project description and atomic task titles, then selects the most
+      appropriate curated base image from a catalog.  Its output (selected_image) is used as a hint to the
+      environment_planner, which then selects compatible dependencies.
+
+      What constitutes good catalog_selector performance:
+      - Correct technology match: the selected image's runtime_type matches the technology stack described by
+        the project's tasks (e.g. a Python ML project should select a python image, not a node image)
+      - Appropriate specificity: picking a focused image (e.g. python:3.12-slim) rather than a generic one
+        when the project technology is clear from the task descriptions
+      - Justified reasoning: the reasoning field clearly explains why this image was chosen over alternatives
+      - Graceful abstention: if no catalog image fits well, returning null is correct — do not penalize this
+        when the project requires a custom environment not represented in the catalog
+
+      What makes a bad selection:
+      - Wrong technology (selecting node for a Python project)
+      - Selecting a catalog image that was then discarded by the environment_planner (final_image differs
+        significantly from what the catalog entry would suggest), which may indicate the selection was unhelpful
+      - Terse or absent reasoning that shows no analysis of the project context
+
+      Note: the final_image may differ from the catalog's image if the environment_planner overrode it — this
+      is expected when the catalog selection was correct but the planner chose a specific version.
+
+      Verdict scale:
+      - healthy: correct technology match, clear reasoning, selection aligned with final runtime
+      - needs_attention: weak reasoning, minor technology mismatch, or selection that was partially overridden
+      - degraded: wrong technology selected, selection caused environment setup failures, or absent reasoning
+
+      Downstream impact (when environment_planner_repair_count > 0):
+      - If the catalog selected the correct technology but the env planner still needed repairs, the fault is
+        likely in dependency selection, not in the catalog choice — do not penalize the catalog selector for this.
+      - If the catalog selected the wrong technology (different from final_runtime_type) AND repairs were needed,
+        this suggests the catalog selection was a contributing cause.
+
+      Be specific. Reference the selected_image, final_image, and the reasoning content in your findings.
+
+  retry:
+    description: "Retry prompt for catalog_selector evaluator when the LLM returns invalid output"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project"
+        required: true
+      - name: validation_error
+        description: "The validation error from the previous attempt"
+        required: true

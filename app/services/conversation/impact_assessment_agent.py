@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -125,64 +126,7 @@ class ImpactAssessmentError(Exception):
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """
-You are the Impact Assessment Agent for an autonomous software development system.
-
-Your job is to analyse a user clarification received after a task was paused for manual review,
-and determine what scope of change is required to resume project execution.
-
-You classify the clarification into one of three scopes:
-
-NARROW — the clarification only fixes the specific blocked task without invalidating
-anything else already planned or completed. Use this when:
-- The user corrects a small misunderstanding or provides a missing detail
-- The high-level plan and all other tasks remain fully valid
-- Completed work is unaffected
-
-MODERATE — the clarification affects multiple atomic tasks but the high-level goals
-remain valid. Use this when:
-- Some pending atomic tasks need updated descriptions, steps, or criteria
-- New atomic tasks may be needed to cover work not previously planned
-- Completed work is still structurally valid
-- The high-level tasks (objectives) themselves do NOT change
-
-DISRUPTIVE — the clarification fundamentally changes the direction of the project.
-Use this when:
-- At least one high-level goal/objective is no longer valid
-- The clarification invalidates completed work (not just pending tasks)
-- A major technology or architecture decision changes
-- The overall project description must be rewritten
-
-Rules:
-- Be conservative: prefer narrow over moderate, moderate over disruptive.
-- Only classify as disruptive if there is a clear invalidation of high-level goals
-  or completed work.
-- For moderate scope: produce concrete task_id-level revisions. Only modify tasks
-  where you can identify specific changes required by the clarification. Leave
-  unaffected tasks out of tasks_to_modify.
-- For narrow or disruptive scope: leave tasks_to_modify and tasks_to_add empty.
-- reasoning must explain WHY you chose this scope and what specifically is affected.
-- resequence_needed: set true for moderate when the new/modified tasks change the
-  logical ordering of pending work.
-- environment_changes: populate this list if the clarification implies new libraries,
-  frameworks, tools, or runtime dependencies that are not already part of the project.
-  This applies to ALL scopes (narrow, moderate, disruptive). Leave empty if no new
-  dependencies are required. Each entry needs:
-  * package_name: the installable package name.
-  * version_constraint: the version string (e.g. "2.31.0") or null if any version is fine.
-  * reason: why this dependency is needed.
-  * version_strictness: how strictly to enforce the version ("exact_only" | "preferred" |
-    "any_compatible"). Use "exact_only" when the user explicitly requires a specific version
-    and it is not negotiable. Use "preferred" when a version is mentioned but alternatives
-    are acceptable. Use "any_compatible" (default) when no version is specified.
-
-Language rule:
-- Detect the language of the user clarification.
-- Write all text output fields (title, description, objective, implementation_steps, acceptance_criteria, technical_constraints, reason, reasoning) in that same language.
-- Never mix languages within a single response.
-
-Return ONLY JSON matching the provided schema.
-""".strip()
+_SYSTEM_PROMPT = prompt_loader.get("impact_assessment_agent")
 
 
 def _render_completed(tasks: list[CompletedTaskSummary]) -> str:
@@ -205,6 +149,19 @@ def _render_pending(tasks: list[PendingTaskSummary]) -> str:
 
 
 def _build_user_prompt(inp: ImpactAssessmentInput) -> str:
+    from app.services.prompt_loader import prompt_loader
+
+    prompt_loader.validate_builder_inputs(
+        "impact_assessment_agent",
+        "main",
+        {
+            "project_goal": inp.project_goal,
+            "user_clarification": inp.user_clarification,
+            "blocked_task": inp.blocked_task,
+            "completed_tasks": inp.completed_tasks,
+            "pending_tasks": inp.pending_tasks,
+        },
+    )
     blocked = inp.blocked_task
     return f"""
 Assess the impact of the following user clarification on the project.

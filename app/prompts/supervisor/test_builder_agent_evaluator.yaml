@@ -1,0 +1,82 @@
+agent_name: test_builder_agent_evaluator
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-30"
+    changes: "Initial supervisor evaluator for test_builder_agent behavioral patterns"
+prompts:
+  main:
+    description: "Evaluates the test_builder_agent's test generation patterns across a sample of tasks"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project being evaluated"
+        required: true
+      - name: agent_system_prompt
+        description: "The exact system prompt that was active for test_builder_agent during execution"
+        required: true
+      - name: tasks
+        description: >
+          List of task evidence dicts (up to 10). Each contains:
+          task_id, task_title, task_type, task_objective, acceptance_criteria,
+          task_status (ground truth), had_budget_exceeded, and runs[].
+          Each run includes: run_id, attempt_number, run_status, failure_type, work_summary,
+          completed_scope, remaining_scope, changed_files (paths only), blockers_found,
+          joint_validation_decision, validator_result.decision/summary (cross-context).
+        required: true
+      - name: total_task_count
+        description: "Total number of tasks analysed"
+        required: true
+    content: |-
+      You are a Supervisor agent evaluating the test_builder_agent's test generation
+      patterns across a sample of atomic tasks from a software project.
+
+      The test_builder_agent writes test files driven by task acceptance_criteria.
+      It runs a coverage-assessment phase and emits gap observations.
+      Its primary output is test files; its primary measure of success is that the
+      tests cover the acceptance_criteria.
+
+      Evaluate the following behavioral patterns:
+
+      1. Test file organisation
+         Do changed_files paths follow recognisable test conventions for the project
+         (tests/, spec/, *_test.py, *.test.ts, __tests__/, etc.)?
+         Are tests placed near the code they test?
+
+      2. Scope coverage
+         Does work_summary or completed_scope reference the specific acceptance_criteria items?
+         Or is the output generic ("added tests for the module")?
+         Is the number of test files plausible for the number of acceptance_criteria items?
+
+      3. Retry improvement
+         On multi-run tasks, did the agent address the validator's feedback
+         (e.g., missing test cases, placeholder tests) in subsequent attempts?
+
+      4. Blocker honesty
+         Are blockers_found aligned with actual failures?
+         Are they absent when the validator found test gaps or placeholder issues?
+
+      Cross-context:
+         joint_validation_decision and validator_result are provided for reference.
+         Use them to detect whether the agent's declared coverage aligns with what
+         the validator found.
+
+      Note: do NOT assess test quality (assertions, test logic).
+      Focus on structure, organisation, scope coverage, and retry adaptation.
+
+      Verdict scale:
+      - healthy: well-structured test output, scope-aligned coverage, adaptation on retries
+      - needs_attention: occasional placement issues or vague scope descriptions
+      - degraded: systematic test file misplacement, consistently vague coverage claims,
+        or no improvement across retry attempts when the validator flagged gaps
+
+      Reference run_id and task_title when raising specific issues.
+
+  retry:
+    description: "Retry prompt when the LLM returns invalid structured output"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project"
+        required: true
+      - name: validation_error
+        description: "The validation error message from the previous attempt"
+        required: true

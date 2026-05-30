@@ -1,0 +1,437 @@
+agent_name: command_runner_agent
+version: "1.1.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constants COMMAND_FILE_SELECTION_SYSTEM_PROMPT and COMMAND_RUNNER_AGENT_SYSTEM_PROMPT"
+  - version: "1.1.0"
+    date: "2026-05-29"
+    changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+prompts:
+  file_selection:
+    description: "Selects files to inspect before deciding on a verification command"
+    user_prompt_inputs:
+      - name: task_id
+        description: "Unique identifier of the task"
+        required: true
+      - name: task_title
+        description: "Short title of the task"
+        required: true
+      - name: task_description
+        description: "Full description of the task"
+        required: false
+      - name: objective
+        description: "What the task must accomplish"
+        required: false
+      - name: acceptance_criteria
+        description: "Criteria that must be satisfied for the task to be complete"
+        required: false
+      - name: technical_constraints
+        description: "Technical constraints the implementation must respect"
+        required: false
+      - name: out_of_scope
+        description: "What is explicitly out of scope for this task"
+        required: false
+      - name: tests_required
+        description: "Whether tests are required for this task"
+        required: false
+      - name: executor_type
+        description: "Executor type label for this task"
+        required: false
+      - name: runtime_spec_context
+        description: "Formatted Docker runtime spec with installed packages and image"
+        required: false
+      - name: step_id
+        description: "Identifier of the current orchestrator step"
+        required: true
+      - name: step_instructions
+        description: "Orchestrator rationale / instructions for the current step"
+        required: false
+      - name: step_target_paths
+        description: "Target file paths for the current step"
+        required: false
+      - name: run_dir_path
+        description: "Absolute path of the candidate run tree root"
+        required: true
+      - name: run_tree_inventory
+        description: "Formatted listing of all files in the candidate run tree"
+        required: true
+      - name: changed_files
+        description: "Changed files accumulated so far in this run"
+        required: false
+      - name: prior_commands
+        description: "Commands executed so far in this run"
+        required: false
+      - name: evidence_notes
+        description: "Notes accumulated so far in this run"
+        required: false
+      - name: risk_flags
+        description: "Risk flags raised by the orchestrator"
+        required: false
+      - name: step_notes
+        description: "Notes accumulated across steps"
+        required: false
+      - name: relevant_files
+        description: "Files declared as relevant to this task in the execution context"
+        required: false
+    content: |-
+      You are a repository-local verification context selector.
+
+      Your job is to inspect the candidate run-tree inventory for ONE already-atomic task and select
+      the smallest set of repository-relative files that should be read before deciding whether an
+      executable repository-local verification command is appropriate.
+
+      Hard rules:
+      - Select only files that appear in the provided candidate run-tree inventory.
+      - Select only repository-relative file paths.
+      - Do not select directories.
+      - Do not select duplicate paths.
+      - Select the smallest useful file set.
+      - Do not guess hidden files or tools that are not present in the inventory.
+      - Prefer files that clarify:
+        - test layout
+        - executable entrypoints
+        - repository-local verification conventions
+        - build/test configuration
+        - changed implementation files relevant to the task
+      - If very little file inspection is needed, return only a few files.
+      - If executable verification is likely not applicable, you may still select zero or very few files.
+  main:
+    description: "Plans a single verification command or determines verification is not applicable"
+    user_prompt_inputs:
+      - name: task_id
+        description: "Unique identifier of the task"
+        required: true
+      - name: task_title
+        description: "Short title of the task"
+        required: true
+      - name: task_description
+        description: "Full description of the task"
+        required: false
+      - name: objective
+        description: "What the task must accomplish"
+        required: false
+      - name: acceptance_criteria
+        description: "Criteria that must be satisfied for the task to be complete"
+        required: false
+      - name: technical_constraints
+        description: "Technical constraints the implementation must respect"
+        required: false
+      - name: out_of_scope
+        description: "What is explicitly out of scope for this task"
+        required: false
+      - name: tests_required
+        description: "Whether tests are required for this task"
+        required: false
+      - name: executor_type
+        description: "Executor type label for this task"
+        required: false
+      - name: runtime_spec_context
+        description: "Formatted Docker runtime spec with installed packages and image"
+        required: false
+      - name: step_id
+        description: "Identifier of the current orchestrator step"
+        required: true
+      - name: step_instructions
+        description: "Orchestrator rationale / instructions for the current step"
+        required: false
+      - name: step_target_paths
+        description: "Target file paths for the current step"
+        required: false
+      - name: run_dir_path
+        description: "Absolute path of the candidate run tree root"
+        required: true
+      - name: run_tree_inventory
+        description: "Formatted listing of all files in the candidate run tree"
+        required: true
+      - name: inspection_selected_paths
+        description: "Paths selected for inspection in the previous file_selection call"
+        required: false
+      - name: inspection_selection_rationale
+        description: "Rationale for the file selection in the previous call"
+        required: false
+      - name: inspection_verification_hypothesis
+        description: "Verification hypothesis formed during file selection"
+        required: false
+      - name: inspected_files
+        description: "Contents of the files selected for inspection"
+        required: false
+      - name: changed_files
+        description: "Changed files accumulated so far in this run"
+        required: false
+      - name: files_read
+        description: "Files read so far in this run"
+        required: false
+      - name: prior_commands
+        description: "Commands executed so far in this run"
+        required: false
+      - name: evidence_notes
+        description: "Notes accumulated so far in this run"
+        required: false
+      - name: risk_flags
+        description: "Risk flags raised by the orchestrator"
+        required: false
+      - name: step_notes
+        description: "Notes accumulated across steps"
+        required: false
+    content: |-
+      You are a repository-local verification planner.
+
+      Your job is to inspect the candidate run tree for ONE already-atomic task and decide between exactly one of these two outcomes:
+      1. run_command
+         - choose the single concrete command that should be executed
+         - choose the working directory inside the candidate run tree
+         - explain what that command is meant to verify for later external validation
+
+      2. verification_not_applicable
+         - choose this when no meaningful repository-local executable verification would materially improve the evidence for the current task
+
+      Hard rules:
+      - Do not force a command when no meaningful repository-local verification exists.
+      - Repository-local verification is not automatically required just because files changed.
+      - Documentation, requirements, specification, README, and design-note tasks often do not need executable verification unless the task explicitly asks for it.
+      - If you choose run_command, choose exactly one concrete command.
+      - The command must be repo-local and narrow in purpose.
+      - Do not use shell chaining, pipes, redirection, or multiple commands.
+      - Prefer project-standard commands already supported by the repository layout.
+      - Use the smallest useful verification command.
+      - Determine the working directory from the inventory: locate build configs, test runner configs, Makefiles, package manifests, or entrypoints that signal where the command belongs. '.' is the default; use a subdirectory only when you find concrete evidence in the inventory that the tooling requires it.
+      - When test or spec files appear in the inventory under a subdirectory (e.g., tests/, spec/, __tests__/, test/), the command must explicitly reference that path — pass the subdirectory as an argument to the runner (e.g., pytest tests/, go test ./tests/..., jest tests/, rspec spec/, python -m unittest discover -s tests). Do not use a bare runner invocation that relies on root-level auto-discovery; if the test files are not at the project root, auto-discovery from '.' will produce zero results and the command will be useless.
+      - Do not invent tools, executables, frameworks, entrypoints, or files that are not grounded in the provided inventory/context.
+      - The goal is to produce operational evidence for external validation, not to perform open-ended exploration.
+
+      Planning policy:
+      - Base your command decision on the actual candidate run-tree inventory and the inspected file contents.
+      - Prefer commands supported by the files and configuration actually present in the run tree.
+      - If the executable verification path is ambiguous, choose verification_not_applicable rather than guessing.
+  file_selection_retry:
+    description: "Retry file selection when the LLM output failed schema validation"
+    user_prompt_inputs:
+      - name: task_id
+        description: "Unique identifier of the task"
+        required: true
+      - name: task_title
+        description: "Short title of the task"
+        required: true
+      - name: task_description
+        description: "Full description of the task"
+        required: true
+      - name: objective
+        description: "Specific outcome expected from the task"
+        required: false
+      - name: acceptance_criteria
+        description: "Conditions that must be met for the task to be considered complete"
+        required: false
+      - name: technical_constraints
+        description: "Technical limitations and requirements for the task"
+        required: false
+      - name: out_of_scope
+        description: "Work explicitly excluded from the task"
+        required: false
+      - name: tests_required
+        description: "List of test types required by the task"
+        required: false
+      - name: executor_type
+        description: "The executor assigned to this task"
+        required: false
+      - name: runtime_spec_context
+        description: "Docker runtime spec context when an environment session is active"
+        required: false
+      - name: step_id
+        description: "Unique identifier of the current orchestration step"
+        required: true
+      - name: step_instructions
+        description: "Instructions provided by the orchestrator for this step"
+        required: false
+      - name: step_target_paths
+        description: "File paths targeted by the current step"
+        required: false
+      - name: run_dir_path
+        description: "Absolute path to the ephemeral candidate run tree"
+        required: true
+      - name: run_tree_inventory
+        description: "Full listing of files in the candidate run tree"
+        required: true
+      - name: changed_files
+        description: "Files modified in the workspace overlay during this execution run"
+        required: false
+      - name: prior_commands
+        description: "Commands already executed in previous steps of this run"
+        required: false
+      - name: evidence_notes
+        description: "Accumulated evidence notes from prior steps"
+        required: false
+      - name: risk_flags
+        description: "Risk flags raised by the orchestrator or prior subagents"
+        required: false
+      - name: step_notes
+        description: "Orchestrator notes for the current step"
+        required: false
+      - name: relevant_files
+        description: "Files identified as relevant by prior context or the task definition"
+        required: false
+      - name: validation_error
+        description: "Pydantic validation error message from the failed attempt"
+        required: true
+  main_retry:
+    description: "Retry command planning when the LLM output failed schema validation"
+    user_prompt_inputs:
+      - name: task_id
+        description: "Unique identifier of the task"
+        required: true
+      - name: task_title
+        description: "Short title of the task"
+        required: true
+      - name: task_description
+        description: "Full description of the task"
+        required: true
+      - name: objective
+        description: "Specific outcome expected from the task"
+        required: false
+      - name: acceptance_criteria
+        description: "Conditions that must be met for the task to be considered complete"
+        required: false
+      - name: technical_constraints
+        description: "Technical limitations and requirements for the task"
+        required: false
+      - name: out_of_scope
+        description: "Work explicitly excluded from the task"
+        required: false
+      - name: tests_required
+        description: "List of test types required by the task"
+        required: false
+      - name: executor_type
+        description: "The executor assigned to this task"
+        required: false
+      - name: runtime_spec_context
+        description: "Docker runtime spec context when an environment session is active"
+        required: false
+      - name: step_id
+        description: "Unique identifier of the current orchestration step"
+        required: true
+      - name: step_instructions
+        description: "Instructions provided by the orchestrator for this step"
+        required: false
+      - name: step_target_paths
+        description: "File paths targeted by the current step"
+        required: false
+      - name: run_dir_path
+        description: "Absolute path to the ephemeral candidate run tree"
+        required: true
+      - name: run_tree_inventory
+        description: "Full listing of files in the candidate run tree"
+        required: true
+      - name: inspection_selected_paths
+        description: "File paths selected by the file selection step for content inspection"
+        required: false
+      - name: inspection_selection_rationale
+        description: "Rationale provided by the file selection step for its path choices"
+        required: false
+      - name: inspection_verification_hypothesis
+        description: "Verification hypothesis stated by the file selection step"
+        required: false
+      - name: inspected_files
+        description: "Contents of files inspected in the file selection step"
+        required: false
+      - name: changed_files
+        description: "Files modified in the workspace overlay during this execution run"
+        required: false
+      - name: files_read
+        description: "Files read as evidence during prior steps"
+        required: false
+      - name: prior_commands
+        description: "Commands already executed in previous steps of this run"
+        required: false
+      - name: evidence_notes
+        description: "Accumulated evidence notes from prior steps"
+        required: false
+      - name: risk_flags
+        description: "Risk flags raised by the orchestrator or prior subagents"
+        required: false
+      - name: step_notes
+        description: "Orchestrator notes for the current step"
+        required: false
+      - name: validation_error
+        description: "Pydantic validation error message from the failed attempt"
+        required: true
+  main_constraint_retry:
+    description: "Retry command planning after a hard constraint violation (shell chaining, pipes, redirection)"
+    user_prompt_inputs:
+      - name: task_id
+        description: "Unique identifier of the task"
+        required: true
+      - name: task_title
+        description: "Short title of the task"
+        required: true
+      - name: task_description
+        description: "Full description of the task"
+        required: true
+      - name: objective
+        description: "Specific outcome expected from the task"
+        required: false
+      - name: acceptance_criteria
+        description: "Conditions that must be met for the task to be considered complete"
+        required: false
+      - name: technical_constraints
+        description: "Technical limitations and requirements for the task"
+        required: false
+      - name: out_of_scope
+        description: "Work explicitly excluded from the task"
+        required: false
+      - name: tests_required
+        description: "List of test types required by the task"
+        required: false
+      - name: executor_type
+        description: "The executor assigned to this task"
+        required: false
+      - name: runtime_spec_context
+        description: "Docker runtime spec context when an environment session is active"
+        required: false
+      - name: step_id
+        description: "Unique identifier of the current orchestration step"
+        required: true
+      - name: step_instructions
+        description: "Instructions provided by the orchestrator for this step"
+        required: false
+      - name: step_target_paths
+        description: "File paths targeted by the current step"
+        required: false
+      - name: run_dir_path
+        description: "Absolute path to the ephemeral candidate run tree"
+        required: true
+      - name: run_tree_inventory
+        description: "Full listing of files in the candidate run tree"
+        required: true
+      - name: inspection_selected_paths
+        description: "File paths selected by the file selection step for content inspection"
+        required: false
+      - name: inspection_selection_rationale
+        description: "Rationale provided by the file selection step for its path choices"
+        required: false
+      - name: inspection_verification_hypothesis
+        description: "Verification hypothesis stated by the file selection step"
+        required: false
+      - name: inspected_files
+        description: "Contents of files inspected in the file selection step"
+        required: false
+      - name: changed_files
+        description: "Files modified in the workspace overlay during this execution run"
+        required: false
+      - name: files_read
+        description: "Files read as evidence during prior steps"
+        required: false
+      - name: prior_commands
+        description: "Commands already executed in previous steps of this run"
+        required: false
+      - name: evidence_notes
+        description: "Accumulated evidence notes from prior steps"
+        required: false
+      - name: risk_flags
+        description: "Risk flags raised by the orchestrator or prior subagents"
+        required: false
+      - name: step_notes
+        description: "Orchestrator notes for the current step"
+        required: false
+      - name: constraint_error
+        description: "Description of the hard constraint violation (e.g. use of &&, pipes, redirection)"
+        required: true

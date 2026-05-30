@@ -419,9 +419,12 @@ def generate_execution_plan(
         raise ExecutionPlanServiceError(f"Project {project_id} not found")
 
     sequencing_input = build_execution_plan_input(db=db, project_id=project_id)
-    raw_plan = call_execution_sequencer_model(sequencing_input)
-
     has_persisted_plan = _project_has_persisted_execution_plan(db=db, project_id=project_id)
+    raw_plan = call_execution_sequencer_model(
+        sequencing_input,
+        project_id=project_id,
+        call_type="resequence" if has_persisted_plan else "initial",
+    )
     plan_version = _resolve_generated_plan_version(
         project=project,
         has_persisted_plan=has_persisted_plan,

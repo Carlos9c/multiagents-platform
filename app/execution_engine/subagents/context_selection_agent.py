@@ -25,56 +25,12 @@ from app.execution_engine.tools.context_builder_tool import (
 )
 from app.models.project import Project
 from app.models.task import Task
+from app.services.prompt_loader import prompt_loader
+from app.services.supervisor.trace_writer import append_execution_trace
 
 logger = logging.getLogger(__name__)
 
-HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT = """
-You are a historical task selector for atomic task execution.
-
-Your job is to decide which COMPLETED historical tasks and their associated completion runs
-must enter the execution context for the CURRENT atomic task.
-
-You are not selecting files directly.
-You are selecting previously completed task/run pairs that provide necessary operational context.
-
-Core rules:
-- Selection is BINARY: a historical task/run pair either enters or does not enter.
-- Do not output maybe / possibly / optional categories.
-- Select only from the catalog provided in the prompt.
-- For every selected item, return exactly one valid selection_rule and one concrete selection_reason.
-- The selected execution_run_id must be one of the runs provided in the catalog.
-- Return ONLY JSON matching the provided schema.
-
-Valid selection rules:
-- same_functional_surface:
-  the historical task resolved a part of the system that the current task needs to extend,
-  modify, or use as a base.
-- same_work_strategy:
-  the historical task implemented a solution very similar to what the current task now requires,
-  even if the exact files are not identical.
-- direct_historical_dependency:
-  the current task depends directly on the result of that previous task.
-- required_operational_context:
-  without understanding what that historical task resolved, the executor would face a high risk
-  of inconsistency, duplication, or regression.
-
-Selection philosophy:
-- Select only tasks that are genuinely necessary as execution context.
-- Do not select tasks for superficial thematic similarity.
-- Prefer operational necessity over broad recall.
-- The current task is always atomic. Historical tasks are only support context.
-
-Coherence expectations:
-- Consider repository structure, naming consistency, methodology, implementation conventions,
-  validation practices, and design consistency when those signals are visible in:
-  - the current task
-  - the project context excerpt
-  - the historical task catalog
-
-Important:
-- The output will be used to build the final ExecutionRequest deterministically.
-- Therefore, be strict, concrete, and conservative.
-""".strip()
+HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT = prompt_loader.get("context_selection_agent")
 
 
 def _task_to_prompt_payload(task: Task) -> dict:
@@ -210,6 +166,18 @@ def _build_historical_task_selection_user_prompt(
     project_context_excerpt: str | None = None,
     codebase_analysis_excerpt: str | None = None,
 ) -> str:
+    prompt_loader.validate_builder_inputs(
+        "context_selection_agent",
+        "main",
+        {
+            "current_task": current_task,
+            "historical_task_catalog": catalog,
+            "project_name": project_name,
+            "project_description": project_description,
+            "project_context_excerpt": project_context_excerpt,
+            "codebase_analysis_excerpt": codebase_analysis_excerpt,
+        },
+    )
     return _build_historical_task_selection_base_prompt(
         current_task=current_task,
         catalog=catalog,
@@ -229,6 +197,18 @@ def _build_historical_task_selection_retry_prompt(
     project_context_excerpt: str | None = None,
     validation_error: str,
 ) -> str:
+    prompt_loader.validate_builder_inputs(
+        "context_selection_agent",
+        "retry",
+        {
+            "project_name": project_name,
+            "project_description": project_description,
+            "current_task": current_task,
+            "historical_task_catalog": catalog,
+            "project_context_excerpt": project_context_excerpt,
+            "validation_error": validation_error,
+        },
+    )
     return f"""
 Project name: {project_name}
 Project description: {project_description}
@@ -299,6 +279,55 @@ def _validate_historical_task_selection(
         selected_pairs.add(pair)
 
     return result
+
+
+def _write_context_selection_trace(
+    *,
+    request: ExecutionRequest,
+    current_task: "Task",
+    context_input: ContextBuilderResult,
+    call_type: str,
+    selection_result: HistoricalTaskSelectionResult,
+) -> None:
+    """Append one context_selection_agent entry to execution_trace.jsonl.
+
+    Never raises — trace failures must not interrupt execution.
+    """
+    catalog = context_input.completed_task_catalog
+    catalog_by_id = {e.task_id: e.title for e in catalog}
+
+    selected_tasks = [
+        {
+            "task_id": s.task_id,
+            "title": catalog_by_id.get(s.task_id, "unknown"),
+            "selection_reason": s.selection_reason,
+        }
+        for s in selection_result.selected_task_runs
+    ]
+
+    entry = {
+        "agent": "context_selection_agent",
+        "project_id": request.project_id,
+        "task_id": request.task_id,
+        "run_id": request.execution_run_id,
+        "call_type": call_type,
+        "inputs": {
+            "current_task_title": current_task.title,
+            "current_task_type": current_task.task_type,
+            "current_task_objective": current_task.objective,
+            "current_task_acceptance_criteria": current_task.acceptance_criteria,
+            "relevant_files": list(request.context.relevant_files),
+            "key_decisions": list(request.context.key_decisions),
+            "candidate_count": len(catalog),
+            "candidate_titles": [{"task_id": e.task_id, "title": e.title} for e in catalog],
+        },
+        "output_snapshot": {
+            "selected_count": len(selected_tasks),
+            "selected_tasks": selected_tasks,
+            "not_selected_count": len(catalog) - len(selected_tasks),
+        },
+    }
+    append_execution_trace(project_id=request.project_id, entry=entry)
 
 
 class ContextSelectionAgent(BaseSubagent):
@@ -428,6 +457,14 @@ class ContextSelectionAgent(BaseSubagent):
             )
             state.replace_execution_request(enriched_request)
 
+            _write_context_selection_trace(
+                request=current_request,
+                current_task=current_task,
+                context_input=context_input,
+                call_type="skipped",
+                selection_result=empty_selection,
+            )
+
             state.evidence.add_note(
                 message="No completed historical tasks available. Context selection skipped.",
                 producer=self.name,
@@ -449,6 +486,14 @@ class ContextSelectionAgent(BaseSubagent):
             context_selection_result=selection_result,
         )
         state.replace_execution_request(enriched_request)
+
+        _write_context_selection_trace(
+            request=current_request,
+            current_task=current_task,
+            context_input=context_input,
+            call_type="initial",
+            selection_result=selection_result,
+        )
 
         selected_count = len(selection_result.selected_task_runs)
 

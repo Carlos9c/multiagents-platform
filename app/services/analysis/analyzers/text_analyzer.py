@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.services.analysis.base import BaseFileAnalyzer, FileAnalysis, FileInput
 from app.services.llm.base import LLMProvider
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -121,26 +122,19 @@ class _BatchOutput(BaseModel):
 
 # ── Prompts ────────────────────────────────────────────────────────────────
 
-_SYSTEM_PROMPT = """
-You are a codebase analyst. Read the files provided and describe each one.
-
-For every file return:
-- path: the exact path as given
-- file_type: one of "code", "config", "test", "docs", "data", "asset", "other"
-- language: programming language if applicable, null otherwise
-- summary: 2-4 concrete sentences describing what this file is and what it does
-- key_elements: important identifiers found (functions, classes, exports, constants, schemas…)
-- dependencies: other files or external packages/modules this file imports from
-
-Rules:
-- Analyse the actual file content, not the filename alone.
-- Do not rely on README quality; derive understanding from code and structure.
-- Return analysis for every file in the exact order provided.
-- Return ONLY valid JSON matching the schema.
-""".strip()
+_SYSTEM_PROMPT = prompt_loader.get("file_analyzer")
 
 
 def _build_user_prompt(batch: list[tuple[str, str]]) -> str:
+    from app.services.prompt_loader import prompt_loader
+
+    prompt_loader.validate_builder_inputs(
+        "file_analyzer",
+        "main",
+        {
+            "files_batch": batch,
+        },
+    )
     parts = [f"Analyse the following {len(batch)} file(s):\n"]
     for path, content in batch:
         parts.append(f"[FILE]: {path}\n```\n{content}\n```\n")

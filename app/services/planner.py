@@ -53,6 +53,7 @@ def generate_project_plan(db: Session, project_id: int) -> dict:
     planner_output: PlannerOutput = call_planner_model(
         project_name=project.name,
         project_description=project.description or "",
+        project_id=project_id,
     )
 
     created_tasks: list[Task] = []
@@ -127,6 +128,7 @@ def generate_project_plan_with_analysis(
         project_name=project.name,
         project_description=project.description or "",
         codebase_analysis=analysis,
+        project_id=project_id,
     )
 
     created_tasks: list[Task] = []

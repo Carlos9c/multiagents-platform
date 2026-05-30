@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, ValidationError
 from app.execution_engine.agent_runtime import BaseAgentRuntime
 from app.execution_engine.contracts import ExecutionRequest
 from app.execution_engine.error_diagnosis import ErrorDiagnosis
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -47,93 +48,11 @@ _MAX_TRACE_CHARS = 8_000
 # System prompts
 # ---------------------------------------------------------------------------
 
-TRACE_REFERENCE_EXTRACTION_SYSTEM_PROMPT = """
-You are an error trace parser for a software development agent system.
+TRACE_REFERENCE_EXTRACTION_SYSTEM_PROMPT = prompt_loader.get(
+    "error_diagnostic_tool", "trace_extraction"
+)
 
-Your job is to parse the raw output of a failed command and produce:
-1. referenced_files — the repository-relative file paths that are explicitly
-   present in the command output (stack traces, import errors, compilation errors,
-   lint output, test failures, type check output, etc.).
-2. error_signal — a single concrete sentence capturing the most specific and
-   actionable root error present in the output.
-
-Hard rules:
-- Only extract file paths that appear verbatim in stdout or stderr.
-- Do not invent or infer paths that are not directly present in the output.
-- If an absolute path appears (e.g. /workspace/app/foo.py), convert it to a
-  repository-relative path by stripping the leading absolute segments (e.g. app/foo.py).
-- If no file paths are present in the output, return referenced_files as an empty list.
-- error_signal must be one sentence — do not copy a full stack trace.
-- Return ONLY JSON matching the provided schema.
-""".strip()
-
-ERROR_DIAGNOSIS_SYSTEM_PROMPT = """
-You are an error diagnostic engine for a software development agent system.
-
-You receive a failed command, its raw output (stdout + stderr), file references
-extracted from the trace, the contents of those files, the current task context,
-and a list of repository files that were recently changed before the failure.
-
-Your job is to produce a structured diagnosis that describes what went wrong and what
-must change.
-
-Design contract (CRITICAL):
-- You describe the error and specify what needs to be repaired.
-- You do NOT prescribe which subagent or agent should perform the repair.
-- The orchestrator reads your diagnosis to make its own routing decisions.
-
-Classification rules:
-
-overall_error_class: the dominant error category for this failure.
-
-fault_side: which side of the codebase is responsible for the failure.
-  Use the recent_changed_files list to help determine this.
-  - "implementation": the failure is caused by a defect in source/configuration files
-    (not test files). The fix belongs in the implementation code.
-    Indicators: the error points to a non-test file; the test ran but the assertion on
-    business logic failed because the implementation is wrong; a function, class, API
-    handler, model, or service is producing incorrect results.
-  - "test": the failure is caused by a defect in the test file itself. The test logic
-    is incorrect, the test expectations are stale, or the test is testing wrong behavior.
-    Indicators: the error is inside a test_*.py, *_test.py, *.spec.*, or similar file;
-    the assertion fails because the test expectation does not match the current correct
-    behavior of the implementation (not because the implementation is wrong).
-  - "both": defects exist in BOTH implementation and test files simultaneously. Use only
-    when there is clear evidence of errors in files of both categories.
-  - "environment": the failure is caused by a missing package, wrong runtime version,
-    system dependency, or environment configuration — not by code logic.
-    Indicators: ImportError/ModuleNotFoundError for an installed package (not a local
-    module), command not found (tool not installed), missing system library, version
-    incompatibility between packages.
-  - "uncertain": you cannot determine which side is responsible from the available
-    evidence. Use only when the error could plausibly come from multiple sources and
-    you genuinely cannot decide.
-
-confidence: how certain you are about your diagnosis, especially fault_side.
-  - "high": you can clearly identify the root cause from file contents and error output.
-    You are confident in fault_side.
-  - "medium": you have a reasonable hypothesis but some context is missing or the trace
-    is ambiguous.
-  - "low": the error output is insufficient to determine the root cause clearly. You are
-    making a best guess. fault_side may be unreliable.
-
-root_cause_errors: the primary error(s) that caused the failure (is_cascade=false).
-cascade_errors: secondary errors caused by the root cause (is_cascade=true).
-cross_file_root_cause: one sentence describing a shared source that explains errors
-  across multiple files. Use null when not applicable.
-repair_directive: a concrete imperative description of what must change to fix the
-  error. This is a plain description of the required change — not a subagent instruction.
-newly_discovered_files: ALL repository-relative file paths that any repair agent
-  would need to read to understand and fix the error. Include every file implicated
-  by the error chain. Err on the side of inclusion.
-  Do NOT include standard library paths, third-party package paths, or non-repository files.
-is_recoverable: set to false ONLY when the error cannot be fixed by changing repository
-  files or environment configuration (e.g. network_error, permission_error on system
-  resources, timeout with no fix possible). Set to true for all code-level and
-  environment-level errors that have a concrete repair path.
-
-Return ONLY JSON matching the provided schema.
-""".strip()
+ERROR_DIAGNOSIS_SYSTEM_PROMPT = prompt_loader.get("error_diagnostic_tool", "diagnosis")
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +137,16 @@ def _build_trace_extraction_user_prompt(
     stdout: str,
     stderr: str,
 ) -> str:
+    prompt_loader.validate_builder_inputs(
+        "error_diagnostic_tool",
+        "trace_extraction",
+        {
+            "failed_command": command,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+        },
+    )
     return f"""Failed command:
 - command: {command}
 - exit_code: {exit_code}
@@ -265,6 +194,24 @@ def _build_diagnosis_user_prompt(
     else:
         file_section = "[no files could be loaded from the run tree]"
 
+    prompt_loader.validate_builder_inputs(
+        "error_diagnostic_tool",
+        "diagnosis",
+        {
+            "task_title": request.task_title,
+            "task_objective": request.objective,
+            "technical_constraints": request.technical_constraints,
+            "tests_required": request.tests_required,
+            "failed_command": command,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "trace_referenced_files": trace_references.referenced_files,
+            "trace_error_signal": trace_references.error_signal,
+            "referenced_file_contents": file_section,
+            "recent_changed_files": changed_files,
+        },
+    )
     return f"""Task context:
 - title: {request.task_title}
 - objective: {request.objective}

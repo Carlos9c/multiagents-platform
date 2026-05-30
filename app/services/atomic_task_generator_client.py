@@ -1,148 +1,15 @@
+from __future__ import annotations
+
 from pydantic import ValidationError
 
 from app.execution_engine.capabilities import render_executor_capabilities_for_prompt
 from app.models.task import VALID_EXECUTOR_TYPES
 from app.schemas.atomic_task_generator import AtomicTaskGenerationOutput
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
+from app.services.supervisor.trace_writer import append_planning_trace
 
-ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT = """
-You are a senior atomic task generation agent.
-
-Your job is to convert one parent project task into a set of atomic tasks that the CURRENT SYSTEM can actually execute.
-Return ONLY JSON matching the provided schema.
-
-Primary principle:
-- Atomicity is not decided only by semantic neatness.
-- Atomicity must be decided by REAL execution capability.
-- A task is atomic only if exactly one currently available executor can complete it end to end with the capabilities it actually has.
-
-Current system reality:
-- The active execution target is execution_engine.
-- Do not reason about hypothetical future executors.
-- Do not optimize for a future multi-executor platform.
-- Optimize for the executor list that is explicitly provided in the prompt.
-- You must reason from the actual execution-engine subagents and tools listed in the prompt.
-
-Task design rules:
-- Prefer tasks that end in a concrete, inspectable deliverable (artifact, document, configuration, output, or workspace change).
-- Prefer tasks whose result can be validated from observable evidence after execution.
-- Keep manual investigation, external research, human-only validation, and stakeholder judgment out of the core deliverable.
-- Bootstrap from an empty repository is allowed only when the task objective clearly implies a minimal initial structure.
-
-Hard executor-oriented rule:
-- If the parent task mixes executable work with non-executable research/manual work, do NOT keep them mixed in one atomic task.
-- Extract only the executable slice.
-- Reformulate the task around a concrete, verifiable deliverable whenever possible.
-
-Atomicity rules:
-- Each atomic task must have one primary deliverable.
-- Each atomic task must have one clear validation boundary.
-- Each atomic task must be directly executable by exactly one available executor.
-- Avoid overlap, duplication, and artificial fragmentation.
-- A task must address one focused functional concern. It must NOT span multiple independent functional areas, multiple architectural layers, or the "core" of an entire system in one shot.
-
-Scope calibration rule:
-- The right granularity is a focused functional unit — one component, one feature slice, one data layer element, one screen, one service, one document section, one configuration block.
-- A task may naturally include tightly-coupled supporting artifacts (e.g., a data model together with its persistence mapping, a feature together with its directly-tied tests) as long as they form a single indivisible deliverable.
-- A task is too broad when: it spans multiple independent feature areas, it would produce a significant fraction of the project in one step, or there are two or more natural checkpoints within it where you could say "this part is done independently."
-- A task is too narrow when: splitting it would create invalid intermediate states that block further progress, or the pieces have no independent validation boundary.
-
-When to split:
-- split when there are clearly separate deliverables that can be validated independently
-- split when there are clearly separate validation boundaries
-- split when executable work is mixed with manual/research work
-- split when two feature slices or functional areas can be implemented independently
-- split when one part is executable by the available executor and another part is not
-- split when the scope covers an entire module, layer, subsystem, or "core" of the project
-- split when there are multiple natural completion checkpoints within the task
-
-When NOT to split:
-- one focused functional unit with a single validation boundary
-- tightly-coupled artifacts that have no independent validation boundary on their own
-- one coherent document, specification, or configuration deliverable
-- a feature slice together with its directly-tied verification if both are modest in scope
-
-Forbidden task patterns for the execution engine:
-- “investigate the real runtime behavior and document findings”
-- “run the system manually to understand how it works” as the main task
-- “collect and validate real operational information” as the main task
-- “analyze options and recommend approach” without producing a concrete repo artifact
-- “manually verify” as the central acceptance path
-
-Required output quality:
-- proposed_solution must explain the immediate executor-compatible approach
-- implementation_steps must be concrete and repository-oriented
-- tests_required must describe checks aligned with the deliverable
-- acceptance_criteria must be a single string
-- do not assign or emit a final executor in the output
-- atomic generation must judge executor compatibility, but executor routing is resolved later by orchestration
-- never invent new executors or future capabilities
-- do not include ids, dependencies, estimates, or metadata outside the schema
-
-Task type assignment rules:
-Assign the task_type that best reflects the primary nature of each atomic task.
-Valid values and when to use them:
-- implementation: produces core functionality, services, modules, API endpoints, or main code deliverables
-- testing: primary output is test files, verification scripts, or acceptance checks — use this, never "test"
-- documentation: produces written deliverables — README, specs, technical docs, setup guides, usage instructions
-- design: produces architecture definitions, interface contracts, data models, or design decisions as repo files
-- requirements: clarifies scope, defines use cases, or produces domain constraint documents
-- planning: decomposes, sequences, or roadmaps work into a concrete repo artifact
-- review: audits or evaluates existing deliverables without new primary output (rare for atomic tasks)
-- onboarding: produces contributor setup guides, quickstart docs, or handoff material
-- configuration: produces environment setup, CI/CD pipelines, tooling config, or infrastructure-as-code
-- refactor: restructures existing code without changing external behavior
-
-verification_level assignment rules:
-Assign "none" only when the task is purely additive and no runtime execution is needed to confirm correctness:
-- Adding a brand-new file whose content is statically verifiable from the code alone (e.g. a README, a config file, a plain data file)
-- Creating initial project scaffolding with no compilation or test execution expected
-- Purely textual documentation additions with no code impact
-
-Assign "runtime" (default) for everything else:
-- Any task that changes existing logic, fixes bugs, modifies behavior, or touches integration points
-- Any task that must be compiled, built, or run to confirm correctness
-- Any task that introduces test files or requires executing tests
-- Any task that modifies existing files (risk of breaking existing behavior)
-- Any build-system or CI/CD change (gradle, makefile, package.json, etc.)
-- Any mobile, game, or compiled-language task where a build run is the acceptance gate
-- When in doubt, assign "runtime"
-
-Implementation vs. testing separation rule:
-- Implementation tasks (task_type="implementation", "configuration", "refactor") produce source
-  code, scripts, configuration, or migration files. They must NOT produce test files.
-  Test file creation is the exclusive deliverable of testing tasks.
-- Testing tasks (task_type="testing") produce test files that verify behaviors or
-  acceptance_criteria. They must NOT produce implementation or source code files as their
-  primary deliverable.
-- When a parent task's scope includes both writing source code and writing tests for that code,
-  split them into separate atomic tasks:
-  * One task with task_type="implementation" delivering the source/configuration changes.
-  * One task with task_type="testing" delivering the test files that verify the implementation.
-- A testing task must clearly identify in its objective and acceptance_criteria which modules,
-  services, functions, or behaviors it tests. Do not leave the test scope implicit.
-- verification_level for testing tasks:
-  * Assign "runtime" when the acceptance_criteria require tests to execute and produce a
-    passing result — not just that test files exist.
-  * Assign "none" only when the task's sole deliverable is the existence of test file
-    structure with no expectation that the tests run (e.g., scaffolding tests ahead of
-    an implementation that does not yet exist).
-
-Self-check before finalizing each atomic task:
-- Can the current execution target really complete this task with its actual capabilities?
-- Is the main deliverable concrete and inspectable after execution?
-- Would post-execution validation be able to confirm the result from observable evidence?
-- Is this task free from hidden manual/external work?
-- Does this task address one focused functional concern, or does it span multiple independent areas?
-- Are there two or more natural completion checkpoints within this task? If so, split it.
-- Does the task cover an entire module, layer, subsystem, or "core" of the project? If so, split it.
-
-Language rule:
-- Detect the language of the parent task description.
-- Generate ALL output fields (title, proposed_solution, implementation_steps, tests_required, acceptance_criteria, technical_constraints) in that same language.
-- If the parent task is in Spanish, respond entirely in Spanish.
-- If in English, respond in English. Never mix languages within a single response.
-""".strip()
+ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT = prompt_loader.get("atomic_task_generator")
 
 
 def _validate_available_executors(available_executors: list[str]) -> list[str]:
@@ -187,6 +54,28 @@ def build_atomic_user_prompt(
     executors_text = "\n".join(f"- {executor}" for executor in executors)
     capability_text = _build_executor_capabilities_text(executors)
 
+    prompt_loader.validate_builder_inputs(
+        "atomic_task_generator",
+        "main",
+        {
+            "project_name": project_name,
+            "project_description": project_description,
+            "parent_task_title": parent_task_title,
+            "parent_task_description": parent_task_description,
+            "parent_task_summary": parent_task_summary,
+            "parent_task_objective": parent_task_objective,
+            "parent_task_type": parent_task_type,
+            "parent_task_planning_level": parent_task_planning_level,
+            "parent_task_proposed_solution": parent_task_proposed_solution,
+            "parent_task_implementation_steps": parent_task_implementation_steps,
+            "parent_task_acceptance_criteria": parent_task_acceptance_criteria,
+            "parent_task_tests_required": parent_task_tests_required,
+            "parent_task_technical_constraints": parent_task_technical_constraints,
+            "parent_task_out_of_scope": parent_task_out_of_scope,
+            "available_executors": executors_text,
+            "executor_capability_catalogs": capability_text,
+        },
+    )
     return f"""
 Project name: {project_name}
 Project description: {project_description}
@@ -265,7 +154,17 @@ def build_atomic_retry_prompt(
     executors = _validate_available_executors(available_executors)
     executors_text = ", ".join(executors)
     capability_text = _build_executor_capabilities_text(executors)
-
+    prompt_loader.validate_builder_inputs(
+        "atomic_task_generator",
+        "retry",
+        {
+            "project_name": project_name,
+            "parent_task_title": parent_task_title,
+            "available_executors": available_executors,
+            "executor_capabilities": capability_text,
+            "validation_error": validation_error,
+        },
+    )
     return f"""
 Project name: {project_name}
 Parent task title: {parent_task_title}
@@ -315,6 +214,9 @@ def call_atomic_task_generator_model(
     parent_task_technical_constraints: str,
     parent_task_out_of_scope: str,
     available_executors: list[str],
+    project_id: int | None = None,
+    parent_task_id: int | None = None,
+    call_type: str = "initial",
 ) -> AtomicTaskGenerationOutput:
     provider = get_llm_provider()
     first_user_prompt = build_atomic_user_prompt(
@@ -343,7 +245,7 @@ def call_atomic_task_generator_model(
     )
 
     try:
-        return AtomicTaskGenerationOutput.model_validate(raw)
+        result = AtomicTaskGenerationOutput.model_validate(raw)
     except ValidationError as exc:
         retry_user_prompt = build_atomic_retry_prompt(
             validation_error=str(exc),
@@ -359,4 +261,26 @@ def call_atomic_task_generator_model(
             json_schema=AtomicTaskGenerationOutput.model_json_schema(),
         )
 
-        return AtomicTaskGenerationOutput.model_validate(raw_retry)
+        result = AtomicTaskGenerationOutput.model_validate(raw_retry)
+
+    if project_id is not None:
+        append_planning_trace(
+            project_id=project_id,
+            entry={
+                "agent": "atomic_task_generator",
+                "call_type": call_type,
+                "project_id": project_id,
+                "inputs": {
+                    "parent_task_id": parent_task_id,
+                    "parent_task_title": parent_task_title,
+                    "parent_task_acceptance_criteria": parent_task_acceptance_criteria,
+                    "available_executors": available_executors,
+                },
+                "reasoning": result.generation_summary,
+                "atomic_tasks_produced_count": len(result.atomic_tasks),
+                "atomic_task_titles": [t.title for t in result.atomic_tasks],
+                "output_snapshot": result.model_dump(),
+            },
+        )
+
+    return result

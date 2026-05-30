@@ -210,6 +210,9 @@ def generate_atomic_tasks(
         parent_task_technical_constraints=parent_task.technical_constraints or "",
         parent_task_out_of_scope=parent_task.out_of_scope or "",
         available_executors=AVAILABLE_EXECUTORS,
+        project_id=project.id,
+        parent_task_id=parent_task.id,
+        call_type="reatomize" if parent_task.is_recovery_task else "initial",
     )
 
     created_tasks: list[Task] = []

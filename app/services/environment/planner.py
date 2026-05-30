@@ -60,6 +60,7 @@ def plan_runtime_environment(
         project_description=project.description or "",
         task_dicts=task_dicts,
         entries=catalog_entries,
+        project_id=project_id,
     )
 
     catalog_entry = None
@@ -92,6 +93,7 @@ def plan_runtime_environment(
         project_description=project.description or "",
         atomic_tasks=task_dicts,
         catalog_hint=catalog_hint,
+        project_id=project_id,
     )
 
     # --- Step 3: build RuntimeSpec, catalog overrides image + runtime_type ---

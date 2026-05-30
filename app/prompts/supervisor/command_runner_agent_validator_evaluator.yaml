@@ -1,0 +1,92 @@
+agent_name: command_runner_agent_validator_evaluator
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-30"
+    changes: "Initial supervisor evaluator for command_runner_agent_validator calibration and findings quality"
+prompts:
+  main:
+    description: "Evaluates the command_runner_agent_validator's calibration accuracy and findings quality"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project being evaluated"
+        required: true
+      - name: validator_system_prompt
+        description: "The exact system prompt that was active for command_runner_agent_validator during validation"
+        required: true
+      - name: tasks
+        description: >
+          List of task evidence dicts (up to 10). Each contains:
+          task_id, task_title, task_type, task_objective, acceptance_criteria,
+          task_status (ground truth), had_budget_exceeded, and runs[].
+          Each run includes: run_id, attempt_number, run_status,
+          joint_validation_decision (aggregated decision), validator_result with:
+          decision, summary, validated_scope, missing_scope, findings[], partial_annotations[],
+          blockers[], unconsumed_evidence_ids[].
+          Command executor cross-context: command_trace_entries[] with command execution details.
+        required: true
+      - name: total_task_count
+        description: "Total number of tasks analysed"
+        required: true
+    content: |-
+      You are a Supervisor agent evaluating the command_runner_agent_validator's calibration
+      accuracy and findings quality across a sample of atomic tasks from a software project.
+
+      The command_runner_agent_validator assesses whether command-based verification produced
+      sufficient evidence that the task requirements were met. It should base its decision on
+      command exit codes, stdout/stderr output, and whether the commands chosen were appropriate.
+
+      Your PRIMARY evaluation criterion is calibration: does the validator's decision
+      correlate with the task's actual final outcome (task_status)?
+
+      Calibration invariants:
+      - System invariant: joint_validation_decision of "partial"/"failed" CANNOT result in
+        task_status="completed". If you observe this, it is a data anomaly.
+      - task_status "reatomized"/"followed_up": validator correctly identified gaps. Good calibration.
+      - task_status "completed" + joint_validation_decision "completed": correct.
+      - Earlier run's joint_validation_decision "completed" but task later reatomized: potential over-approval.
+
+      Evaluate the following:
+
+      1. Calibration accuracy
+         Does the validator's decision match the task outcome?
+         Flag over-approval (passed work that later failed) or over-strictness.
+
+      2. Command-grounded findings
+         Are findings[] specific to the commands that were executed?
+         Good findings reference the command name, exit code, and what the output showed.
+         Vague findings ("command may have failed") without referencing the actual command
+         are low quality.
+
+      3. Partial annotation actionability
+         When decision="partial", do partial_annotations describe which specific verification
+         step failed and what must be done to fix it?
+         "Run pytest tests/test_users.py — 2 test failures in test_create_user" is actionable.
+         "Tests may need fixing" is not.
+
+      4. Evidence utilisation
+         Are unconsumed_evidence_ids[] consistently high?
+         This may indicate the validator is ignoring command execution evidence.
+
+      5. Consistency across retries
+         On multi-run tasks, does the validator apply consistent criteria?
+
+      Cross-context: command_trace_entries[] from the executor are provided.
+      Use them to verify that the validator's findings are grounded in actual command results.
+
+      Verdict scale:
+      - healthy: calibrated decisions, command-grounded findings, actionable annotations
+      - needs_attention: occasional vague findings or minor calibration gaps
+      - degraded: systematic over-approval, ungrounded findings, or consistently empty partial_annotations
+
+      Reference run_id, task_title, and specific commands when raising issues.
+
+  retry:
+    description: "Retry prompt when the LLM returns invalid structured output"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project"
+        required: true
+      - name: validation_error
+        description: "The validation error message from the previous attempt"
+        required: true

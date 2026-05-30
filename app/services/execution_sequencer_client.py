@@ -1,67 +1,25 @@
+from __future__ import annotations
+
 from pydantic import ValidationError
 
 from app.schemas.execution_plan import ExecutionPlan, ExecutionPlanGenerationInput
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
+from app.services.supervisor.trace_writer import append_planning_trace
 
-EXECUTION_SEQUENCER_SYSTEM_PROMPT = """
-You are a senior execution sequencing agent.
-
-Your job is to transform a set of atomic tasks plus current project execution context into a safe, reasoned, revisable execution plan.
-
-Return ONLY JSON matching the provided schema.
-
-Core mission:
-- Analyze candidate atomic tasks in the context of the current project state.
-- Infer a safe execution order.
-- Group tasks into execution batches.
-- Add evaluation checkpoints at meaningful control moments.
-- Surface blocked tasks, inferred dependencies, and uncertainties.
-- Assume the execution plan is revisable after each checkpoint.
-
-Critical reasoning rules:
-- Do NOT assume the hierarchical task tree already reflects the best execution order.
-- Different epic branches may still contain real execution dependencies.
-- Prioritize tasks that unlock downstream work.
-- Be conservative when prerequisites are uncertain.
-- Prefer explicit uncertainty over false certainty.
-- Do not batch by arbitrary task count.
-- Batch by semantic cohesion, architectural coupling, integration risk, and execution flow.
-
-Checkpoint rules:
-- Every execution batch MUST end with an explicit checkpoint.
-- Checkpoints are mandatory quality control moments, not decorative pauses.
-- Add more checkpoints when work is riskier, more architectural, more interdependent, or more likely to drift.
-- Every checkpoint must have a concrete reason and a clear evaluation purpose.
-- The final checkpoint must be a stage closure checkpoint.
-- The final checkpoint must include "stage_closure" in evaluation_focus.
-- If later execution creates new end-of-plan tasks, the next generated plan must again end with a final closure checkpoint.
-
-Dependency rules:
-- Infer dependencies when one task plausibly needs outputs, context, or completed prerequisites from another.
-- Mark blocked tasks explicitly when they should not yet be executed.
-- ready_task_ids should only include tasks that are safe to begin immediately.
-
-Hard ordering rule for setup_first tasks:
-- Each candidate task carries an ordering_hint field: "setup_first", "depends_on_setup", or "standard".
-- Tasks with ordering_hint="setup_first" establish project infrastructure (build system, scaffold, tooling). They MUST be placed in earlier batches than any task with ordering_hint="depends_on_setup".
-- NEVER place a "depends_on_setup" task in the same batch as or an earlier batch than a "setup_first" task.
-- If no "setup_first" tasks exist the hint has no effect — sequence normally.
-
-Output rules:
-- Return ONLY valid JSON.
-- Do not include markdown.
-- Do not include commentary outside the schema.
-- execution_batches must not be empty.
-- Each batch must contain at least one task.
-- Every batch must have checkpoint_after=true.
-- Every batch must define checkpoint_id and checkpoint_reason.
-- Every batch checkpoint_id must reference a real checkpoint definition.
-""".strip()
+EXECUTION_SEQUENCER_SYSTEM_PROMPT = prompt_loader.get("execution_sequencer")
 
 
 def build_execution_sequencer_user_prompt(
     sequencing_input: ExecutionPlanGenerationInput,
 ) -> str:
+    prompt_loader.validate_builder_inputs(
+        "execution_sequencer",
+        "main",
+        {
+            "sequencing_input": sequencing_input,
+        },
+    )
     return f"""
 Generate an execution plan for the following project execution context.
 
@@ -76,6 +34,14 @@ def build_execution_sequencer_retry_prompt(
     sequencing_input: ExecutionPlanGenerationInput,
     validation_error: str,
 ) -> str:
+    prompt_loader.validate_builder_inputs(
+        "execution_sequencer",
+        "retry",
+        {
+            "sequencing_input": sequencing_input,
+            "validation_error": validation_error,
+        },
+    )
     return f"""
 Generate an execution plan for the following project execution context.
 
@@ -149,8 +115,36 @@ def _ensure_final_checkpoint_stage_closure(raw: dict) -> dict:
     return raw
 
 
+def _append_sequencer_trace(
+    *,
+    project_id: int | None,
+    call_type: str,
+    sequencing_input: ExecutionPlanGenerationInput,
+    result: ExecutionPlan,
+) -> None:
+    if project_id is None:
+        return
+    append_planning_trace(
+        project_id=project_id,
+        entry={
+            "agent": "execution_sequencer",
+            "call_type": call_type,
+            "project_id": project_id,
+            "plan_version": result.plan_version,
+            "supersedes_plan_version": result.supersedes_plan_version,
+            "batches_produced_count": len(result.execution_batches),
+            "batch_sizes": [len(b.task_ids) for b in result.execution_batches],
+            "input_snapshot": sequencing_input.model_dump(),
+            "output_snapshot": result.model_dump(),
+        },
+    )
+
+
 def call_execution_sequencer_model(
     sequencing_input: ExecutionPlanGenerationInput,
+    *,
+    project_id: int | None = None,
+    call_type: str = "initial",
 ) -> ExecutionPlan:
     provider = get_llm_provider()
     first_user_prompt = build_execution_sequencer_user_prompt(sequencing_input)
@@ -164,7 +158,7 @@ def call_execution_sequencer_model(
     raw = _ensure_final_checkpoint_stage_closure(raw)
 
     try:
-        return ExecutionPlan.model_validate(raw)
+        result = ExecutionPlan.model_validate(raw)
     except ValidationError as exc:
         retry_user_prompt = build_execution_sequencer_retry_prompt(
             sequencing_input=sequencing_input,
@@ -179,4 +173,12 @@ def call_execution_sequencer_model(
         )
         raw_retry = _ensure_final_checkpoint_stage_closure(raw_retry)
 
-        return ExecutionPlan.model_validate(raw_retry)
+        result = ExecutionPlan.model_validate(raw_retry)
+
+    _append_sequencer_trace(
+        project_id=project_id,
+        call_type=call_type,
+        sequencing_input=sequencing_input,
+        result=result,
+    )
+    return result

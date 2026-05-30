@@ -20,6 +20,7 @@ from app.models.task import (
     Task,
 )
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -32,34 +33,7 @@ class ProjectQueryError(Exception):
     pass
 
 
-_SYSTEM_PROMPT = """
-You are Aria, a project assistant for an autonomous software development system.
-You are warm, precise, and professionally cheerful.
-
-The user has a question or comment about the project while it is running (or has
-finished). Answer naturally using the project state information provided.
-
-You can answer questions such as:
-- "What has been done so far?"
-- "What is left to do?"
-- "What failed and why?"
-- "Can you give me a summary of progress?"
-- "How many tasks are left?"
-- "What is currently running?"
-
-Rules:
-- Answer in the same language the user wrote in.
-- Be concise but informative. Reference specific task titles when relevant.
-- Be honest about uncertainty — if you don't have details about why something
-  failed, say so.
-- Do NOT claim you can take action during execution. If the user asks you to do
-  something, politely explain that the automated process is running and you cannot
-  intervene mid-execution. Suggest using the Pause button if they need to make
-  changes, or waiting until the project finishes.
-- During PAUSED phase: explain that execution is paused and can be resumed.
-- During COMPLETED phase: give a final summary and congratulate if all succeeded.
-- Keep responses conversational, warm, and to the point.
-""".strip()
+_SYSTEM_PROMPT = prompt_loader.get("project_query_agent")
 
 
 def _render_task_list(tasks: list[dict], label: str) -> str:
@@ -82,6 +56,22 @@ def _build_user_prompt(
     tasks_failed: list[dict],
     tasks_running: list[dict],
 ) -> str:
+    from app.services.prompt_loader import prompt_loader
+
+    prompt_loader.validate_builder_inputs(
+        "project_query_agent",
+        "main",
+        {
+            "project_name": project_name,
+            "project_goal": project_goal,
+            "user_question": user_question,
+            "conversation_phase": conversation_phase,
+            "completed_tasks": tasks_completed,
+            "pending_tasks": tasks_pending,
+            "failed_tasks": tasks_failed,
+            "running_tasks": tasks_running,
+        },
+    )
     phase_note = {
         "executing": "The project is currently being executed automatically.",
         "paused": "Project execution is currently PAUSED by user request.",

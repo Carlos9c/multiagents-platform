@@ -32,7 +32,11 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 10. **Q&A de estado del proyecto** — en fases PAUSED y COMPLETED, el `ProjectQueryAgent` responde preguntas del usuario sobre el estado del proyecto con información real de la BD (tareas completadas, pendientes, fallidas).
 
+11. **Sistema Supervisor — meta-evaluación de agentes** — capa de supervisión post-ejecución que evalúa retrospectivamente la calidad de cada agente del sistema. 22 evaluadores LLM independientes producen un veredicto por agente (`healthy` / `needs_attention` / `degraded` / `not_supervised`). El veredicto global se calcula como media ponderada (healthy=2, needs_attention=1, degraded=0) con umbrales 1.7/1.3. Si más del 30% de los agentes no pudieron evaluarse, el veredicto global es `not_evaluated`. Incluye un analizador agregado multi-proyecto que detecta patrones de degradación transversales entre 5–20 proyectos. Todos los resultados se persisten en `SupervisorReport` y `AgentEvaluation` en base de datos.
+
 ### Cambios recientes significativos
+
+- **Sistema Supervisor completo (22 evaluadores + análisis agregado)**: nueva capa de supervisión en `app/services/supervisor/` que evalúa retrospectivamente la calidad de los 22 agentes del sistema. Cada evaluador lee los trace files del proyecto (`planning_trace.jsonl`, `execution_trace.jsonl`) y los runs de ejecución de la BD, llama al LLM con el historial completo del agente, y produce un `EvaluatorOutput` con veredicto y hallazgos. El veredicto global usa media ponderada con umbrales 1.7/1.3 (no worst-case). Incluye `supervisor_runner.py` (orquestador de los 22 evaluadores), `supervisor_synthesizer.py` (síntesis cross-agent en lenguaje natural), un analizador agregado (`aggregate_runner.py`) que detecta patrones de degradación en 5–20 proyectos, y trazado histórico de prompts via `git show` para evaluar agentes contra el prompt activo en el momento del run. Resultados persistidos en `SupervisorReport` y `AgentEvaluation`. API: `POST /supervisor/projects/{project_id}/run`, `POST /supervisor/aggregate`.
 
 - **EnvironmentManager — cobertura completa de ecosistemas**: el `EnvironmentManager` ahora soporta instalación incremental de dependencias en todos los ecosistemas del catálogo. Nuevas estrategias: `GoStrategy` (`go get` + `go mod tidy`), `RustStrategy` (`cargo add` + `cargo fetch`), `DotnetStrategy` (`dotnet add package`). `JvmStrategy` completamente reescrita: edita `pom.xml` con `xml.etree.ElementTree`, edita `build.gradle` / `build.gradle.kts` con conteo de llaves (soporta Groovy DSL y Kotlin DSL), y detecta proyectos Flutter por `pubspec.yaml` (`flutter pub add`). Los archivos de manifiesto modificados en disco (`pom.xml`, `Cargo.toml`, `go.mod`, `.csproj`, `pubspec.yaml`) se propagan a `InstallResult.manifest_files_changed` → `EnvironmentManagerOutput.manifest_files_changed` → evidence del orquestador.
 
@@ -58,7 +62,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Números actuales
 
-- **760 tests unitarios** — todos passing
+- **1060 tests unitarios** — todos passing
 - **12 tests de integración** (Docker) — se ejecutan con `-m integration`
 - **0 failures** en CI
 
@@ -799,7 +803,7 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**760 tests unitarios + 12 tests de integración — todos passing.**
+**1060 tests unitarios + 12 tests de integración — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
@@ -823,6 +827,9 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 | Environment (integración) | `tests/integration/test_environment_integration.py` |
 | API — proyectos | `test_projects.py` |
 | API — WebSocket + REST Aria | `test_aria_ws.py` |
+| Supervisor — runner y veredicto global | `supervisor/test_supervisor_runner.py` |
+| Supervisor — PlannerEvaluator | `supervisor/test_planner_evaluator.py` |
+| Supervisor — análisis agregado | `supervisor/test_aggregate_runner.py`, `supervisor/test_aggregate_filter.py`, `supervisor/test_aggregate_builder.py` |
 
 ---
 
@@ -830,7 +837,13 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 
 ### Alta prioridad
 
-**1. Respuestas en el idioma del usuario**
+**1. Frontend para el Supervisor — visualización de informes**
+Los informes del Supervisor se generan y persisten en BD pero no hay ningún endpoint `GET` para consultarlos ni vista en el frontend. Añadir: `GET /supervisor/projects/{project_id}/reports` (lista de informes del proyecto), `GET /supervisor/reports/{report_id}` (detalle con evaluaciones por agente). En el frontend, añadir una pestaña "Salud del sistema" al panel de proyecto que muestre el veredicto global, el resumen de síntesis y los hallazgos por agente. Las evaluaciones `not_supervised` deben distinguirse visualmente de las `healthy`.
+
+**2. Ejecución paralela de los 22 evaluadores del Supervisor**
+El `supervisor_runner.py` ejecuta los 22 evaluadores secuencialmente. Dado que cada evaluador es independiente (lee datos distintos de la BD y de los trace files), pueden ejecutarse en paralelo con `concurrent.futures.ThreadPoolExecutor`. Reducirá el tiempo de ejecución del supervisor de ~22 × latencia_LLM a ~1 × latencia_LLM para los casos sin dependencias entre evaluadores. El runner ya gestiona errores por evaluador de forma aislada, lo que facilita la paralelización.
+
+**3. Respuestas en el idioma del usuario**
 Los evaluadores LLM (`RequirementsEvaluator`, `ReviewEvaluator`, `ConfirmationEvaluator`, `ProjectQueryAgent`) y el planificador producen contenido en inglés independientemente del idioma del usuario, lo que provoca que tareas, borradores y mensajes aparezcan en inglés en la UI aunque el usuario escriba en español. Añadir una instrucción de idioma en los system prompts de cada evaluador que tome como referencia el idioma del último mensaje del usuario. El orquestador Aria ya tiene acceso al historial de conversación y puede extraer el idioma sin llamada LLM adicional.
 
 **2. Soporte multi-stage**
@@ -891,3 +904,4 @@ Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter s
 | EnvironmentManager | `environment_manager_agent` no produce entregables validables (en `IGNORED_VALIDATION_PRODUCERS`); su fallo es terminal (no entra en loop de reparación); `exact_only` + conflicto de versión → `needs_user_input`; archivos de manifiesto modificados en disco siempre se registran en evidencia independientemente del éxito de la instalación |
 | Aria loop | `MAX_STEPS = 4`; misma herramienta ≤ 1 vez por turno (no-repeat); si el loop se agota sin `respond`, se fuerza una respuesta de fallback; los eventos de sistema aplican transiciones DB antes del loop LLM |
 | ReviewContext | `conversation.proposed_plan != None` ↔ estado "esperando confirmación"; `conversation.review_context` serializa el ADT completo (`TaskReviewContext` \| `ProjectReviewContext`); se limpia al resolver la revisión |
+| Supervisor | `result=None` (not_supervised) si el agente nunca fue llamado en el proyecto; los evaluadores de validador DEBEN tener `AGENT_NAME` distinto del ejecutor (comparten BD con clave compuesta `(report_id, agent_name)`); veredicto global = media ponderada, no worst-case; >30% not_supervised → `not_evaluated` antes de calcular la media |

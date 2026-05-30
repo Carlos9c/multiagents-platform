@@ -4,76 +4,10 @@ from pydantic import ValidationError
 
 from app.schemas.environment import RuntimeEnvironmentPlanOutput, RuntimeSpecRepairOutput
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
+from app.services.supervisor.trace_writer import append_planning_trace
 
-ENVIRONMENT_PLANNER_SYSTEM_PROMPT = """
-You are a runtime environment planning agent.
-
-Your job is to analyze a software project and its atomic tasks and decide the minimal,
-sufficient execution environment needed to implement and verify all of them.
-
-Return ONLY JSON matching the provided schema.
-
-Core mission:
-- Determine ONE primary runtime for the project.
-- Valid runtime_type values: python_venv, node_npm, rust_cargo, java_maven, java_gradle, android_gradle, react_native, dotnet, go.
-- Choose an appropriate official Docker image as the base.
-- List all packages required, both for implementation and for running tests.
-- Assign exact pinned versions to every package (format: x.y.z). No ranges. No "latest".
-- For build-system-managed runtimes (android_gradle, java_gradle, java_maven, rust_cargo, dotnet, go, react_native): return an empty dependencies list — packages are declared in project files by the code agents and resolved by the build tool at build time.
-
-Runtime selection rules:
-- Infer the runtime from the project description and task content.
-- python_venv: Python backends, ML, data science, scripting (FastAPI, Django, Flask, pandas, etc.)
-- node_npm: JavaScript/TypeScript web projects (React, Next.js, Vue, Angular, Express, NestJS)
-- rust_cargo: Rust applications, CLIs, libraries, WebAssembly
-- java_maven: Java projects using Maven (Spring Boot/Maven, legacy Maven projects)
-- java_gradle: Java or Kotlin JVM projects using Gradle but NOT Android (Spring Boot/Gradle, Kotlin JVM apps)
-- android_gradle: Native Android apps in Kotlin or Java (Jetpack, Room, Retrofit, Compose)
-- react_native: React Native and Expo projects that build Android APKs (requires Node + Android SDK)
-- dotnet: C# and F# applications (ASP.NET Core, Blazor, console apps, class libraries)
-- go: Go applications, APIs, CLIs, microservices
-- iOS projects require macOS/Xcode and cannot be built in Docker; note this limitation in planning_rationale.
-- If multiple languages are involved, choose the runtime that drives the primary build pipeline.
-
-Docker image selection rules (only applies when no pre-selected base image is provided):
-- python_venv: "python:3.12-slim"
-- node_npm: "node:22-slim"
-- rust_cargo: "rust:1-slim-bookworm"
-- java_maven: "public.ecr.aws/docker/library/maven:3.9-eclipse-temurin-21"
-- java_gradle: "eclipse-temurin:21-jdk-noble"
-- android_gradle: "mingc/android-build-box:1.26.0"
-- react_native: "mingc/android-build-box:1.26.0" (Node must be installed separately)
-- dotnet: "mcr.microsoft.com/dotnet/sdk:8.0"
-- go: "golang:1.22-bookworm"
-- Always prefer slim/official variants. Only deviate when task descriptions provide concrete evidence.
-
-Dependency selection rules:
-- Include ONLY packages that are directly needed by the implementation or test tasks.
-- Do not include packages that are already bundled with the runtime (e.g., stdlib, built-ins).
-- If a task specifies a concrete library (e.g., "use XGBoost", "implement with FastAPI"), it is mandatory.
-- If a task does not constrain the library, choose a widely-used, production-quality package.
-- For testing: include the appropriate test runner (pytest for Python, jest for Node).
-- For Python: include packages commonly needed alongside main dependencies (e.g., numpy if pandas is used).
-
-Version pinning rules:
-- ALWAYS provide exact versions in x.y.z format.
-- Use recent stable releases, not bleeding-edge.
-- Ensure mutual compatibility between selected package versions.
-- If you are uncertain about an exact version, choose a known-stable recent release.
-
-Constraints:
-- Do not include packages unrelated to the project's tasks.
-- Do not include duplicate packages.
-- Return between 0 and 30 dependencies.
-- The environment must be sufficient to complete ALL listed atomic tasks.
-
-Self-check before responding:
-- Have I covered all libraries explicitly mentioned in task technical_constraints?
-- Have I included the test runner if any task has tests_required = true?
-- Are all versions in exact x.y.z format?
-- Is the image a slim official variant?
-- Would this environment allow all tasks to be implemented and verified without further installations?
-""".strip()
+ENVIRONMENT_PLANNER_SYSTEM_PROMPT = prompt_loader.get("environment_planner")
 
 
 def _format_atomic_tasks(atomic_tasks: list[dict]) -> str:
@@ -98,6 +32,16 @@ def build_environment_planner_user_prompt(
     atomic_tasks: list[dict],
     catalog_hint: str | None = None,
 ) -> str:
+    prompt_loader.validate_builder_inputs(
+        "environment_planner",
+        "main",
+        {
+            "project_name": project_name,
+            "project_description": project_description,
+            "atomic_tasks": atomic_tasks,
+            "catalog_hint": catalog_hint,
+        },
+    )
     formatted_tasks = _format_atomic_tasks(atomic_tasks)
     hint_section = ""
     if catalog_hint:
@@ -132,6 +76,19 @@ def build_environment_planner_retry_prompt(
     validation_error: str,
     catalog_hint: str | None = None,
 ) -> str:
+    from app.services.prompt_loader import prompt_loader
+
+    prompt_loader.validate_builder_inputs(
+        "environment_planner",
+        "retry",
+        {
+            "project_name": project_name,
+            "project_description": project_description,
+            "atomic_tasks": atomic_tasks,
+            "catalog_hint": catalog_hint,
+            "validation_error": validation_error,
+        },
+    )
     base = build_environment_planner_user_prompt(
         project_name, project_description, atomic_tasks, catalog_hint=catalog_hint
     )
@@ -156,6 +113,15 @@ def build_environment_repair_user_prompt(
     smoke_test_command: str,
     error_output: str,
 ) -> str:
+    prompt_loader.validate_builder_inputs(
+        "environment_planner",
+        "repair",
+        {
+            "current_spec": spec_dict,
+            "smoke_test_command": smoke_test_command,
+            "error_output": error_output,
+        },
+    )
     return f"""The current runtime environment failed its smoke test.
 
 Current spec:
@@ -177,22 +143,7 @@ Repair instructions:
 """.strip()
 
 
-ENVIRONMENT_REPAIR_SYSTEM_PROMPT = """
-You are a runtime environment repair agent.
-
-A smoke test for an execution environment has failed. Your job is to analyze the error
-and produce a minimal corrected dependency list and Docker image that will pass the smoke test.
-
-Return ONLY JSON matching the provided schema.
-
-Repair rules:
-- Fix only what is broken. Preserve working dependencies unchanged.
-- If a package is not found: check for alternative distribution names or version availability.
-- If there is a version conflict: adjust versions to a compatible combination.
-- If the image is wrong: provide the correct official image.
-- All versions must be exact x.y.z format.
-- Do not introduce new unrelated packages.
-""".strip()
+ENVIRONMENT_REPAIR_SYSTEM_PROMPT = prompt_loader.get("environment_planner", "repair")
 
 
 def call_environment_planner(
@@ -200,6 +151,7 @@ def call_environment_planner(
     project_description: str,
     atomic_tasks: list[dict],
     catalog_hint: str | None = None,
+    project_id: int | None = None,
 ) -> RuntimeEnvironmentPlanOutput:
     provider = get_llm_provider()
     user_prompt = build_environment_planner_user_prompt(
@@ -217,7 +169,7 @@ def call_environment_planner(
     )
 
     try:
-        return RuntimeEnvironmentPlanOutput.model_validate(raw)
+        result = RuntimeEnvironmentPlanOutput.model_validate(raw)
     except ValidationError as exc:
         retry_prompt = build_environment_planner_retry_prompt(
             project_name=project_name,
@@ -232,13 +184,38 @@ def call_environment_planner(
             schema_name="runtime_environment_plan",
             json_schema=RuntimeEnvironmentPlanOutput.model_json_schema(),
         )
-        return RuntimeEnvironmentPlanOutput.model_validate(raw_retry)
+        result = RuntimeEnvironmentPlanOutput.model_validate(raw_retry)
+
+    if project_id is not None:
+        append_planning_trace(
+            project_id=project_id,
+            entry={
+                "agent": "environment_planner",
+                "call_type": "initial",
+                "project_id": project_id,
+                "inputs": {
+                    "project_name": project_name,
+                    "atomic_tasks_count": len(atomic_tasks),
+                    "catalog_hint": catalog_hint,
+                },
+                "reasoning": result.planning_rationale,
+                "output_snapshot": {
+                    "runtime_type": result.runtime_type,
+                    "image": result.image,
+                    "dependencies_count": len(result.dependencies),
+                    "env_vars_count": len(result.environment_variables),
+                },
+            },
+        )
+
+    return result
 
 
 def call_environment_repair(
     spec_dict: dict,
     smoke_test_command: str,
     error_output: str,
+    project_id: int | None = None,
 ) -> RuntimeSpecRepairOutput:
     provider = get_llm_provider()
     user_prompt = build_environment_repair_user_prompt(
@@ -255,6 +232,27 @@ def call_environment_repair(
     )
 
     try:
-        return RuntimeSpecRepairOutput.model_validate(raw)
+        result = RuntimeSpecRepairOutput.model_validate(raw)
     except ValidationError as exc:
         raise ValueError(f"Environment repair LLM returned invalid output: {exc}") from exc
+
+    if project_id is not None:
+        append_planning_trace(
+            project_id=project_id,
+            entry={
+                "agent": "environment_planner",
+                "call_type": "repair",
+                "project_id": project_id,
+                "inputs": {
+                    "smoke_test_command": smoke_test_command,
+                    "error_output": error_output,
+                },
+                "reasoning": result.repair_rationale,
+                "output_snapshot": {
+                    "corrected_image": result.corrected_image,
+                    "corrected_dependencies_count": len(result.corrected_dependencies),
+                },
+            },
+        )
+
+    return result

@@ -34,6 +34,7 @@ from app.services.environment.manager_contracts import (
     EnvironmentManagerRequest,
     PackageRequest,
 )
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -41,40 +42,9 @@ logger = logging.getLogger(__name__)
 # Package extraction LLM schema
 # ---------------------------------------------------------------------------
 
-PACKAGE_EXTRACTION_SYSTEM_PROMPT = """
-You are a package extraction assistant for a software development agent system.
-
-You receive a failed command's error diagnosis and must identify which packages
-or system dependencies need to be installed to resolve the failure.
-
-General rules:
-- Extract only packages that are clearly missing from the error output.
-- name: the installable package identifier appropriate for the ecosystem (see below).
-- version: the version string if explicitly required by the task constraints; null otherwise.
-- package_type: "app" for language-level packages, "system" for OS-level tools (apt-get).
-- reason: one sentence explaining why this package is needed.
-- Return ONLY JSON matching the provided schema.
-- If no packages can be identified, return an empty packages list.
-
-Ecosystem-specific naming:
-- Python: importable/installable package name (e.g. "requests", "pandas").
-  Extract from ModuleNotFoundError, ImportError, "No module named X".
-  IMPORTANT: do NOT extract local application modules (e.g. "app.models.user",
-  "src.utils", or any dotted path that references project source code).
-- Node/npm: npm package name (e.g. "express", "lodash", "react").
-  Extract from "Cannot find module", "MODULE_NOT_FOUND".
-- JVM/Maven/Gradle: Maven coordinate "groupId:artifactId" (e.g. "com.google.guava:guava",
-  "org.springframework.boot:spring-boot-starter-web"). Extract from
-  ClassNotFoundException, NoClassDefFoundError, package-not-found build errors.
-- Rust/Cargo: crate name from crates.io (e.g. "serde", "tokio", "reqwest").
-  Extract from "unresolved import", "use of undeclared crate" errors.
-- Go: full module path (e.g. "github.com/gin-gonic/gin", "golang.org/x/crypto").
-  Extract from "cannot find package", "no required module provides" errors.
-- .NET/NuGet: NuGet package id (e.g. "Newtonsoft.Json", "Microsoft.EntityFrameworkCore").
-  Extract from "The type or namespace X could not be found", missing assembly errors.
-- System tools: OS package name for apt-get (e.g. "curl", "git", "build-essential").
-  Extract from "command not found", "not installed", binary-not-found errors.
-""".strip()
+PACKAGE_EXTRACTION_SYSTEM_PROMPT = prompt_loader.get(
+    "environment_manager_agent", "package_extraction"
+)
 
 
 class _PackageSpec(BaseModel):
@@ -108,6 +78,19 @@ def _build_extraction_user_prompt(
         ]
         root_cause_lines = "\n".join(lines)
 
+    prompt_loader.validate_builder_inputs(
+        "environment_manager_agent",
+        "package_extraction",
+        {
+            "task_title": request.task_title,
+            "technical_constraints": request.technical_constraints,
+            "error_class": error_class,
+            "fault_side": fault_side,
+            "repair_directive": repair_directive,
+            "root_cause_lines": root_cause_lines,
+            "orchestrator_instruction": step_instructions,
+        },
+    )
     return f"""Task context:
 - title: {request.task_title}
 - technical_constraints: {request.technical_constraints}

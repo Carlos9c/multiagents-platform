@@ -71,6 +71,7 @@ class EnvironmentValidator:
                 spec_dict=spec.model_dump(),
                 smoke_test_command=smoke_cmd,
                 error_output=first_error,
+                project_id=project_id,
             )
         except Exception as exc:
             raise EnvironmentValidationError(

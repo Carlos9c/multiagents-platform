@@ -21,6 +21,7 @@ from app.services.analysis.registry import FileAnalyzerRegistry
 from app.services.llm.base import LLMProvider
 from app.services.llm.factory import get_llm_provider
 from app.services.project_storage import ProjectStorageService
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -33,18 +34,20 @@ class _ProjectSummaryOutput(BaseModel):
     entry_points: list[str]
 
 
-_SUMMARY_SYSTEM_PROMPT = """
-You are a codebase analyst. Given per-file analyses of a software project, produce a project-level summary.
-
-- project_summary: 3-6 sentences describing what the project is, what problem it solves, and how it is structured.
-- main_technologies: primary languages, frameworks, and notable libraries (e.g. ["Python", "FastAPI", "SQLAlchemy"]).
-- entry_points: main files that act as entry points (executable scripts, API mounts, package roots, etc.).
-
-Base your answer on the analyses provided. Return ONLY valid JSON matching the schema.
-""".strip()
+_SUMMARY_SYSTEM_PROMPT = prompt_loader.get("codebase_analyzer")
 
 
 def _build_summary_user_prompt(file_analyses: list[FileAnalysis], source_path: str) -> str:
+    from app.services.prompt_loader import prompt_loader
+
+    prompt_loader.validate_builder_inputs(
+        "codebase_analyzer",
+        "main",
+        {
+            "source_path": source_path,
+            "per_file_analyses": file_analyses,
+        },
+    )
     catalog = [
         {
             "path": fa.path,

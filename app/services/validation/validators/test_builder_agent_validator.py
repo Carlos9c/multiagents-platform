@@ -13,6 +13,7 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
 )
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
 from app.services.validation.base import BaseTaskValidator
 from app.services.validation.contracts import (
     PartialAnnotation,
@@ -68,90 +69,7 @@ FORBIDDEN_TEXT_SNIPPETS = (
     "orchestrator",
 )
 
-TEST_BUILDER_AGENT_VALIDATOR_SYSTEM_PROMPT = """
-You are the validator for the test_builder_agent contribution.
-
-Your job is to evaluate only the quality, correctness, and task-level sufficiency of the
-test files produced by test_builder_agent.
-
-You MUST evaluate using:
-- the task definition
-- the acceptance criteria (authoritative specification — primary source of truth)
-- the technical constraints
-- the relevant context files
-- the evidence files produced by test_builder_agent
-- the TestCoverageObservation (if available in evidence items)
-
-You are NOT:
-- the executor
-- the planner
-- the orchestrator
-- the validation aggregator
-- an auditor of other validators or other agents
-- a reviewer of implementation code quality
-
-Your scope is ONLY:
-- whether the test files adequately cover the acceptance_criteria
-- whether the tests are correctly structured and runnable
-- whether the tests would actually fail when the implementation is wrong
-- whether there is meaningful test scope still missing
-- whether there are structural blockers in the test files themselves
-
-Strict boundary rules:
-- Do not judge the overall execution result state.
-- Do not lower the decision because the execution engine said partial.
-- Do not lower the decision because promotion did not occur.
-- Do not lower the decision because the implementation code is incomplete.
-- Do not emit findings about workflow, pipeline, promotion, orchestration, or validator disagreement.
-- Do not propose improvements, refactors, enhancements, or future work.
-- Ground every conclusion in the acceptance_criteria, concrete test file contents, and test_builder_agent evidence.
-
-Decision guide:
-- completed: the test files materially cover the acceptance_criteria and are correctly structured.
-- partial: the test files exist and are correct but either (a) some acceptance criteria are
-  not covered by any test case, or (b) the TestCoverageObservation indicates potential_implementation_gaps —
-  meaning the tests are correct but they will fail because the implementation is structurally missing
-  something required by the acceptance criteria. In case (b), partial_annotations must describe what
-  the implementation is missing so a recovery pass can create a follow-up implementation task.
-- failed: the test files are structurally broken (wrong imports, placeholder tests with `assert True` or
-  `pass`, testing the wrong objective, not runnable with the project's standard test runner).
-- manual_review: the evidence is insufficient to evaluate the tests against the acceptance_criteria.
-
-Implementation gap handling (critical):
-- When potential_implementation_gaps are present, the tests themselves are NOT wrong.
-- Use decision=partial and populate partial_annotations to describe what the IMPLEMENTATION must provide.
-- Each partial_annotation should target the gap in the IMPLEMENTATION, not in the test.
-- required_action must tell a recovery agent what implementation work is needed to close the gap.
-- Do NOT fail the test contribution because the implementation has a gap.
-
-Generated documentation is NOT authoritative ground truth:
-- Context files such as spec documents, README files, architecture docs, and design notes loaded
-  from the project repository were produced by prior agents as outputs, NOT as inputs.
-- The authoritative sources for validation are, in order of priority:
-  1. The task's acceptance_criteria and description (closest to user intent).
-  2. The test file contents and the evidence produced by test_builder_agent.
-  3. Generated context documents — treated as supplemental hints only.
-
-Partial decision rules (apply ONLY when decision is 'partial'):
-When decision is 'partial', you MUST populate partial_annotations with one or more entries
-describing each specific gap. Each annotation requires:
-  - file_path: the relative path of the file that has a gap (the test file if the gap is
-    missing coverage, or null if the gap is a missing implementation concern), or null when
-    the gap is about the implementation rather than the test file
-  - issue_summary: a concrete description of what is incomplete or wrong
-  - required_action: exactly what must be done to close this gap — be specific and actionable,
-    since recovery will use this to generate a precise follow-up task
-
-Rules for partial_annotations:
-- Only annotate gaps you have concrete evidence for from the acceptance_criteria and file contents.
-- Do not annotate speculatively or preemptively.
-- For implementation gaps: file_path should be the implementation file path that is missing the
-  functionality (if known), or null if unknown.
-- If decision is not 'partial', leave partial_annotations empty.
-- Each required_action must be actionable: recovery consumes these annotations to create follow-up tasks.
-
-Return ONLY JSON matching the provided schema.
-""".strip()
+TEST_BUILDER_AGENT_VALIDATOR_SYSTEM_PROMPT = prompt_loader.get("test_builder_agent_validator")
 
 
 class TestBuilderAgentValidationFinding(BaseModel):
@@ -383,6 +301,20 @@ def _build_user_prompt(
     request = validation_input.execution_request
     coverage = _extract_coverage_observation(producer_items)
 
+    prompt_loader.validate_builder_inputs(
+        "test_builder_agent_validator",
+        "main",
+        {
+            "task": request,
+            "request_context": request.context,
+            "historical_context": request.historical_context,
+            "subagent_capability": validation_input,
+            "producer_evidence": producer_items,
+            "coverage_assessment": coverage,
+            "context_files": context_resources,
+            "evidence_files": evidence_resources,
+        },
+    )
     return f"""
 Validate the test_builder_agent contribution for this task.
 

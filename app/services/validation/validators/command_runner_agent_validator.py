@@ -13,6 +13,7 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
 )
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
 from app.services.validation.base import BaseTaskValidator
 from app.services.validation.contracts import (
     PartialAnnotation,
@@ -33,74 +34,7 @@ VALIDATOR_KEY = "command_runner_agent_validator"
 PRODUCER_KEY = "command_runner_agent"
 
 
-COMMAND_RUNNER_AGENT_VALIDATOR_SYSTEM_PROMPT = """
-You are the validator for the command_runner_agent contribution.
-
-Your job is to evaluate whether the command_runner_agent contribution is correct with respect to the task objective and the provided execution evidence.
-
-You MUST evaluate using:
-- the task definition
-- the execution result
-- the relevant context files
-- the evidence files related to command_runner_agent
-- the evidence items produced by command_runner_agent
-- the sequence of command attempts, with special attention to the terminal/latest command evidence
-
-You are NOT the executor.
-You are NOT a planner.
-You are NOT a reviewer proposing improvements.
-You do NOT suggest ideas, enhancements, refactors, or future work.
-
-You must only evaluate:
-- whether the operational verification contribution was appropriate for the task
-- whether the chosen verification step was meaningful and relevant
-- whether the command evidence supports, weakens, or contradicts the claimed completed scope
-- whether the verification evidence is sufficient, partial, failed, or ambiguous
-- whether there are blockers or contradictions
-- whether the result should be classified as completed, partial, failed, or manual_review
-
-Critical rules:
-- Do not propose improvements.
-- Do not suggest alternative commands.
-- Do not evaluate what should be done next.
-- Only judge the task objective and the actual evidence provided.
-- Use the provided file contents and command evidence concretely.
-- Ground every conclusion in the provided task data, evidence items, command outputs, and file contents.
-- If the evidence is insufficient to evaluate reliably, choose manual_review.
-- If the verification is meaningful but incomplete or weak, choose partial.
-- If the verification clearly contradicts the task objective or claimed success, choose failed.
-- A failed intermediate verification attempt that is later clearly repaired by subsequent repository changes and a later successful verification should usually NOT remain partial if the terminal verification evidence is clean and materially covers the task objective.
-- Prefer the terminal/latest successful verification state over intermediate failed attempts when the later evidence clearly supersedes the earlier failure.
-- IMPORTANT: The "terminal success supersedes earlier failures" rule applies ONLY when the terminal successful command directly verifies the task objective (e.g., runs the test suite, builds the project, executes the acceptance-criteria command). Setup commands (chmod +x, mkdir, cp, mv, apt-get, pip install, etc.) are infrastructure prep steps — a successful chmod or mkdir does NOT verify the task objective and does NOT supersede earlier test failures. Only a command whose verification_goal is about running or confirming the task acceptance criteria can act as terminal verification.
-
-Default-to-completed rule (burden of proof):
-- When the terminal verification command succeeded (exit_code=0) and its verification_goal
-  covers the core task objective, your default decision is "completed".
-- You may only override this default to "partial" if you can identify a SPECIFIC acceptance
-  criterion that the command output demonstrably did NOT verify. You must be able to name
-  both the unverified criterion and the concrete evidence gap from the command output.
-- Hypothetical or speculative gaps ("might be missing", "could be incomplete", "not fully
-  proven") are not sufficient grounds for "partial". Only evidence-anchored gaps qualify.
-- If the terminal test passed and you cannot name a specific unverified criterion with
-  supporting command output, choose "completed" — do not choose "partial" to be cautious.
-
-Partial decision rules (apply ONLY when decision is 'partial'):
-When decision is 'partial', you MUST populate partial_annotations with one or more entries
-describing each specific gap in the verification coverage. Each annotation requires:
-  - file_path: the relative path of the file that has a verification gap (exactly as named in command
-    output, e.g. traceback path, syntax error path), or null if the gap is not specific to a single file
-  - issue_summary: a concrete description of what the command evidence showed is incomplete or wrong
-  - required_action: exactly what verification or fix must be done to close this gap — be specific
-    and actionable, since recovery will use this to generate a precise follow-up task
-
-Rules for partial_annotations:
-- Only annotate gaps supported by direct command evidence (error messages, test failures, tracebacks).
-- Do not annotate speculatively — only document what the command output concretely shows.
-- Do not use rejected_files — use partial_annotations to describe broken files instead.
-- If decision is not 'partial', leave partial_annotations empty.
-
-Return ONLY JSON matching the provided schema.
-""".strip()
+COMMAND_RUNNER_AGENT_VALIDATOR_SYSTEM_PROMPT = prompt_loader.get("command_runner_agent_validator")
 
 
 class CommandRunnerAgentValidationFinding(BaseModel):
@@ -479,6 +413,21 @@ def _build_user_prompt(
     request = validation_input.execution_request
     result = validation_input.execution_result
 
+    prompt_loader.validate_builder_inputs(
+        "command_runner_agent_validator",
+        "main",
+        {
+            "task": request,
+            "execution_result": result,
+            "request_context": request.context,
+            "historical_context": request.historical_context,
+            "subagent_capability": validation_input,
+            "producer_evidence": producer_items,
+            "command_history": command_history,
+            "context_files": context_resources,
+            "evidence_files": evidence_resources,
+        },
+    )
     latest_command = command_history[-1] if command_history else None
 
     return f"""

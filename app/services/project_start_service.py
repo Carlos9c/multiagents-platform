@@ -116,12 +116,14 @@ class ProjectStartService:
                 project_name=project.name,
                 project_description=project.description or "",
                 codebase_analysis=analysis,
+                project_id=project.id,
             )
         else:
             # Scenario 1
             planner_output = call_planner_model(
                 project_name=project.name,
                 project_description=project.description or "",
+                project_id=project.id,
             )
 
         response = self._finalize(
@@ -167,11 +169,13 @@ class ProjectStartService:
                 project_name=project.name,
                 project_description=project.description or "",
                 codebase_analysis=analysis,
+                project_id=project.id,
             )
         else:
             planner_output = call_planner_model(
                 project_name=project.name,
                 project_description=project.description or "",
+                project_id=project.id,
             )
 
         response = self._finalize(

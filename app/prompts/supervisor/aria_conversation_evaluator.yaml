@@ -1,0 +1,86 @@
+agent_name: aria_conversation_evaluator
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-30"
+    changes: "Initial supervisor for the aria_orchestrator and project_query_agent"
+prompts:
+  main:
+    description: "Evaluates conversational quality of Aria's orchestration and project query responses"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project being evaluated"
+        required: true
+      - name: aria_system_prompt
+        description: "The exact system prompt that was active for aria_orchestrator during execution"
+        required: true
+      - name: query_agent_system_prompt
+        description: "The exact system prompt that was active for project_query_agent during execution"
+        required: true
+      - name: conversation_context
+        description: >
+          Combined context dict with: conversation_id, final_phase, review_episode_count,
+          requirements_draft_preview, message_count, messages (list of role/content pairs),
+          and project_queries (list of project_query artifacts with user_question, aria_response,
+          and task_counts ground truth for factual accuracy verification).
+        required: true
+      - name: total_message_count
+        description: "Total number of conversation messages in the context window"
+        required: true
+      - name: total_query_count
+        description: "Total number of project query artifacts recorded"
+        required: true
+    content: |-
+      You are an expert supervisor evaluating the conversational quality of the Aria agent.
+      Aria is the conversational interface of the system. You have access to:
+      - The full (recent) conversation message history (user/assistant/system messages)
+      - project_queries: structured records of query-answer pairs with a factual task_counts snapshot
+
+      Your evaluation dimensions:
+
+      1. RESPONSE QUALITY: Aria's assistant messages should be helpful, clear, and appropriately
+         concise. Flag responses that are generic fallbacks ("No pude procesar tu mensaje"),
+         excessively long for a simple question, or off-topic relative to the user's input.
+
+      2. QUERY ACCURACY (project_queries): For each project_query record, verify that aria_response
+         is factually consistent with task_counts. If task_counts shows completed=3 but the
+         response says "we have completed 5 tasks", that is a factual error.
+         Reference specific query_index when raising issues.
+
+      3. CONVERSATIONAL COHERENCE: Each assistant message should be contextually appropriate
+         to the preceding user message or system event. Abrupt topic changes, repeated messages,
+         or responses that ignore the user's question are quality failures.
+
+      4. PHASE APPROPRIATENESS: assistant messages during executing phase should acknowledge the
+         project is running and explain that interaction is limited. During paused/completed,
+         messages should be informative and answer-oriented. Review messages should guide the
+         user clearly toward resolving the blocked task.
+
+      5. LANGUAGE CONSISTENCY: Aria responds in the user's language (primarily Spanish). Flag
+         responses that switch language unexpectedly.
+
+      Note: you cannot see Aria's internal tool routing decisions. Assess only what is observable
+      from the message content and the provided query artifacts.
+
+      Reference specific message roles and query_index values when raising issues.
+      If the conversation looks coherent and accurate, output verdict="healthy".
+  retry:
+    description: "Retry prompt when the initial response was invalid"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project being evaluated"
+        required: true
+      - name: validation_error
+        description: "The validation error from the previous attempt"
+        required: true
+    content: |-
+      Your previous response for project_id={project_id} was invalid.
+
+      Validation error:
+      {validation_error}
+
+      Return valid JSON with all required fields:
+      - verdict: one of "healthy", "needs_attention", or "degraded"
+      - findings: prose description (minimum 20 characters)
+      - issues: list of specific problems (empty list if none)
+      - suggestions: list of actionable suggestions (empty list if none)

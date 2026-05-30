@@ -12,31 +12,12 @@ from pydantic import BaseModel
 
 from app.services.environment.catalog.registry import CatalogEntry
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
+from app.services.supervisor.trace_writer import append_planning_trace
 
 logger = logging.getLogger(__name__)
 
-CATALOG_SELECTOR_SYSTEM_PROMPT = """
-You are an environment selection agent for an autonomous software development system.
-
-Your job: given a software project description and a catalog of available Docker base images,
-select the single most appropriate image for the project.
-
-Selection rules:
-- Match the image whose ecosystem covers the project's PRIMARY language and framework.
-- For hybrid projects (e.g. React Native needs Node + Android SDK; a Python API with a
-  React frontend in the same repo needs the py-node fullstack image), select the hybrid
-  image when one is available in the catalog.
-- For standard single-ecosystem projects (pure Python, pure Node, pure Java, pure Rust,
-  pure Go, pure .NET, native Android, Flutter), select the matching single-ecosystem image.
-- Return the EXACT image_name string from the catalog — do not modify it, do not invent names.
-- Return null if no catalog entry is a good fit (e.g. an unusual runtime not in the catalog,
-  or a multi-language combination that no catalog entry covers). The system will then select
-  an appropriate public image automatically.
-- When two images could work, prefer the more specific one (e.g. Flutter over Android for
-  Flutter projects; React Native over Node for React Native projects).
-
-Return JSON matching the schema. Always populate the reasoning field.
-""".strip()
+CATALOG_SELECTOR_SYSTEM_PROMPT = prompt_loader.get("catalog_selector")
 
 
 class CatalogSelectionOutput(BaseModel):
@@ -59,8 +40,20 @@ def _build_selector_user_prompt(
     task_titles: list[str],
     entries: list[CatalogEntry],
 ) -> str:
+    from app.services.prompt_loader import prompt_loader
+
     catalog_text = _build_catalog_text(entries)
     tasks_text = "\n".join(f"  - {t}" for t in task_titles[:15]) or "  (no tasks yet)"
+    prompt_loader.validate_builder_inputs(
+        "catalog_selector",
+        "main",
+        {
+            "project_name": project_name,
+            "project_description": project_description,
+            "task_titles": task_titles,
+            "available_catalog_images": entries,
+        },
+    )
     return f"""Project name: {project_name}
 
 Project description:
@@ -81,6 +74,7 @@ def select_catalog_image(
     project_description: str,
     task_dicts: list[dict],
     entries: list[CatalogEntry],
+    project_id: int | None = None,
 ) -> CatalogSelectionOutput:
     provider = get_llm_provider()
     task_titles = [t.get("title", "") for t in task_dicts if t.get("title")]
@@ -106,5 +100,24 @@ def select_catalog_image(
         output.selected_image,
         output.reasoning[:120],
     )
+
+    if project_id is not None:
+        append_planning_trace(
+            project_id=project_id,
+            entry={
+                "agent": "catalog_selector",
+                "call_type": "initial",
+                "project_id": project_id,
+                "inputs": {
+                    "project_name": project_name,
+                    "task_titles_count": len(task_titles),
+                    "catalog_images_count": len(entries),
+                },
+                "reasoning": output.reasoning,
+                "output_snapshot": {
+                    "selected_image": output.selected_image,
+                },
+            },
+        )
 
     return output

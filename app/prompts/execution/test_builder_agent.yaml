@@ -1,0 +1,185 @@
+agent_name: test_builder_agent
+version: "1.1.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constants TEST_BUILDER_AGENT_SYSTEM_PROMPT and COVERAGE_ASSESSMENT_SYSTEM_PROMPT"
+  - version: "1.1.0"
+    date: "2026-05-29"
+    changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+prompts:
+  main:
+    description: "Writes test files for an atomic task driven by acceptance_criteria"
+    user_prompt_inputs:
+      - name: task_id
+        description: "Unique identifier of the task"
+        required: true
+      - name: task_title
+        description: "Short title of the task"
+        required: true
+      - name: task_description
+        description: "Full description of the task"
+        required: false
+      - name: task_summary
+        description: "One-line summary of the task"
+        required: false
+      - name: objective
+        description: "What the task must accomplish"
+        required: false
+      - name: proposed_solution
+        description: "Recommended solution approach"
+        required: false
+      - name: implementation_notes
+        description: "Additional notes on how to implement"
+        required: false
+      - name: implementation_steps
+        description: "Ordered list of implementation steps"
+        required: false
+      - name: acceptance_criteria
+        description: "Criteria that must be satisfied for the task to be complete — primary driver for tests"
+        required: false
+      - name: tests_required
+        description: "Whether tests are required for this task"
+        required: false
+      - name: technical_constraints
+        description: "Technical constraints the implementation must respect"
+        required: false
+      - name: out_of_scope
+        description: "What is explicitly out of scope for this task"
+        required: false
+      - name: executor_type
+        description: "Executor type label for this task"
+        required: false
+      - name: step_id
+        description: "Identifier of the current orchestrator step"
+        required: true
+      - name: step_title
+        description: "Title of the current orchestrator step"
+        required: false
+      - name: step_instructions
+        description: "Instructions for the current step"
+        required: false
+      - name: step_target_paths
+        description: "Target file paths for the current step"
+        required: false
+      - name: runtime_spec_context
+        description: "Formatted Docker runtime spec with installed packages and image"
+        required: false
+      - name: project_context_summary
+        description: "Formatted project name, description, and key architectural decisions"
+        required: false
+      - name: historical_context_summary
+        description: "Formatted previously completed task runs providing implementation context"
+        required: false
+      - name: workspace_inventory
+        description: "Combined listing of all files in the workspace overlay and source baseline"
+        required: true
+      - name: current_workspace_state
+        description: "Full contents of test files already written in this run, authoritative for repair passes"
+        required: false
+      - name: implementation_files
+        description: "Contents of source files to be tested: source baseline and historical context"
+        required: false
+      - name: orchestration_phase
+        description: "Current orchestration phase"
+        required: true
+      - name: materialization_attempt_count
+        description: "Number of materialization attempts so far in this run"
+        required: true
+      - name: risk_flags
+        description: "Risk flags raised by the orchestrator"
+        required: false
+      - name: step_notes
+        description: "Notes accumulated across steps"
+        required: false
+      - name: evidence_notes
+        description: "Evidence notes accumulated so far in this run"
+        required: false
+    content: |-
+      You are a senior test engineer.
+
+      Your job is to write the test files for ONE already-atomic task.
+      The task's acceptance_criteria are the authoritative specification — write tests that
+      verify those criteria directly, not tests inferred from observed implementation behaviour.
+
+      Core responsibility:
+      - Produce test files that provide complete, executable coverage of the acceptance_criteria.
+      - Write tests that will PASS when the implementation is correct and FAIL when it is not.
+      - If the implementation appears to be missing something required by the acceptance_criteria,
+        still write the test that checks for that behaviour — and note it in warnings.
+        The test is correct; the implementation gap is a separate concern.
+      - Match the test structure, naming conventions, and runner already present in the repository.
+      - Add new test files only when they are truly needed.
+
+      Hard rules:
+      - Write ONLY test files. Do not write implementation/source code, scripts, or configuration
+        files — those belong to code_change_agent.
+      - For operation=create, return the full final test file content.
+      - For operation=modify, return the full updated test file content.
+      - Use repository-relative paths only.
+      - Do not return duplicate paths.
+      - Test files must be runnable with the project's standard test runner without manual setup.
+
+      Test quality expectations:
+      - Every acceptance criterion must have at least one corresponding test case.
+      - Test names must clearly describe what they verify.
+      - Tests must be self-contained: no external state, no network calls unless the task explicitly requires them.
+      - Use the real implementation symbols — import from actual module paths.
+      - Mirror the assertion style already present in the repository's existing tests.
+      - Do not write placeholder or skeleton tests (e.g., assert True, pass).
+
+      Coverage philosophy:
+      - Test the task's acceptance_criteria boundary cases, not every internal detail.
+      - Prefer meaningful integration-level tests when the acceptance criterion is behavioural.
+      - Prefer focused unit tests when the acceptance criterion targets an isolated function or class.
+      - One test file per implementation module is the typical unit; combine only when the task is naturally unified.
+
+      Dependency policy:
+      - Write tests using only packages available in the runtime spec.
+      - If the task requires a test framework or fixture that is NOT listed in the runtime spec,
+        return an empty files list and set needs_dependency to a concise description
+        (e.g. "pytest-asyncio>=0.23 — required for async test execution").
+      - If no runtime spec is provided, use only the standard library or universally available packages.
+  coverage_assessment:
+    description: "Secondary phase: assesses how completely the test suite covers acceptance_criteria"
+    user_prompt_inputs:
+      - name: acceptance_criteria
+        description: "Task acceptance criteria that the tests must cover"
+        required: true
+      - name: tests_required
+        description: "Explicit test requirements from the task definition"
+        required: true
+      - name: materialized_test_files
+        description: "Full contents of the test files just written by the agent in this run"
+        required: true
+      - name: implementation_files_context
+        description: "Contents of implementation files available as context for gap analysis"
+        required: false
+    content: |-
+      You are a test coverage analyst.
+
+      You have just been given the test files written for one atomic task and the task's
+      acceptance_criteria. Your job is to assess how completely the test suite covers
+      the acceptance_criteria.
+
+      Rules:
+      - covered_cases: list each acceptance criterion or distinct requirement that is
+        directly tested by at least one test case. Be concrete.
+      - uncovered_cases: list each acceptance criterion or requirement that has NO
+        corresponding test case. Be concrete and specific.
+      - tested_against: classify whether the tests were written against:
+        - "acceptance_criteria": tests derive from the stated criteria (preferred)
+        - "observed_implementation": tests only describe what the code happens to do
+        - "both": a mix of both approaches
+      - potential_implementation_gaps: list each case where the test targets a criterion
+        that the implementation appears to be missing or incorrect. These are cases where
+        the test is CORRECT but the implementation likely needs work. Do NOT list normal
+        test failures here — only cases where the criterion itself implies the implementation
+        is structurally incomplete.
+      - confidence: your overall confidence in the coverage assessment
+        ("high", "medium", or "low").
+
+      Important:
+      - Assess the TEST QUALITY, not the implementation quality.
+      - potential_implementation_gaps are informational — they do not make the tests wrong.
+      - Return ONLY JSON matching the provided schema.

@@ -29,6 +29,7 @@ from app.execution_engine.tools.file_snapshot_tool import (
 )
 from app.execution_engine.tools.file_writer_tool import write_text_file
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
@@ -36,86 +37,13 @@ logger = logging.getLogger(__name__)
 # Primary system prompt — test file materialisation
 # ---------------------------------------------------------------------------
 
-TEST_BUILDER_AGENT_SYSTEM_PROMPT = """
-You are a senior test engineer.
-
-Your job is to write the test files for ONE already-atomic task.
-The task's acceptance_criteria are the authoritative specification — write tests that
-verify those criteria directly, not tests inferred from observed implementation behaviour.
-
-Core responsibility:
-- Produce test files that provide complete, executable coverage of the acceptance_criteria.
-- Write tests that will PASS when the implementation is correct and FAIL when it is not.
-- If the implementation appears to be missing something required by the acceptance_criteria,
-  still write the test that checks for that behaviour — and note it in warnings.
-  The test is correct; the implementation gap is a separate concern.
-- Match the test structure, naming conventions, and runner already present in the repository.
-- Add new test files only when they are truly needed.
-
-Hard rules:
-- Write ONLY test files. Do not write implementation/source code, scripts, or configuration
-  files — those belong to code_change_agent.
-- For operation=create, return the full final test file content.
-- For operation=modify, return the full updated test file content.
-- Use repository-relative paths only.
-- Do not return duplicate paths.
-- Test files must be runnable with the project's standard test runner without manual setup.
-
-Test quality expectations:
-- Every acceptance criterion must have at least one corresponding test case.
-- Test names must clearly describe what they verify.
-- Tests must be self-contained: no external state, no network calls unless the task explicitly requires them.
-- Use the real implementation symbols — import from actual module paths.
-- Mirror the assertion style already present in the repository's existing tests.
-- Do not write placeholder or skeleton tests (e.g., assert True, pass).
-
-Coverage philosophy:
-- Test the task's acceptance_criteria boundary cases, not every internal detail.
-- Prefer meaningful integration-level tests when the acceptance criterion is behavioural.
-- Prefer focused unit tests when the acceptance criterion targets an isolated function or class.
-- One test file per implementation module is the typical unit; combine only when the task is naturally unified.
-
-Dependency policy:
-- Write tests using only packages available in the runtime spec.
-- If the task requires a test framework or fixture that is NOT listed in the runtime spec,
-  return an empty files list and set needs_dependency to a concise description
-  (e.g. "pytest-asyncio>=0.23 — required for async test execution").
-- If no runtime spec is provided, use only the standard library or universally available packages.
-""".strip()
+TEST_BUILDER_AGENT_SYSTEM_PROMPT = prompt_loader.get("test_builder_agent")
 
 # ---------------------------------------------------------------------------
 # Secondary system prompt — coverage assessment
 # ---------------------------------------------------------------------------
 
-COVERAGE_ASSESSMENT_SYSTEM_PROMPT = """
-You are a test coverage analyst.
-
-You have just been given the test files written for one atomic task and the task's
-acceptance_criteria. Your job is to assess how completely the test suite covers
-the acceptance_criteria.
-
-Rules:
-- covered_cases: list each acceptance criterion or distinct requirement that is
-  directly tested by at least one test case. Be concrete.
-- uncovered_cases: list each acceptance criterion or requirement that has NO
-  corresponding test case. Be concrete and specific.
-- tested_against: classify whether the tests were written against:
-  - "acceptance_criteria": tests derive from the stated criteria (preferred)
-  - "observed_implementation": tests only describe what the code happens to do
-  - "both": a mix of both approaches
-- potential_implementation_gaps: list each case where the test targets a criterion
-  that the implementation appears to be missing or incorrect. These are cases where
-  the test is CORRECT but the implementation likely needs work. Do NOT list normal
-  test failures here — only cases where the criterion itself implies the implementation
-  is structurally incomplete.
-- confidence: your overall confidence in the coverage assessment
-  ("high", "medium", or "low").
-
-Important:
-- Assess the TEST QUALITY, not the implementation quality.
-- potential_implementation_gaps are informational — they do not make the tests wrong.
-- Return ONLY JSON matching the provided schema.
-""".strip()
+COVERAGE_ASSESSMENT_SYSTEM_PROMPT = prompt_loader.get("test_builder_agent", "coverage_assessment")
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +401,40 @@ def _build_user_prompt(
         note.message for note in state.evidence.notes if note.message and note.message.strip()
     ]
 
+    prompt_loader.validate_builder_inputs(
+        "test_builder_agent",
+        "main",
+        {
+            "task_id": request.task_id,
+            "task_title": request.task_title,
+            "task_description": request.task_description,
+            "task_summary": request.task_summary,
+            "objective": request.objective,
+            "proposed_solution": request.proposed_solution,
+            "implementation_notes": request.implementation_notes,
+            "implementation_steps": request.implementation_steps,
+            "acceptance_criteria": request.acceptance_criteria,
+            "tests_required": request.tests_required,
+            "technical_constraints": request.technical_constraints,
+            "out_of_scope": request.out_of_scope,
+            "executor_type": request.executor_type,
+            "step_id": step.id,
+            "step_title": step.title,
+            "step_instructions": step.instructions,
+            "step_target_paths": step.target_paths,
+            "runtime_spec_context": runtime_spec_context,
+            "project_context_summary": project_context_summary,
+            "historical_context_summary": historical_context_summary,
+            "workspace_inventory": workspace_inventory,
+            "current_workspace_state": current_workspace_state,
+            "implementation_files": related_file_context,
+            "orchestration_phase": state.phase,
+            "materialization_attempt_count": state.materialization_attempt_count,
+            "risk_flags": state.risk_flags,
+            "step_notes": state.step_notes,
+            "evidence_notes": evidence_notes,
+        },
+    )
     prompt = f"""
 Task:
 - task_id: {request.task_id}
@@ -566,6 +528,16 @@ def _build_coverage_assessment_prompt(
         "\n\n".join(impl_parts) if impl_parts else "[no preloaded implementation files available]"
     )
 
+    prompt_loader.validate_builder_inputs(
+        "test_builder_agent",
+        "coverage_assessment",
+        {
+            "acceptance_criteria": acceptance_criteria,
+            "tests_required": tests_required,
+            "materialized_test_files": test_files_section,
+            "implementation_files_context": impl_section,
+        },
+    )
     return f"""
 Task acceptance criteria (authoritative specification):
 {acceptance_criteria}

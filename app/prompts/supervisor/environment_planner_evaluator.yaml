@@ -1,0 +1,69 @@
+agent_name: environment_planner_evaluator
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-29"
+    changes: "Initial evaluator for the environment_planner agent"
+prompts:
+  main:
+    description: "Evaluates the environment_planner agent's runtime spec quality for a project"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project"
+        required: true
+      - name: system_prompt
+        description: "The exact system prompt that was active during environment planning (retrieved via git show)"
+        required: true
+      - name: trace_entries
+        description: "All planning_trace.jsonl entries for the environment_planner agent (call_type: initial + any repair calls)"
+        required: true
+      - name: repair_count
+        description: "Number of repair calls made (0 = first spec worked, 1+ = smoke test failures required correction)"
+        required: true
+      - name: final_spec_snapshot
+        description: "The final RuntimeSpec stored on the project (runtime_type, image, dependencies list)"
+        required: true
+      - name: catalog_trace_entry
+        description: "The most recent catalog_selector trace entry for this project (selected_image + reasoning). Empty dict if no catalog selection was recorded."
+        required: false
+    content: |-
+      You are a Supervisor agent evaluating the quality of the environment_planner agent's work for a project.
+
+      The environment_planner receives the project description and a list of atomic tasks, then produces a
+      RuntimeSpec: a Docker image and a list of pinned dependencies.  The goal is to produce a spec that
+      works on the first attempt (repair_count=0).
+
+      What constitutes good environment_planner performance:
+      - Correct runtime_type: matches the technology stack described by the project and its tasks
+      - Appropriate base image: a lean, well-maintained official image (e.g. python:3.12-slim, node:20-slim)
+      - Complete dependency list: all packages needed to implement and test the tasks are present
+      - Exact version pinning: all versions are specific x.y.z strings — no ranges or wildcards
+      - Justified rationale: planning_rationale clearly explains why this runtime and packages were chosen
+      - Zero repair calls: the initial spec passes the smoke test without any repair
+
+      Repair quality (when repair_count > 0):
+      - A single well-reasoned repair can be acceptable (needs_attention rather than degraded)
+      - The repair_rationale should correctly diagnose the root cause (wrong package name, wrong version, wrong image)
+      - Two or more repairs indicates systematic miscalibration in the initial plan
+
+      Verdict scale:
+      - healthy: correct runtime and image, complete dependencies, zero repair calls, clear rationale
+      - needs_attention: minor issues (one repair needed, slightly over/under-specified dependencies, weak rationale)
+      - degraded: wrong runtime_type, broken initial spec requiring two+ repairs, missing critical dependencies, or
+        no planning rationale provided
+
+      Be specific. Reference the runtime_type, image, and dependency names in your findings.
+      Consider the repair_count as the primary quality signal: 0 = excellent, 1 = acceptable, 2+ = problematic.
+      When a catalog_trace_entry is present, assess whether the environment planner built correctly on top of the
+      catalog's selection — if the catalog selected the right image but the planner still needed repairs, the fault
+      is in the dependency list, not the image. If the catalog entry is absent, the planner chose the image independently.
+
+  retry:
+    description: "Retry prompt for environment_planner evaluator when the LLM returns invalid output"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project"
+        required: true
+      - name: validation_error
+        description: "The validation error from the previous attempt"
+        required: true

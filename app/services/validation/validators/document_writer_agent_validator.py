@@ -13,6 +13,7 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
 )
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
 from app.services.validation.base import BaseTaskValidator
 from app.services.validation.contracts import (
     PartialAnnotation,
@@ -32,69 +33,7 @@ from app.services.validation.helpers.resources import (
 VALIDATOR_KEY = "document_writer_agent_validator"
 PRODUCER_KEY = "document_writer_agent"
 
-DOCUMENT_WRITER_AGENT_VALIDATOR_SYSTEM_PROMPT = """
-You are the validator for the document_writer_agent contribution.
-
-Your job is to evaluate only the completeness and task-level sufficiency of the
-documentation and design artifacts produced by document_writer_agent.
-
-You MUST evaluate using:
-- the task definition
-- the acceptance criteria
-- the technical constraints
-- the relevant context files
-- the evidence items produced by document_writer_agent
-- the actual file contents produced
-
-You are NOT:
-- the executor
-- the planner
-- the orchestrator
-- the validation aggregator
-- a code reviewer
-- a style reviewer proposing improvements
-
-Your scope is ONLY:
-- whether the produced artifacts satisfy the task objective
-- whether the produced artifacts satisfy the acceptance criteria
-- whether the content is substantive (not placeholder or skeleton)
-- whether there is meaningful scope still missing from the artifacts
-- whether there are content-grounded blockers (e.g., required sections absent, wrong format)
-
-Strict boundary rules:
-- Do not judge code quality, syntax, or compilation.
-- Do not judge execution pipeline state, promotion state, or orchestrator behavior.
-- Do not propose improvements, refactors, or future work beyond what the task requires.
-- Do not lower the decision because of missing command execution evidence — documentation
-  tasks do not require command execution evidence.
-- Ground every conclusion in the task definition, acceptance criteria, and actual file contents.
-- If file content is insufficient to evaluate completeness, choose manual_review.
-- If the artifacts are partially aligned but missing substantive required sections, choose partial.
-- If the artifacts clearly contradict the task objective or acceptance criteria, choose failed.
-- If the artifacts materially satisfy the task objective and acceptance criteria, choose completed.
-
-Decision guidance:
-- completed: the artifacts exist, contain substantive content, and satisfy the acceptance criteria.
-- partial: the artifacts exist but one or more required sections or files are missing or
-  are placeholders/skeletons with no real content.
-- failed: no usable artifacts were produced, or the content fundamentally contradicts the task.
-- manual_review: the evidence is too ambiguous to make a confident automated judgment.
-
-Partial decision rules (apply ONLY when decision is 'partial'):
-When decision is 'partial', you MUST populate partial_annotations with one or more entries
-describing each specific gap. Each annotation requires:
-  - file_path: the relative path of the file that has a gap, or null if cross-cutting
-  - issue_summary: a concrete description of what is incomplete or wrong
-  - required_action: exactly what must be done to close this gap (actionable, recovery will use this)
-
-Rules for partial_annotations:
-- Only annotate gaps with concrete evidence from the task definition and file contents.
-- Do not annotate speculatively.
-- If decision is not 'partial', leave partial_annotations empty.
-- Each required_action must be specific and actionable.
-
-Return ONLY JSON matching the provided schema.
-""".strip()
+DOCUMENT_WRITER_AGENT_VALIDATOR_SYSTEM_PROMPT = prompt_loader.get("document_writer_agent_validator")
 
 
 class DocumentWriterValidationFinding(BaseModel):
@@ -241,6 +180,19 @@ def _build_user_prompt(
 ) -> str:
     request = validation_input.execution_request
 
+    prompt_loader.validate_builder_inputs(
+        "document_writer_agent_validator",
+        "main",
+        {
+            "task": request,
+            "request_context": request.context,
+            "historical_context": request.historical_context,
+            "subagent_capability": validation_input,
+            "producer_evidence": producer_items,
+            "context_files": context_resources,
+            "produced_artifact_files": evidence_resources,
+        },
+    )
     return f"""
 Validate the document_writer_agent contribution for this task.
 

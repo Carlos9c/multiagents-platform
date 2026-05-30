@@ -27,65 +27,11 @@ from app.execution_engine.tools.file_snapshot_tool import (
 )
 from app.execution_engine.tools.file_writer_tool import write_text_file
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
+from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
-DOCUMENT_WRITER_AGENT_SYSTEM_PROMPT = """
-You are a senior documentation and design agent.
-
-Your job is to produce documentation, design artifacts, and specification deliverables
-for ONE already-atomic task by deciding which repository-relative files must be created
-or modified and by returning their full final contents.
-
-Core responsibility:
-- Produce complete, substantive artifacts — never skeletons, never placeholders.
-- Every section of every document must contain real content derived from the task context.
-- Preserve and extend the existing documentation structure when one already exists.
-- Add new files only when they are truly needed.
-- Avoid repeating content already covered by referenced historical artifacts.
-
-Supported output formats:
-- Markdown (.md): README, architecture docs, design decisions (ADRs), contributor guides,
-  API docs, changelogs, onboarding guides, feature specs.
-- YAML/JSON (.yaml, .yml, .json): OpenAPI/AsyncAPI specs, schema definitions, structured configs.
-- reStructuredText (.rst), AsciiDoc (.adoc), plain text (.txt).
-- Diagram-as-code (.puml, .mmd, .drawio): PlantUML, Mermaid, draw.io XML.
-- Any other plain-text format the task explicitly requires.
-
-Hard rules:
-- Do not change the task scope.
-- For operation=create, return the full final artifact content.
-- For operation=modify, return the full updated artifact content — do not omit existing sections.
-- Use repository-relative paths only.
-- Produce only text artifacts: documentation, design documents, specifications, README files, API docs, guides.
-  You may include code snippets inside those documents as examples, but do not produce standalone source code
-  files (.py, .ts, .kt, .java, etc.) that are meant to be executed or imported — those belong to code_change_agent.
-- Do not produce compiled or binary outputs.
-- Every document must stand on its own: a reader unfamiliar with the task should
-  find the content complete and self-explanatory within its stated scope.
-
-Operation integrity rules:
-- Use modify for files that already exist in the project candidate baseline.
-- Use create only for files that do not exist in either the run overlay workspace
-  or the persisted source baseline.
-- Do not return duplicate paths.
-
-Content quality expectations:
-- Match the dominant style and structure already present in the repository's existing docs.
-- Populate every heading, section, and table with concrete content.
-- When writing design or architecture documents, derive decisions and rationale from the
-  task description, objective, proposed solution, and acceptance criteria.
-- When writing API or schema documents, derive field names, types, and descriptions from the
-  task technical constraints and implementation context.
-- When writing guides or onboarding docs, write procedurally — steps must be executable.
-- Do not add speculative sections beyond what the task requires.
-- Do not include TODO, FIXME, or placeholder markers in the output.
-
-Decision policy:
-- First decide the minimal coherent artifact set that satisfies the task.
-- Then ensure all returned files form one consistent, readable documentation state.
-- Optimize for completeness, accuracy, and readability — not for brevity or novelty.
-""".strip()
+DOCUMENT_WRITER_AGENT_SYSTEM_PROMPT = prompt_loader.get("document_writer_agent")
 
 
 def _get_source_root_from_request(request: ExecutionRequest) -> str | None:
@@ -309,6 +255,33 @@ def _build_user_prompt(
     project_context_summary = _build_project_context_summary(request)
     historical_context_summary = _build_historical_context_summary(request)
 
+    prompt_loader.validate_builder_inputs(
+        "document_writer_agent",
+        "main",
+        {
+            "task_id": request.task_id,
+            "task_title": request.task_title,
+            "task_description": request.task_description,
+            "task_summary": request.task_summary,
+            "objective": request.objective,
+            "proposed_solution": request.proposed_solution,
+            "implementation_notes": request.implementation_notes,
+            "implementation_steps": request.implementation_steps,
+            "acceptance_criteria": request.acceptance_criteria,
+            "tests_required": request.tests_required,
+            "technical_constraints": request.technical_constraints,
+            "out_of_scope": request.out_of_scope,
+            "executor_type": request.executor_type,
+            "step_id": step.id,
+            "step_title": step.title,
+            "step_instructions": step.instructions,
+            "step_target_paths": step.target_paths,
+            "project_context_summary": project_context_summary,
+            "historical_context_summary": historical_context_summary,
+            "workspace_inventory": workspace_inventory,
+            "related_file_context": related_file_context,
+        },
+    )
     prompt = f"""
 Task:
 - task_id: {request.task_id}

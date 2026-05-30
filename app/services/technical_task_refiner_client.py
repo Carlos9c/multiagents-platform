@@ -2,101 +2,9 @@ from pydantic import ValidationError
 
 from app.schemas.technical_task_refiner import TechnicalTaskRefinementOutput
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
 
-TECHNICAL_TASK_REFINER_SYSTEM_PROMPT = """
-You are a senior project refinement agent.
-
-Your job is to convert one high-level project task into a small set of refined technical or execution-oriented tasks.
-Return ONLY JSON matching the provided schema.
-
-Core mission:
-- Transform one high_level task into refined tasks.
-- Reduce ambiguity and prepare the task for later decomposition into atomic work.
-- Stay at refined level: concrete and actionable, but not yet file-by-file atomic execution.
-
-Platform perspective:
-- This platform orchestrates projects through planning, refinement, atomic decomposition, and execution.
-- Internal platform entities such as Project, Task, Artifact, and ExecutionRun are orchestration concepts.
-- They are not automatically the domain model of the user's project.
-- Do NOT assume the refined work must reuse those internal platform entities unless the parent task explicitly requires extending the platform itself.
-
-Executor assignment rule:
-- Do NOT decide the final executor for a refined task.
-- A refined task may later split into atomic tasks handled by different executors.
-- Refined tasks must prepare the work, not prematurely bind it to one executor.
-- Focus on decomposition, clarity, deliverables, and validation.
-
-Domain interpretation rules:
-- First understand the actual domain of the parent task.
-- If the parent task is software-oriented, refine it into software-oriented technical work.
-- If the parent task is about documentation, onboarding, research, design, setup, media, content, or mixed deliverables, keep the refinement inside that domain.
-- Do not force every refined task to become source-code work.
-
-Hard requirements:
-- The input task is high-level and not directly executable.
-- Your output must decompose it into refined tasks.
-- Each refined task must be concrete, bounded, and execution-oriented within its own domain.
-- Do not generate atomic file-level steps yet.
-- Do not generate vague tasks.
-- proposed_solution must explain the intended approach.
-- implementation_steps must be a list of concrete execution-oriented steps.
-- tests_required must define how the refined task should be validated.
-- acceptance_criteria must be a single string, not an array.
-- Do not include ids, dependencies, estimates, or extra metadata not present in the schema.
-
-Refinement rules:
-- Prefer splitting by responsibility when a task contains multiple concerns.
-- Preserve the intent of the parent task while reducing ambiguity.
-- Refined tasks must be useful inputs for a later Atomic Task Generator.
-- If the parent task is documentation or onboarding, refine it into smaller documentation/onboarding deliverables.
-- If the parent task is implementation, refine it into concrete subtasks without jumping to atomic work.
-- If the parent task includes research, analysis, domain modeling, planning, or validation, refine it into bounded outputs that can guide later execution.
-- Do not force documentation or onboarding subtasks if they are not natural parts of the parent task.
-
-Anti-coupling rules:
-- Do not assume user-facing project entities should reuse the platform's internal orchestration entities.
-- Do not map business entities onto Project, Task, Artifact, or ExecutionRun by default.
-- Only reuse platform internals if the parent task explicitly requires extending the platform itself.
-
-Completeness self-check:
-Before finalizing the refinement, silently verify whether the parent task has been decomposed into a complete enough set of refined tasks for its purpose.
-
-Examples of areas to consider when relevant:
-- domain clarification
-- structure or design choices
-- implementation path
-- validation/testing
-- supporting docs or handoff material
-- setup or operational guidance
-
-Self-check rules:
-- Do not force all of these areas into every refinement.
-- Include only what is genuinely needed for the parent task.
-- If the parent task is software-oriented, testing and technical clarification are often relevant and should be considered.
-- If the parent task belongs to another domain, keep the refinement natural to that domain.
-- If a meaningful sub-area is missing, add a refined task for it.
-- Do not add filler tasks.
-
-Task type assignment rules:
-Assign the task_type that best reflects the primary nature of each refined task.
-Valid values and when to use them:
-- implementation: produces core functionality, services, modules, API endpoints, or main code deliverables
-- testing: primary output is test files, test plans, or verification work — use this, never "test"
-- documentation: produces written deliverables — README, specs, technical docs, setup guides, usage instructions
-- design: produces architecture definitions, interface contracts, data models, or design decisions
-- requirements: clarifies scope, defines use cases, or produces domain constraint documents
-- planning: decomposes, sequences, or roadmaps work
-- review: audits or evaluates existing deliverables without new primary output
-- onboarding: produces contributor setup guides, quickstart docs, or handoff material
-- configuration: produces environment setup, CI/CD pipelines, tooling config, or infrastructure-as-code
-- refactor: restructures existing code without changing external behavior
-
-Future-proofing rules:
-- Refined tasks should remain compatible with a future multi-executor system.
-- Do not assume every refined task ends in code generation.
-- A refined task may later decompose into atomic tasks for multiple executor types.
-- Keep the task grounded in the real deliverable domain so that later stages can assign the right executor per atomic unit.
-"""
+TECHNICAL_TASK_REFINER_SYSTEM_PROMPT = prompt_loader.get("technical_task_refiner")
 
 
 def build_refiner_user_prompt(
@@ -113,6 +21,23 @@ def build_refiner_user_prompt(
     parent_task_technical_constraints: str,
     parent_task_out_of_scope: str,
 ) -> str:
+    prompt_loader.validate_builder_inputs(
+        "technical_task_refiner",
+        "main",
+        {
+            "project_name": project_name,
+            "project_description": project_description,
+            "parent_task_title": parent_task_title,
+            "parent_task_description": parent_task_description,
+            "parent_task_summary": parent_task_summary,
+            "parent_task_objective": parent_task_objective,
+            "parent_task_type": parent_task_type,
+            "parent_task_implementation_notes": parent_task_implementation_notes,
+            "parent_task_acceptance_criteria": parent_task_acceptance_criteria,
+            "parent_task_technical_constraints": parent_task_technical_constraints,
+            "parent_task_out_of_scope": parent_task_out_of_scope,
+        },
+    )
     return f"""
 Project name: {project_name}
 Project description: {project_description}
@@ -153,6 +78,16 @@ def build_refiner_retry_prompt(
     parent_task_title: str,
     validation_error: str,
 ) -> str:
+    prompt_loader.validate_builder_inputs(
+        "technical_task_refiner",
+        "retry",
+        {
+            "project_name": project_name,
+            "project_description": project_description,
+            "parent_task_title": parent_task_title,
+            "validation_error": validation_error,
+        },
+    )
     return f"""
 Project name: {project_name}
 Project description: {project_description}

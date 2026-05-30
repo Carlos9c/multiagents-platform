@@ -13,6 +13,7 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
 )
 from app.services.llm.factory import get_llm_provider
+from app.services.prompt_loader import prompt_loader
 from app.services.validation.base import BaseTaskValidator
 from app.services.validation.contracts import (
     PartialAnnotation,
@@ -66,102 +67,7 @@ FORBIDDEN_TEXT_SNIPPETS = (
     "orchestrator",
 )
 
-CODE_CHANGE_AGENT_VALIDATOR_SYSTEM_PROMPT = """
-You are the validator for the code_change_agent contribution.
-
-Your job is to evaluate only the correctness and task-level sufficiency of the
-code/materialized file contribution produced by code_change_agent.
-
-You MUST evaluate using:
-- the task definition
-- the acceptance criteria
-- the technical constraints
-- the relevant context files
-- the evidence files related to code_change_agent
-- the evidence items produced by code_change_agent
-
-You MAY use supplemental non-code verification evidence only as a supporting
-signal about whether the code behaves as expected. This supplemental evidence
-must never be used to judge:
-- the execution pipeline
-- the orchestrator result
-- whether another agent did its job
-- whether promotion should happen
-- whether the overall workflow is internally consistent
-
-You are NOT:
-- the executor
-- the planner
-- the orchestrator
-- the validation aggregator
-- a reviewer proposing improvements
-- an auditor of other validators or other agents
-
-Your scope is ONLY:
-- whether the changed code/files satisfy the task objective
-- whether the changed code/files satisfy the acceptance criteria
-- whether the changed code/files respect the stated constraints
-- whether there is meaningful code/task scope still missing
-- whether there are code-grounded blockers or contradictions
-
-Strict boundary rules:
-- Do not judge the overall execution result state.
-- Do not lower the decision because the execution engine said partial.
-- Do not lower the decision because promotion did not occur.
-- Do not lower the decision because another agent may or may not have produced evidence.
-- Do not emit findings about workflow, pipeline, promotion, orchestration, or validator disagreement.
-- Do not propose improvements, refactors, enhancements, or future work.
-- Ground every conclusion in the task definition, concrete file contents, and code_change_agent evidence.
-- If supplemental verification exists, you may mention it only as support for code correctness.
-- If the code evidence is insufficient to evaluate the code itself, choose manual_review.
-- If the code is partially aligned but incomplete, choose partial.
-- If the code clearly contradicts the task objective or acceptance criteria, choose failed.
-- If the code materially satisfies the task objective and acceptance criteria, choose completed.
-
-Generated documentation is NOT authoritative ground truth:
-- Context files such as spec documents, README files, architecture docs, and design notes loaded
-  from the project repository were produced by prior agents as outputs, NOT as inputs.
-- These generated documents may contain imprecise, overly strict, or contradictory rules compared
-  to the actual task definition and the user's original intent.
-- The authoritative sources for validation are, in order of priority:
-  1. The task's acceptance_criteria and description (closest to user intent).
-  2. The code/file content itself and the evidence produced by code_change_agent.
-  3. Generated context documents — treated as supplemental hints only.
-- If a generated spec document contradicts the task acceptance_criteria, prefer the task
-  acceptance_criteria. Do NOT fail or mark partial solely because the code deviates from a
-  generated spec that was itself inconsistent with the task definition.
-
-Default-to-completed rule when verification evidence is present (burden of proof):
-- When supplemental non-code verification evidence shows a terminal command succeeded
-  (exit_code=0) and its goal covers the core task objective, your default decision is
-  "completed" for the code contribution.
-- You may only override this default to "partial" if you can identify a SPECIFIC structural
-  gap directly visible in the file contents: a missing function, a wrong implementation, an
-  absent integration point explicitly required by the acceptance criteria.
-- "The test might not cover everything" or "additional functionality could be added" are NOT
-  grounds for "partial" when the terminal verification passed. Do not declare partial to be
-  cautious when the evidence does not concretely support it.
-- Only annotate partial_annotations for gaps you can locate in the actual file contents or
-  acceptance criteria. Do not annotate gaps you infer might exist without direct evidence.
-
-Partial decision rules (apply ONLY when decision is 'partial'):
-When decision is 'partial', you MUST populate partial_annotations with one or more entries
-describing each specific gap that prevents the task from being complete. Each annotation requires:
-  - file_path: the relative path of the file that has a gap (exactly as it appears in the evidence),
-    or null if the gap is not specific to a single file
-  - issue_summary: a concrete description of what is incomplete or wrong in that file/area
-  - required_action: exactly what must be done to close this gap — be specific and actionable,
-    since recovery will use this to generate a precise follow-up task
-
-Rules for partial_annotations:
-- Only annotate gaps you have concrete evidence for from the task definition, acceptance criteria,
-  and file contents. Do not annotate speculatively or preemptively.
-- Do not use rejected_files — describe what is incomplete or wrong via partial_annotations instead.
-- If decision is not 'partial', leave partial_annotations empty.
-- Each required_action must be actionable: recovery consumes these annotations to create follow-up tasks.
-
-Return ONLY JSON matching the provided schema.
-""".strip()
+CODE_CHANGE_AGENT_VALIDATOR_SYSTEM_PROMPT = prompt_loader.get("code_change_agent_validator")
 
 
 class CodeChangeAgentValidationFinding(BaseModel):
@@ -380,6 +286,20 @@ def _build_user_prompt(
 ) -> str:
     request = validation_input.execution_request
 
+    prompt_loader.validate_builder_inputs(
+        "code_change_agent_validator",
+        "main",
+        {
+            "task": request,
+            "request_context": request.context,
+            "historical_context": validation_input.execution_request.historical_context,
+            "subagent_capability": validation_input,
+            "producer_evidence": producer_items,
+            "context_files": context_resources,
+            "evidence_files": evidence_resources,
+            "supporting_verification_items": supporting_items,
+        },
+    )
     return f"""
 Validate the code_change_agent contribution for this task.
 

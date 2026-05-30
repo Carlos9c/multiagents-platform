@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import json
+
 from sqlalchemy.orm import Session
 
+from app.models.artifact import Artifact
 from app.models.conversation import Conversation, ConversationMessage
 from app.services.conversation.aria.contracts import ToolName, ToolResult
 from app.services.conversation.requirements_evaluator import (
     ConversationTurn,
     RequirementsEvaluatorInput,
+    RequirementsEvaluatorResult,
     evaluate_requirements,
 )
+
+_ARTIFACT_TYPE = "requirements_evaluation"
+_ARTIFACT_CREATED_BY = "requirements_tool"
 
 
 class RequirementsTool:
@@ -55,6 +62,8 @@ class RequirementsTool:
             )
         )
 
+        self._save_artifact(db, project_id, result, len(history))
+
         return ToolResult(
             tool_name=ToolName.REQUIREMENTS,
             data={
@@ -64,3 +73,45 @@ class RequirementsTool:
                 "reasoning": result.reasoning,
             },
         )
+
+    # ------------------------------------------------------------------
+    # Supervisor instrumentation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _save_artifact(
+        db: Session,
+        project_id: int,
+        result: RequirementsEvaluatorResult,
+        conversation_turn_count: int,
+    ) -> None:
+        """Persist a requirements_evaluation artifact for the Supervisor."""
+        try:
+            call_index = (
+                db.query(Artifact)
+                .filter(
+                    Artifact.project_id == project_id,
+                    Artifact.artifact_type == _ARTIFACT_TYPE,
+                )
+                .count()
+            )
+            draft_snapshot = (result.updated_draft or "")[:500] or None
+            payload = {
+                "call_index": call_index,
+                "status": result.status,
+                "next_question": result.next_question,
+                "reasoning": result.reasoning,
+                "draft_snapshot": draft_snapshot,
+                "conversation_turn_count": conversation_turn_count,
+            }
+            artifact = Artifact(
+                project_id=project_id,
+                task_id=None,
+                artifact_type=_ARTIFACT_TYPE,
+                content=json.dumps(payload),
+                created_by=_ARTIFACT_CREATED_BY,
+            )
+            db.add(artifact)
+            db.flush()
+        except Exception:
+            pass  # Supervisor instrumentation must never break the agent
