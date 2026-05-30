@@ -648,6 +648,155 @@ La promoción fusiona el overlay workspace sobre source. El directorio `run` sie
 
 ---
 
+## Sistema Supervisor (`app/services/supervisor/`)
+
+Capa de meta-evaluación post-ejecución que analiza retrospectiamente la calidad de los 22 agentes del sistema para un proyecto dado. No interfiere con la ejecución; corre bajo demanda vía `POST /supervisor/projects/{project_id}/run`.
+
+### Arquitectura
+
+```
+POST /supervisor/projects/{project_id}/run
+    │
+    └── supervisor_runner.run_supervisor()
+          │
+          ├── [por cada uno de los 22 evaluadores]
+          │     evaluator.evaluate(db, project_id, project_name, …, system_version)
+          │         → EvaluatorOutput(result, execution_run_ids_analyzed, system_versions_seen)
+          │         result=None  → agente not_supervised (no fue llamado en este proyecto)
+          │         result=...   → verdict + findings + issues + suggestions
+          │
+          ├── _overall_verdict(verdicts)
+          │     ├── >30% not_supervised → "not_evaluated"
+          │     └── media ponderada (healthy=2, needs_attention=1, degraded=0)
+          │           ≥1.7 → "healthy" | ≥1.3 → "needs_attention" | <1.3 → "degraded"
+          │
+          ├── synthesize(...)  → texto narrativo cross-agent
+          │
+          └── SupervisorReport + 22 AgentEvaluation → persistidos en BD
+```
+
+**Análisis agregado** (`aggregate_runner.py`): `POST /supervisor/aggregate` analiza 5–20 proyectos con filtros opcionales (versión, fecha, IDs) y produce un `AggregateReport` con tabla de frecuencias de veredictos por agente y una síntesis de patrones transversales.
+
+### Componentes
+
+| Archivo | Rol |
+|---|---|
+| `supervisor_runner.py` | Orquesta los 22 evaluadores, calcula `overall_verdict`, llama al sintetizador |
+| `supervisor_synthesizer.py` | Genera síntesis narrativa cross-agent via LLM |
+| `contracts.py` | `EvaluatorOutput`, `AgentEvaluationOutput` |
+| `prompt_resolver.py` | Resuelve el prompt histórico del agente via `git show` |
+| `trace_writer.py` | Escribe entradas en `planning_trace.jsonl` / `execution_trace.jsonl` |
+| `aggregate_filter.py` | Filtra `SupervisorReport`s por versión, fechas, IDs de proyecto |
+| `aggregate_builder.py` | Construye tabla de frecuencias y corpus de texto para el LLM |
+| `aggregate_runner.py` | Orquesta el análisis multi-proyecto |
+| `aggregate_synthesizer.py` | Genera síntesis agregada via LLM |
+| `evaluators/` | 22 evaluadores independientes, uno por agente del sistema |
+
+---
+
+## Sistema de versionado
+
+El sistema mantiene **dos dimensiones de versionado** ortogonales que trabajan conjuntamente para garantizar trazabilidad completa, en especial en el Supervisor.
+
+### 1. Versión del sistema — `system_version` (por `ExecutionRun`)
+
+Cada `ExecutionRun` registra el commit de git activo en el momento de su creación:
+
+```python
+# app/core/git_utils.py
+get_system_version()  # → "<sha40>"  si el working tree está limpio
+                       # → "<sha40>-dirty"  si hay cambios sin commitear
+                       # → "unknown"  si git no está disponible
+```
+
+Llamado automáticamente en `create_execution_run()`. El valor se persiste en `ExecutionRun.system_version`.
+
+**Formatos reconocidos por el Supervisor:**
+
+| Valor | Descripción | Resoluble para `git show` |
+|---|---|---|
+| `"abc1234…"` (40 hex) | Hash limpio | ✅ Sí |
+| `"abc1234…-dirty"` | Árbol con cambios; se elimina el sufijo | ✅ Sí (best-effort) |
+| `"unknown"` | Git no disponible | ❌ No (usa prompt actual) |
+
+**Flujo en el Supervisor:**
+
+```
+supervisor_runner._get_system_version(db, project_id)
+    → ExecutionRun más reciente con system_version IS NOT NULL
+    → pasa el hash a cada evaluator.evaluate(system_version=...)
+    → cada evaluador llama a resolve_system_prompt(agent_name, system_version=...)
+```
+
+**Usos en el análisis agregado:**
+- `_filter_by_version`: incluye sólo los `SupervisorReport` donde alguna `AgentEvaluation.system_versions_seen` contiene la versión solicitada.
+- `_is_dirty_report`: un informe es "sucio" cuando ninguna evaluación tiene un hash limpio — los informes sucios se excluyen de las comparaciones por versión.
+
+### 2. Versionado de prompts — `version` en los ficheros YAML
+
+Cada fichero YAML de prompt tiene su propio número de versión semántico independiente del git commit:
+
+```yaml
+agent_name: mi_agente
+version: "1.2.0"          # MAJOR.MINOR.PATCH — fuente de verdad del prompt
+changelog:
+  - version: "1.2.0"
+    date: "2026-05-30"
+    changes: "Añadido campo X al user prompt"
+  - version: "1.1.0"
+    date: "2026-05-20"
+    changes: "Refinada descripción de criterios de evaluación"
+  - version: "1.0.0"
+    date: "2026-05-01"
+    changes: "Versión inicial"
+```
+
+**Regla de incremento:**
+
+| Cambio | Tipo |
+|---|---|
+| Editar el texto de `content:` | PATCH o MINOR según magnitud |
+| Añadir / eliminar un `user_prompt_inputs` | MINOR |
+| Reescritura completa o cambio de rol del agente | MAJOR |
+| Sólo editar metadatos (`description:` a nivel de prompt) | No incrementar |
+
+El `PromptLoader` expone `get_version("nombre_agente")` y `get_spec("nombre_agente")` para consultar la versión activa en proceso.
+
+### 3. Resolución histórica de prompts — `prompt_resolver.py`
+
+El Supervisor usa el `system_version` del `ExecutionRun` para evaluar al agente **contra el prompt que tenía activo en ese momento**, no contra el prompt actual. Esto garantiza equidad: si el prompt cambió después del run, el evaluador ve la guía que el agente realmente recibió.
+
+```python
+# app/services/supervisor/prompt_resolver.py
+resolve_system_prompt(agent_name, prompt_key="main", system_version="abc1234…")
+```
+
+**Algoritmo:**
+1. Si `system_version` es un hash resoluble → `git show <commit>:app/prompts/<path>` → parsea el YAML histórico → extrae `content` de la clave pedida.
+2. Si git falla o la versión es `"unknown"` → `prompt_loader.get(agent_name, prompt_key)` (prompt actual, best-effort).
+
+**Registro de agentes** (`_AGENT_YAML_PATHS`): el diccionario en `prompt_resolver.py` mapea cada `agent_name` a su ruta relativa dentro de `app/prompts/`. Todo agente nuevo **debe registrarse aquí** para que la resolución histórica funcione.
+
+### Cómo interactúan las dos dimensiones
+
+```
+ExecutionRun creado en commit abc1234
+    → system_version = "abc1234"
+    → prompt planner.yaml version "1.1.0" activo en abc1234
+
+[semanas después] prompt planner.yaml actualizado a "1.2.0"
+
+Supervisor evaluates planner para ese proyecto:
+    → resolve_system_prompt("planner", system_version="abc1234")
+    → git show abc1234:app/prompts/planning/planner.yaml
+    → obtiene version "1.1.0" content  ← el prompt que el agente recibió
+    → evaluador juzga el comportamiento contra "1.1.0", no "1.2.0" ✓
+```
+
+Esto garantiza que un cambio de prompt no distorsione retroactivamente los informes del Supervisor para runs anteriores.
+
+---
+
 ## LLM Integration (`app/services/llm/`)
 
 Todos los llamados LLM usan **OpenAI structured outputs** (respuestas constreñidas por JSON schema estricto).
