@@ -50,6 +50,13 @@ _AGENT_YAML_PATHS: dict[str, str] = {
     "requirements_evaluator_evaluator": "supervisor/requirements_evaluator_evaluator.yaml",
     "review_episode_evaluator": "supervisor/review_episode_evaluator.yaml",
     "aria_conversation_evaluator": "supervisor/aria_conversation_evaluator.yaml",
+    # QA agent evaluators (Phase 7-9)
+    "functional_qa_agent_evaluator": "supervisor/functional_qa_agent_evaluator.yaml",
+    "boundary_qa_agent_evaluator": "supervisor/boundary_qa_agent_evaluator.yaml",
+    "adversarial_qa_agent_evaluator": "supervisor/adversarial_qa_agent_evaluator.yaml",
+    "security_qa_agent_evaluator": "supervisor/security_qa_agent_evaluator.yaml",
+    "performance_qa_agent_evaluator": "supervisor/performance_qa_agent_evaluator.yaml",
+    "regression_qa_agent_evaluator": "supervisor/regression_qa_agent_evaluator.yaml",
 }
 
 

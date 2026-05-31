@@ -30,6 +30,7 @@ CONVERSATION_PHASE_EXECUTING = "executing"
 CONVERSATION_PHASE_REVIEWING = "reviewing"
 CONVERSATION_PHASE_PAUSED = "paused"
 CONVERSATION_PHASE_COMPLETED = "completed"
+CONVERSATION_PHASE_QA_RUNNING = "qa_running"
 
 VALID_CONVERSATION_PHASES = {
     CONVERSATION_PHASE_GATHERING,
@@ -37,6 +38,7 @@ VALID_CONVERSATION_PHASES = {
     CONVERSATION_PHASE_REVIEWING,
     CONVERSATION_PHASE_PAUSED,
     CONVERSATION_PHASE_COMPLETED,
+    CONVERSATION_PHASE_QA_RUNNING,
 }
 
 
@@ -89,6 +91,18 @@ class Conversation(Base):
     # Living requirements document built during GATHERING phase.
     # Becomes project.description when the agent decides it has enough context.
     requirements_draft: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # QA flow fields
+    # True while Aria has made the QA offer and is awaiting yes/no from the user.
+    qa_offer_pending: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
+    # JSON-serialized QAResult stored while Aria awaits remediation confirmation.
+    # Cleared when user confirms or declines remediation tasks.
+    pending_qa_report: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,

@@ -26,6 +26,8 @@ from app.models.execution_run import (
     ExecutionRun,
 )
 from app.models.project import Project
+from app.models.qa_finding import QAFinding
+from app.models.qa_session import QA_SESSION_STATUS_COMPLETED, QA_VERDICT_PASSED, QASession
 from app.models.task import (
     EXECUTION_ENGINE,
     PLANNING_LEVEL_ATOMIC,
@@ -442,3 +444,81 @@ def make_execution_plan() -> Callable[..., ExecutionPlan]:
         )
 
     return _make_execution_plan
+
+
+@pytest.fixture()
+def make_qa_session(db_session: Session) -> Callable[..., QASession]:
+    def _make_qa_session(
+        *,
+        project_id: int,
+        triggered_by: str = "user",
+        status: str = QA_SESSION_STATUS_COMPLETED,
+        product_type: str = "web_app",
+        strategy_used: str = "web_app",
+        verdict: str | None = QA_VERDICT_PASSED,
+        agents_called: list | None = None,
+        findings_summary: dict | None = None,
+        duration_seconds: float = 10.0,
+        error_message: str | None = None,
+    ) -> QASession:
+        from datetime import datetime, timezone
+
+        session = QASession(
+            project_id=project_id,
+            triggered_by=triggered_by,
+            status=status,
+            product_type=product_type,
+            strategy_used=strategy_used,
+            verdict=verdict,
+            agents_called=agents_called or ["qa_context_agent", "smoke_qa_agent"],
+            findings_summary=findings_summary or {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            duration_seconds=duration_seconds,
+            error_message=error_message,
+            created_at=datetime.now(timezone.utc),
+        )
+        db_session.add(session)
+        db_session.commit()
+        db_session.refresh(session)
+        return session
+
+    return _make_qa_session
+
+
+@pytest.fixture()
+def make_qa_finding(db_session: Session) -> Callable[..., QAFinding]:
+    def _make_qa_finding(
+        *,
+        qa_session_id: int,
+        finding_id: str = "test-finding-uuid",
+        severity: str = "medium",
+        category: str = "functional",
+        title: str = "Test finding",
+        description: str = "A finding created in tests.",
+        reproduction_steps: list | None = None,
+        evidence: dict | None = None,
+        affected_component: str | None = None,
+        auto_remediable: bool = False,
+        remediation_hint: str | None = None,
+    ) -> QAFinding:
+        from datetime import datetime, timezone
+
+        finding = QAFinding(
+            qa_session_id=qa_session_id,
+            finding_id=finding_id,
+            severity=severity,
+            category=category,
+            title=title,
+            description=description,
+            reproduction_steps=reproduction_steps or [],
+            evidence=evidence or {},
+            affected_component=affected_component,
+            auto_remediable=auto_remediable,
+            remediation_hint=remediation_hint,
+            created_at=datetime.now(timezone.utc),
+        )
+        db_session.add(finding)
+        db_session.commit()
+        db_session.refresh(finding)
+        return finding
+
+    return _make_qa_finding

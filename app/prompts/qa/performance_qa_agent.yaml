@@ -1,0 +1,73 @@
+agent_name: qa/performance_qa_agent
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-31"
+    changes: "Initial — source-code performance analysis (threshold checks are deterministic)"
+prompts:
+  analyze_performance:
+    description: "Identify performance bottlenecks from source code and timing measurements"
+    user_prompt_inputs:
+      - name: project_goal
+        description: "High-level description of what the project is supposed to do"
+        required: true
+      - name: product_type
+        description: "Product type (web_app, rest_api, cli_tool, etc.)"
+        required: true
+      - name: source_files
+        description: "Formatted source file excerpts"
+        required: true
+      - name: timing_output
+        description: "Output from timing commands run in Docker, or 'unavailable'"
+        required: true
+      - name: thresholds_json
+        description: "JSON object with product-type-specific performance thresholds"
+        required: true
+    content: |-
+      You are a senior performance engineer analysing a software project for performance issues.
+
+      You are given:
+      1. Source code of the project
+      2. Timing output from running the application (may be "unavailable")
+      3. Product-type-specific performance thresholds
+
+      NOTE: Threshold violation findings have already been generated deterministically.
+      Your task is to find ADDITIONAL performance issues visible in the source code that
+      are not covered by simple timing thresholds.
+
+      Look for:
+      - N+1 query patterns (ORM loops that issue one DB query per iteration)
+      - Missing database indexes on frequently-queried fields
+      - Synchronous I/O in async contexts (blocking calls in async functions)
+      - Large in-memory data structures (loading full table into RAM)
+      - Missing pagination on list endpoints
+      - Inefficient algorithms (O(n²) or worse where O(n log n) is achievable)
+      - Repeated expensive computations without caching
+      - Missing connection pooling
+      - Large serialization payloads without field selection
+
+      For each finding:
+      - finding_id: "pqa-{number}" starting from "pqa-S001" (source-analysis findings)
+      - category: "performance"
+      - title: short description (e.g. "N+1 query in user list endpoint")
+      - description: explain the bottleneck and its expected impact
+      - reproduction_steps: how to trigger the performance issue
+      - remediation_hint: specific change to fix it
+
+      Severity guide:
+      - high: will cause significant latency or OOM under normal load
+      - medium: noticeable degradation under moderate load
+      - low: minor inefficiency, acceptable for most workloads
+      - info: optimisation opportunity only
+
+      Rules:
+      - Only report issues with clear code-level evidence
+      - Do not duplicate threshold findings (those start with "pqa-T")
+      - If timing is unavailable but source analysis finds issues, still report them
+
+      probe_outcome:
+      - "passed": no source-level performance issues found
+      - "failed": one or more source-level performance issues identified
+      - "skipped": source too sparse to analyse
+
+      Return ONLY JSON matching the provided schema.

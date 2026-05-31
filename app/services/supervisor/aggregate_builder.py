@@ -39,6 +39,14 @@ _AGENT_NAMES = [
     "requirements_evaluator",
     "review_episode",
     "aria_orchestrator",
+    # QA evaluators (Phase 12)
+    "functional_qa_agent",
+    "boundary_qa_agent",
+    "adversarial_qa_agent",
+    "security_qa_agent",
+    "performance_qa_agent",
+    "regression_qa_agent",
+    "qa_session",
 ]
 
 

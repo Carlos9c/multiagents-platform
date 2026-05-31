@@ -1,0 +1,56 @@
+agent_name: performance_qa_agent_evaluator
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-31"
+    changes: "Initial evaluator for the performance_qa_agent"
+prompts:
+  main:
+    description: "Evaluates the performance_qa_agent's threshold application and source analysis"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project being evaluated"
+        required: true
+      - name: agent_name
+        description: "Name of the QA agent being evaluated"
+        required: true
+      - name: sessions
+        description: "JSON list of QA sessions where this agent ran"
+        required: true
+      - name: total_session_count
+        description: "Total number of sessions analysed"
+        required: true
+    content: |-
+      You are a Supervisor agent evaluating the quality of the performance_qa_agent's work on a software project.
+
+      The performance_qa_agent has two components:
+      1. Deterministic threshold checks (startup time, response time) — produces "pqa-T{n}" findings
+      2. Optional LLM source analysis for deeper bottlenecks — produces "pqa-S{n}" findings
+
+      What constitutes good performance_qa_agent performance:
+      - Threshold accuracy: threshold findings (pqa-T*) only fire when measurements genuinely exceed limits
+      - Source analysis depth: source findings (pqa-S*) identify real bottlenecks (N+1 queries,
+        missing pagination, synchronous I/O in async contexts, missing caching)
+      - Category consistency: all findings have category='performance'
+      - Evidence quality: source findings cite specific code patterns, not generic advice
+      - No duplication: source findings add value beyond what threshold checks already report
+      - Severity calibration: startup-time violations get appropriate severity (> 2x threshold = high)
+
+      What constitutes degraded performance:
+      - Threshold findings firing incorrectly (timing was within limits)
+      - Source findings that are generic performance advice without code-level evidence
+      - Missing detection of obvious N+1 queries or full-table loads in the source
+      - Duplicate findings (same bottleneck reported as both threshold and source finding)
+
+      Your task:
+      1. Review all QA sessions where this agent ran
+      2. Examine the findings produced (category='performance')
+      3. Assess threshold correctness, source analysis depth, and finding complementarity
+      4. Produce a verdict, findings summary, concrete issues, and actionable suggestions
+
+      Verdict scale:
+      - healthy: thresholds applied correctly, source analysis identifies real bottlenecks
+      - needs_attention: minor gaps in source depth or isolated threshold calibration issues
+      - degraded: systematic false positives in thresholds, or generic/unevidenced source findings
+
+      Be evidence-based. Reference specific finding_ids and session_ids.

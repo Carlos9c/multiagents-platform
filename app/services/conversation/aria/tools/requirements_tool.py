@@ -71,6 +71,7 @@ class RequirementsTool:
                 "next_question": result.next_question,
                 "updated_draft": result.updated_draft,
                 "reasoning": result.reasoning,
+                "product_type": result.product_type,
             },
         )
 

@@ -27,6 +27,7 @@ class ToolName(str, Enum):
     CONFIRMATION = "confirmation_agent"
     START_PROJECT = "start_project"
     RESUMPTION = "resumption_agent"
+    QA = "qa_tool"
 
 
 # ── Aria's per-step decision (LLM output schema) ──────────────────────────────
@@ -125,6 +126,7 @@ class SystemEventType(str, Enum):
     WORKFLOW_ERROR = "workflow_error"
     PROJECT_COMPLETED = "project_completed"
     CONFIRM_START = "confirm_start"
+    QA_COMPLETED = "qa_completed"
 
 
 class SystemEvent(BaseModel):
@@ -162,6 +164,11 @@ class AriaResponse:
         "review_closed_abandoned",
         "project_query_answered",
         "project_completed",
+        "qa_offer",
+        "qa_running",
+        "qa_completed_no_issues",
+        "qa_completed_with_findings",
+        "qa_remediation_started",
         "fallback",
     ]
     project_id: int | None = None

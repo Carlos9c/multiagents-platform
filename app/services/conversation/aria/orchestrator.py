@@ -27,6 +27,7 @@ from app.models.conversation import (
     CONVERSATION_PHASE_EXECUTING,
     CONVERSATION_PHASE_GATHERING,
     CONVERSATION_PHASE_PAUSED,
+    CONVERSATION_PHASE_QA_RUNNING,
     CONVERSATION_PHASE_REVIEWING,
     CONVERSATION_STATUS_ACTIVE,
     MESSAGE_ROLE_ASSISTANT,
@@ -53,6 +54,7 @@ from app.services.conversation.aria.contracts import (
 )
 from app.services.conversation.aria.tools import (
     ConfirmationTool,
+    QATool,
     QueryTool,
     RequirementsTool,
     ResumptionTool,
@@ -215,6 +217,13 @@ def _apply_phase_transitions(
                 conversation.requirements_ready = True
                 if data.get("updated_draft"):
                     conversation.requirements_draft = data["updated_draft"]
+                if data.get("product_type"):
+                    from app.models.project import Project
+
+                    project = db.get(Project, conversation.project_id)
+                    if project is not None:
+                        project.product_type = data["product_type"]
+                        db.add(project)
             elif data.get("updated_draft"):
                 conversation.requirements_draft = data["updated_draft"]
 
@@ -244,6 +253,19 @@ def _apply_phase_transitions(
                 conversation.review_context = None
                 conversation.review_episode_attempts = 0
                 conversation.phase = CONVERSATION_PHASE_EXECUTING
+
+        elif result.tool_name == ToolName.QA:
+            status = data.get("status")
+            if status == "qa_started":
+                conversation.phase = CONVERSATION_PHASE_QA_RUNNING
+                conversation.qa_offer_pending = False
+            elif status == "qa_offer_declined":
+                conversation.qa_offer_pending = False
+            elif status == "remediation_confirmed":
+                conversation.pending_qa_report = None
+                conversation.phase = CONVERSATION_PHASE_EXECUTING
+            elif status == "remediation_declined":
+                conversation.pending_qa_report = None
 
     # Apply transitions from system events
     _apply_system_event_transitions(db, conversation, tool_results)
@@ -412,6 +434,23 @@ def apply_system_event_pre_loop(
 
     elif event.event_type == SystemEventType.PROJECT_COMPLETED:
         conversation.phase = CONVERSATION_PHASE_COMPLETED
+        # Offer QA if the product type is eligible
+        from app.models.project import Project
+        from app.services.qa.strategy_selector import QA_ELIGIBLE_PRODUCT_TYPES
+
+        project = db.get(Project, conversation.project_id)
+        if project and project.product_type in QA_ELIGIBLE_PRODUCT_TYPES:
+            conversation.qa_offer_pending = True
+        conversation.updated_at = now
+        db.flush()
+
+    elif event.event_type == SystemEventType.QA_COMPLETED:
+        if conversation.phase == CONVERSATION_PHASE_QA_RUNNING:
+            conversation.phase = CONVERSATION_PHASE_COMPLETED
+        # pending_qa_report may already be set by qa_runner before calling
+        # process_with_pre_transitions; only write it if it is still absent.
+        if not conversation.pending_qa_report and event.data:
+            conversation.pending_qa_report = json.dumps(event.data)
         conversation.updated_at = now
         db.flush()
 
@@ -607,26 +646,25 @@ def _determine_event(
     if is_fallback:
         return "fallback"
 
-    # Events derived from final conversation phase (system event transitions)
-    if conversation is not None:
-        if conversation.phase == CONVERSATION_PHASE_COMPLETED:
-            return "project_completed"
-        if conversation.phase == CONVERSATION_PHASE_REVIEWING and not tool_results:
-            return "review_started"
-
-    # Events derived from system event type directly (when no tool results)
-    if aria_input is not None and aria_input.source == "system" and aria_input.system_event:
-        evt = aria_input.system_event.event_type
-        if evt == SystemEventType.EXECUTION_STARTED:
-            return "execution_started"
-        if evt == SystemEventType.PROJECT_COMPLETED:
-            return "project_completed"
-        if evt in (SystemEventType.MANUAL_REVIEW_REQUIRED, SystemEventType.WORKFLOW_ERROR):
-            return "review_started"
-
-    # Derive event from the most significant tool result
+    # ── Tool results take priority when present ───────────────────────────────
     for result in reversed(tool_results):
         data = result.data
+        if result.tool_name == ToolName.QA:
+            status = data.get("status")
+            if status == "qa_started":
+                return "qa_running"
+            if status == "qa_offer":
+                return "qa_offer"
+            if status == "qa_offer_declined":
+                return "project_completed"
+            if status == "qa_completed_no_issues":
+                return "qa_completed_no_issues"
+            if status == "qa_completed_with_findings":
+                return "qa_completed_with_findings"
+            if status == "remediation_confirmed":
+                return "qa_remediation_started"
+            if status == "remediation_declined":
+                return "qa_completed_no_issues"
         if result.tool_name == ToolName.START_PROJECT and "error" not in data:
             return "project_started"
         if result.tool_name == ToolName.RESUMPTION and "error" not in data:
@@ -643,6 +681,28 @@ def _determine_event(
         if result.tool_name == ToolName.QUERY:
             return "project_query_answered"
 
+    # ── No tool results — derive from phase or system event ───────────────────
+    if conversation is not None:
+        if conversation.phase == CONVERSATION_PHASE_COMPLETED:
+            # After QA_COMPLETED: pending report was stored
+            if conversation.pending_qa_report:
+                return "qa_completed_with_findings"
+            # After PROJECT_COMPLETED for eligible product: QA offer
+            if conversation.qa_offer_pending:
+                return "qa_offer"
+            return "project_completed"
+        if conversation.phase == CONVERSATION_PHASE_REVIEWING:
+            return "review_started"
+
+    if aria_input is not None and aria_input.source == "system" and aria_input.system_event:
+        evt = aria_input.system_event.event_type
+        if evt == SystemEventType.EXECUTION_STARTED:
+            return "execution_started"
+        if evt == SystemEventType.PROJECT_COMPLETED:
+            return "project_completed"
+        if evt in (SystemEventType.MANUAL_REVIEW_REQUIRED, SystemEventType.WORKFLOW_ERROR):
+            return "review_started"
+
     return "question"
 
 
@@ -656,7 +716,8 @@ def _build_tool_registry() -> dict[
     | ReviewTool
     | ConfirmationTool
     | StartProjectTool
-    | ResumptionTool,
+    | ResumptionTool
+    | QATool,
 ]:
     return {
         ToolName.REQUIREMENTS: RequirementsTool(),
@@ -665,6 +726,7 @@ def _build_tool_registry() -> dict[
         ToolName.CONFIRMATION: ConfirmationTool(),
         ToolName.START_PROJECT: StartProjectTool(),
         ToolName.RESUMPTION: ResumptionTool(),
+        ToolName.QA: QATool(),
     }
 
 

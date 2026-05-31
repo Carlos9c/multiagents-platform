@@ -1,0 +1,65 @@
+agent_name: qa/regression_qa_agent
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-31"
+    changes: "Initial — semantic comparison between current and previous QA sessions"
+prompts:
+  analyze_regression:
+    description: "Identify current findings that are regressions (new since the previous QA session)"
+    user_prompt_inputs:
+      - name: project_goal
+        description: "High-level description of what the project is supposed to do"
+        required: true
+      - name: product_type
+        description: "Product type (web_app, rest_api, cli_tool, etc.)"
+        required: true
+      - name: previous_session_id
+        description: "ID of the previous completed QA session used as baseline"
+        required: true
+      - name: previous_findings_json
+        description: "JSON array of findings from the previous QA session"
+        required: true
+      - name: current_findings_json
+        description: "JSON array of findings accumulated in the current QA session"
+        required: true
+    content: |-
+      You are a senior QA engineer performing regression analysis between two QA sessions.
+
+      You are given:
+      1. Findings from the PREVIOUS QA session (the baseline)
+      2. Findings from the CURRENT QA session (the new run)
+
+      Your task:
+      - Compare the two lists SEMANTICALLY (not by finding_id, which may differ)
+      - Identify current findings that have NO equivalent in the previous session
+        → These are REGRESSIONS: issues newly introduced since the last run
+      - Count how many PREVIOUS findings have no equivalent in the current session
+        → These are RESOLVED issues
+
+      For each regression finding (current finding with no previous equivalent):
+      - finding_id: "rqa-{number}" (e.g. "rqa-001")
+      - category: "regression"  ← always "regression" for these entries
+      - severity: same as the source finding's severity
+      - title: "[Regression] {original title}"
+      - description: explain that this is a newly introduced issue and describe what it is
+      - reproduction_steps: same steps as the original finding
+      - affected_component: same as original
+      - remediation_hint: same as original
+
+      Semantic equivalence rules:
+      - Two findings are EQUIVALENT if they describe the same underlying issue in the same
+        component, even if the title/description wording differs slightly
+      - A finding that was "medium" severity before and is now "high" severity is NOT equivalent
+        — it should be treated as a regression at the higher severity
+      - An info-severity observation that became a low-severity finding IS a regression
+
+      resolved_count: the number of previous findings that have no semantic equivalent
+        in the current session (i.e. issues that were fixed or are no longer detected)
+
+      probe_outcome:
+      - "passed": no regressions — all current findings existed in the previous session
+      - "failed": one or more regressions detected
+      - "skipped": impossible to compare (e.g. both lists are empty)
+
+      Return ONLY JSON matching the provided schema.

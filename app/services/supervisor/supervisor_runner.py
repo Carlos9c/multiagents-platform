@@ -24,11 +24,17 @@ from app.models.supervisor_report import (
     SupervisorReport,
 )
 from app.models.task import Task
+from app.services.supervisor.evaluators.adversarial_qa_agent_evaluator import (
+    AdversarialQAAgentEvaluator,
+)
 from app.services.supervisor.evaluators.aria_conversation_evaluator import (
     AriaConversationEvaluator,
 )
 from app.services.supervisor.evaluators.atomic_task_generator_evaluator import (
     AtomicTaskGeneratorEvaluator,
+)
+from app.services.supervisor.evaluators.boundary_qa_agent_evaluator import (
+    BoundaryQAAgentEvaluator,
 )
 from app.services.supervisor.evaluators.catalog_selector_evaluator import (
     CatalogSelectorEvaluator,
@@ -63,18 +69,31 @@ from app.services.supervisor.evaluators.environment_planner_evaluator import (
 from app.services.supervisor.evaluators.execution_sequencer_evaluator import (
     ExecutionSequencerEvaluator,
 )
+from app.services.supervisor.evaluators.functional_qa_agent_evaluator import (
+    FunctionalQAAgentEvaluator,
+)
 from app.services.supervisor.evaluators.orchestrator_evaluator import OrchestratorEvaluator
+from app.services.supervisor.evaluators.performance_qa_agent_evaluator import (
+    PerformanceQAAgentEvaluator,
+)
 from app.services.supervisor.evaluators.planner_evaluator import PlannerEvaluator
+from app.services.supervisor.evaluators.qa_session_evaluator import QASessionEvaluator
 from app.services.supervisor.evaluators.recovery_assignment_evaluator import (
     RecoveryAssignmentEvaluator,
 )
 from app.services.supervisor.evaluators.recovery_planner_evaluator import (
     RecoveryPlannerEvaluator,
 )
+from app.services.supervisor.evaluators.regression_qa_agent_evaluator import (
+    RegressionQAAgentEvaluator,
+)
 from app.services.supervisor.evaluators.requirements_evaluator_evaluator import (
     RequirementsEvaluatorEvaluator,
 )
 from app.services.supervisor.evaluators.review_episode_evaluator import ReviewEpisodeEvaluator
+from app.services.supervisor.evaluators.security_qa_agent_evaluator import (
+    SecurityQAAgentEvaluator,
+)
 from app.services.supervisor.evaluators.stage_evaluator_evaluator import StageEvaluatorEvaluator
 from app.services.supervisor.evaluators.test_builder_agent_evaluator import (
     TestBuilderAgentEvaluator,
@@ -109,6 +128,15 @@ _EVALUATORS = [
     RequirementsEvaluatorEvaluator(),
     ReviewEpisodeEvaluator(),
     AriaConversationEvaluator(),
+    # QA agent evaluators (Phase 7-9)
+    FunctionalQAAgentEvaluator(),
+    BoundaryQAAgentEvaluator(),
+    AdversarialQAAgentEvaluator(),
+    SecurityQAAgentEvaluator(),
+    PerformanceQAAgentEvaluator(),
+    RegressionQAAgentEvaluator(),
+    # QA session-level evaluator (Phase 12)
+    QASessionEvaluator(),
 ]
 
 _VERDICT_SCORE = {"healthy": 2, "needs_attention": 1, "degraded": 0}

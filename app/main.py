@@ -10,6 +10,7 @@ from app.api.atomic_task_generator import router as atomic_task_generator_router
 from app.api.execution_runs import router as execution_runs_router
 from app.api.planner import router as planner_router
 from app.api.projects import router as projects_router
+from app.api.qa import router as qa_router
 from app.api.supervisor import router as supervisor_router
 from app.api.supervisor_aggregate import router as supervisor_aggregate_router
 from app.api.tasks import router as tasks_router
@@ -99,6 +100,7 @@ app.include_router(planner_router)
 app.include_router(technical_task_refiner_router)
 app.include_router(atomic_task_generator_router)
 app.include_router(workflow_router)
+app.include_router(qa_router)
 app.include_router(supervisor_router)
 app.include_router(supervisor_aggregate_router)
 

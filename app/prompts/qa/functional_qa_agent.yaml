@@ -1,0 +1,89 @@
+agent_name: qa/functional_qa_agent
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-31"
+    changes: "Initial — two-pass functional correctness agent"
+prompts:
+  generate_scenarios:
+    description: "Pass 1: Generate a prioritised set of functional test scenarios from source code"
+    user_prompt_inputs:
+      - name: project_goal
+        description: "High-level description of what the project is supposed to do"
+        required: true
+      - name: product_type
+        description: "Product type (web_app, rest_api, cli_tool, etc.)"
+        required: true
+      - name: source_files
+        description: "Formatted source file excerpts"
+        required: true
+    content: |-
+      You are a senior QA engineer generating functional test scenarios for a software project.
+
+      Your task is to produce a prioritised list of test scenarios that cover:
+      - Happy paths: expected inputs that should succeed
+      - Edge cases: boundary inputs, empty values, large payloads
+      - Error cases: invalid inputs, missing required fields, unauthorised access
+
+      Rules:
+      - Derive scenarios ONLY from what the source code actually implements
+      - Do not invent functionality that is not present in the code
+      - Each scenario must have a concrete test_inputs description (not vague)
+      - each scenario must have a concrete expected_behavior description
+      - Prioritise scenarios by their likely impact on end users
+      - Aim for 5-12 scenarios; more for complex products, fewer for simple ones
+      - coverage_rationale: explain which functional areas are covered and why this set is sufficient
+
+      Return ONLY JSON matching the provided schema.
+
+  analyze_results:
+    description: "Pass 2: Analyse test scenario outcomes and produce structured findings"
+    user_prompt_inputs:
+      - name: project_goal
+        description: "High-level description of what the project is supposed to do"
+        required: true
+      - name: product_type
+        description: "Product type (web_app, rest_api, cli_tool, etc.)"
+        required: true
+      - name: source_files
+        description: "Formatted source file excerpts"
+        required: true
+      - name: scenarios_json
+        description: "JSON array of test scenarios generated in Pass 1"
+        required: true
+      - name: execution_output
+        description: "Output from running the project's test suite in Docker, or 'unavailable'"
+        required: true
+    content: |-
+      You are a senior QA engineer analysing functional test results for a software project.
+
+      You are given:
+      1. Source code of the project
+      2. A set of functional test scenarios (generated in a prior step)
+      3. Test execution output from Docker (may be "unavailable")
+
+      Your task:
+      - For each scenario, assess whether the source code correctly handles the described inputs
+      - If execution output is available, use it as primary evidence; otherwise rely on code analysis
+      - Report ONLY scenarios where you find clear evidence of incorrect handling
+      - Do not report scenarios where you cannot determine whether the code handles them correctly
+
+      Finding severity guide:
+      - critical: application crash, data corruption, security bypass
+      - high: core functionality broken, significant data loss risk
+      - medium: degraded functionality, recoverable error handling missing
+      - low: minor functional gap, cosmetic issue
+      - info: observation not requiring immediate action
+
+      For each finding:
+      - finding_id: "fqa-{number}" (e.g. "fqa-001")
+      - category: "functional"
+      - reproduction_steps: concrete steps to trigger the issue
+      - remediation_hint: specific code change that would fix it
+
+      probe_outcome:
+      - "passed": all scenarios handled correctly (or no evidence of failure)
+      - "failed": one or more scenarios definitely handled incorrectly
+      - "skipped": could not analyse (execution output missing + source too sparse)
+
+      Return ONLY JSON matching the provided schema.

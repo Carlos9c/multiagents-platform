@@ -44,6 +44,7 @@ class RequirementsEvaluatorLLMOutput(BaseModel):
     next_question: str | None
     updated_draft: str | None
     reasoning: str
+    product_type: str | None
 
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -55,6 +56,7 @@ class RequirementsEvaluatorResult:
     next_question: str | None
     updated_draft: str | None
     reasoning: str
+    product_type: str | None = None
 
 
 class RequirementsEvaluatorError(Exception):
@@ -149,4 +151,5 @@ def evaluate_requirements(
         next_question=output.next_question,
         updated_draft=output.updated_draft,
         reasoning=output.reasoning,
+        product_type=output.product_type,
     )

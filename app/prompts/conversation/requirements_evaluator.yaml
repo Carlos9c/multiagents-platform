@@ -1,5 +1,5 @@
 agent_name: requirements_evaluator
-version: "1.1.0"
+version: "1.2.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-28"
@@ -7,6 +7,9 @@ changelog:
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.2.0"
+    date: "2026-05-31"
+    changes: "Added product_type output field for QA engine eligibility detection"
 prompts:
   main:
     description: "Evaluates whether project requirements are sufficient to begin autonomous development"
@@ -50,6 +53,36 @@ prompts:
         project goal for autonomous development. It must be detailed, precise, and unambiguous.
         Include all technical decisions, domain rules, acceptance criteria, and constraints.
         Write it in third person ("The system must...", "The application must...").
+
+      Product type detection:
+      Identify the type of product the user wants to build and set product_type to exactly one
+      of the following values (or null if the product type is genuinely unclear after reading
+      the full conversation):
+
+      Software products (QA-eligible — Aria will offer automated QA after completion):
+        "web_app"        — browser-based web application (React, Vue, Django, Rails, etc.)
+        "rest_api"       — REST API backend service
+        "graphql_api"    — GraphQL API service
+        "cli_tool"       — command-line interface tool or script
+        "mobile_android" — Android mobile application (Kotlin, Java, Flutter, React Native)
+        "library"        — reusable code library, package, or SDK
+        "desktop_app"    — native desktop application (Electron, Qt, WPF, Tauri, etc.)
+
+      Non-software products (no automated QA):
+        "written_content" — documentation, articles, books, essays, reports
+        "music"           — audio or music composition and generation
+        "visual_content"  — images, graphics, illustrations, design assets
+        "data_product"    — datasets, data pipelines, ETL jobs, analytics dashboards
+        "game_assets"     — game content, 2D/3D art assets, level scripts
+
+      Rules:
+      - Set product_type as soon as you can confidently determine it from the conversation.
+        You do not need to wait until status is "sufficient" — populate it on the first turn
+        where you can tell what type of product is being built.
+      - If the user describes multiple product types (e.g. a REST API + a web frontend),
+        choose the primary/dominant one.
+      - Only set null when you genuinely cannot determine the type yet.
+      - Never invent a value outside the list above.
 
       Language rule:
       - Detect the language of the user's messages in the conversation history.

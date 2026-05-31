@@ -13,3 +13,5 @@ from app.models import conversation  # noqa
 from app.models import supervisor_report  # noqa
 from app.models import agent_evaluation  # noqa
 from app.models import aggregate_report  # noqa
+from app.models import qa_session  # noqa
+from app.models import qa_finding  # noqa

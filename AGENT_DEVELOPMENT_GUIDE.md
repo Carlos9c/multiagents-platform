@@ -33,6 +33,8 @@ Antes de empezar, decide a qué categoría pertenece el agente:
 | Servicio de entorno | `app/services/environment/` | `planner_client`, `catalog/selector_client` |
 | Servicio de análisis | `app/services/analysis/` | `service.py`, `analyzers/text_analyzer.py` |
 | Validador | `app/services/validation/validators/` | `code_change_agent_validator` |
+| **QA agent** | `app/services/qa/qa_agents/` | `smoke_qa_agent`, `functional_qa_agent` |
+| **QA bootstrapper** | `app/services/qa/strategies/` | `MobileAndroidBootstrapStrategy` |
 
 La categoría determina el subdirectorio YAML a usar y qué pasos de integración adicionales aplican.
 
@@ -53,6 +55,7 @@ app/prompts/
   validation/       ← agentes *_validator
   environment/      ← environment_planner, catalog_selector
   analysis/         ← codebase_analyzer, file_analyzer
+  qa/               ← qa_context_agent, smoke_qa_agent, functional_qa_agent, …
 ```
 
 ### 2.2 Formato del fichero YAML
@@ -727,6 +730,50 @@ Usar esta lista para cada nuevo agente. Marcar **cada** ítem antes de dar el tr
 - [ ] Test de not_supervised (sin datos → `result=None`) escrito
 - [ ] Test de llamada LLM y mapeo de output escrito
 - [ ] `poetry run pytest -q` → 0 fallos
+
+---
+
+## 10. QA Agents — categoría especial
+
+Los QA agents son agentes post-ejecución que sondean el producto para encontrar fallos. No son subagentes de ejecución ni evaluadores conversacionales — tienen su propio motor (`QAOrchestrator`) y su propio registro.
+
+### Diferencias respecto a subagentes de ejecución
+
+| Aspecto | Subagente de ejecución | QA agent |
+|---|---|---|
+| Clase base | `BaseSubagent` | `BaseQAAgent` |
+| Registro | `SubagentRegistry` en `orchestrated_engine.py` | `QAAgentRegistry` en `app/services/qa/strategies/registry.py` |
+| Output | `ResolutionState` con `ExecutionEvidence` | `QASession` con `QAEvidence` y `QAFinding` |
+| Directorio | `app/execution_engine/subagents/` | `app/services/qa/qa_agents/` |
+| Prompts YAML | `app/prompts/execution/` | `app/prompts/qa/` |
+
+### Pasos obligatorios para un nuevo QA agent
+
+1. **YAML** en `app/prompts/qa/<nombre>.yaml` — mismo formato estándar (§2)
+2. **Módulo Python** en `app/services/qa/qa_agents/<nombre>.py` — implementa `BaseQAAgent`
+3. **Sin registro en SubagentRegistry** — el QA agent se registra en su propia estrategia
+4. **Tests** en `tests/services/qa/test_<nombre>.py`
+5. **Evaluador Supervisor** en `app/services/supervisor/evaluators/<nombre>_evaluator.py`
+   - Fuente de datos: `qa_sessions` + `qa_findings` (no `execution_runs`)
+   - Guard de retorno anticipado obligatorio: `if not data: return EvaluatorOutput(result=None)`
+
+### `BaseQAAgent` — interfaz mínima
+
+```python
+class BaseQAAgent:
+    name: str  # debe coincidir con agent_name del YAML
+
+    def run(
+        self,
+        *,
+        qa_session: QASession,
+        strategy: QAStrategy,
+    ) -> QASession:
+        """Ejecuta el sondeo y devuelve el estado actualizado."""
+        ...
+```
+
+Todos los pasos del checklist §9 aplican íntegramente, con las diferencias de directorio y clase base indicadas arriba.
 
 ---
 

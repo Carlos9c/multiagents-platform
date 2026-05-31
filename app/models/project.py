@@ -30,3 +30,4 @@ class Project(Base):
         JSON,
         nullable=True,
     )
+    product_type: Mapped[str | None] = mapped_column(String(50), nullable=True)

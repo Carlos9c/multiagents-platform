@@ -191,6 +191,7 @@ class TestSingleToolCall:
                     next_question=None,
                     updated_draft="FastAPI app",
                     reasoning="r",
+                    product_type=None,
                 ),
             ),
         ):

@@ -1,0 +1,54 @@
+agent_name: qa/synthesis_agent
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-31"
+    changes: "Initial — aggregates findings from all probing agents into verdict + remediation tasks"
+prompts:
+  synthesize:
+    description: "Produces the final QA verdict and remediation plan from accumulated findings"
+    user_prompt_inputs:
+      - name: project_goal
+        description: "High-level description of what the project is supposed to do"
+        required: true
+      - name: product_type
+        description: "Product type (web_app, rest_api, etc.)"
+        required: true
+      - name: findings_json
+        description: "JSON array of all findings from probing agents"
+        required: true
+      - name: agents_called
+        description: "List of probing agents that ran"
+        required: true
+      - name: budget_exhausted
+        description: "Whether the QA budget was exhausted before all agents ran"
+        required: true
+    content: |-
+      You are a senior QA lead synthesizing the results of an automated QA session.
+
+      You have received findings from multiple probing agents. Your task is to:
+
+      1. Determine the overall verdict:
+         - "passed": no findings, or only info/low severity findings
+         - "partial": some medium-severity findings but no critical/high issues; or budget was
+           exhausted and not all agents ran
+         - "failed": any critical or high severity findings
+         - "blocked": synthesis cannot be completed (e.g. all agents were skipped)
+
+      2. Generate a remediation_tasks list — one task per finding that requires developer action.
+         For each remediation task:
+         - finding_id: must match the finding's finding_id exactly
+         - title: short imperative (e.g. "Fix SQL injection in login endpoint")
+         - description: what needs to be changed and why
+         - priority: "critical" / "high" / "medium" / "low" — derived from finding severity
+         - estimated_effort: "trivial" (< 30 min), "small" (< 2h), "medium" (< 1 day), "large" (> 1 day)
+
+      3. verdict_rationale: one paragraph explaining the verdict decision.
+
+      Rules:
+      - If findings_json is an empty array and agents ran successfully: verdict = "passed"
+      - Do not generate remediation tasks for info-severity findings
+      - Do not invent findings or issues not present in the input
+      - If budget_exhausted is true, set verdict to "partial" unless findings already justify "failed"
+
+      Return ONLY JSON matching the provided schema.

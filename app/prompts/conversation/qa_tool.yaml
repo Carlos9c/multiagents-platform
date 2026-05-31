@@ -1,0 +1,37 @@
+agent_name: qa_tool
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-05-31"
+    changes: "Initial implementation — Phase 11 QA Aria integration"
+prompts:
+  evaluate_user_response:
+    description: >
+      Determines whether the user accepted or declined a QA-related offer
+      (either 'run the QA engine' or 'create remediation tasks').
+    user_prompt_inputs:
+      - name: context
+        description: "Description of what was offered to the user"
+        required: true
+      - name: user_response
+        description: "The user's latest message"
+        required: true
+    content: |-
+      You decide whether a user ACCEPTED or DECLINED an offer.
+
+      OFFER CONTEXT:
+      {context}
+
+      USER RESPONSE:
+      {user_response}
+
+      ACCEPT signals: yes, sure, go ahead, do it, sounds good, please, great,
+      claro, sí, adelante, por favor, hazlo, ejecuta, genial, perfecto,
+      venga, dale, de acuerdo, ok, okay, afirmativo.
+
+      DECLINE signals: no, not now, skip, later, cancel, pass, nope, never mind,
+      ahora no, omite, después, cancela, no gracias, déjalo, sin remediación.
+
+      If truly ambiguous lean toward DECLINED (safer default).
+
+      Respond ONLY with a JSON object: {"accepted": true/false, "reasoning": "..."}
