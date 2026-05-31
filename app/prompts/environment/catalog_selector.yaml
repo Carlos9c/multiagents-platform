@@ -1,12 +1,15 @@
 agent_name: catalog_selector
-version: "1.1.0"
+version: "1.2.0"
 changelog:
-  - version: "1.0.0"
-    date: "2026-05-28"
-    changes: "Initial migration from Python constant CATALOG_SELECTOR_SYSTEM_PROMPT"
+  - version: "1.2.0"
+    date: "2026-05-31"
+    changes: "Removed task_titles input — catalog selection now runs before task generation and works from project description alone."
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constant CATALOG_SELECTOR_SYSTEM_PROMPT"
 prompts:
   main:
     description: "Selects the most appropriate Docker base image from a catalog for a given project"
@@ -16,9 +19,6 @@ prompts:
         required: true
       - name: project_description
         description: "Description of the project"
-        required: true
-      - name: task_titles
-        description: "Sample of atomic task titles (up to 15) representing the workload to be executed"
         required: true
       - name: available_catalog_images
         description: "Curated list of Docker catalog images with their image_name, runtime_type, and description"

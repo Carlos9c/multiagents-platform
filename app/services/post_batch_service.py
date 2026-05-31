@@ -25,6 +25,7 @@ from app.models.task import (
     TASK_STATUS_REATOMIZED,
     TERMINAL_TASK_STATUSES,
     Task,
+    format_acceptance_criteria,
 )
 from app.schemas.execution_plan import ExecutionBatch, ExecutionPlan
 from app.schemas.post_batch import PostBatchResult, PostBatchTaskRunSummary
@@ -879,7 +880,7 @@ def _build_recovery_assignment_new_tasks(
                 description=task.description or task.summary or task.title,
                 objective=task.objective,
                 implementation_notes=task.implementation_notes,
-                acceptance_criteria=task.acceptance_criteria,
+                acceptance_criteria=format_acceptance_criteria(task.acceptance_criteria) or None,
                 technical_constraints=task.technical_constraints,
                 out_of_scope=task.out_of_scope,
                 task_type=task.task_type,

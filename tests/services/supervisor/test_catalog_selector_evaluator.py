@@ -141,10 +141,9 @@ def _make_trace_entry(selected_image: str | None = "python:3.12-slim") -> dict:
         "project_id": 1,
         "inputs": {
             "project_name": "Test project",
-            "task_titles_count": 5,
             "catalog_images_count": 4,
         },
-        "reasoning": "The project uses Python ML libraries, python:3.12-slim is the best match.",
+        "reasoning": "The project description mentions Python ML libraries, python:3.12-slim is the best match.",
         "output_snapshot": {"selected_image": selected_image},
     }
 
@@ -475,3 +474,56 @@ def test_catalog_evaluator_omits_downstream_section_when_no_env_planner_trace(
 
     assert len(captured_prompts) == 1
     assert "Downstream impact" not in captured_prompts[0]
+
+
+def test_catalog_evaluator_prompt_notes_pre_task_generation_timing(
+    db_session: Session,
+    make_project,
+    tmp_path: Path,
+):
+    """The user prompt must note that catalog selection runs before task generation."""
+    proj = make_project(name="Timing note project")
+    proj.runtime_spec = {"runtime_type": "python_venv", "image": "python:3.12-slim"}
+    db_session.commit()
+
+    meta_dir = tmp_path / "project_meta"
+    meta_dir.mkdir(parents=True)
+    trace_path = meta_dir / "planning_trace.jsonl"
+    trace_path.write_text(
+        json.dumps(_make_trace_entry("python:3.12-slim")) + "\n",
+        encoding="utf-8",
+    )
+    paths = MagicMock()
+    paths.project_meta_dir = meta_dir
+
+    captured_prompts: list[str] = []
+
+    mock_provider = MagicMock()
+    mock_provider.generate_structured.side_effect = lambda **kwargs: (
+        captured_prompts.append(kwargs.get("user_prompt", ""))
+        or {
+            "verdict": "healthy",
+            "findings": "Good selection based on project description.",
+            "issues": [],
+            "suggestions": [],
+        }
+    )
+
+    with (
+        patch(
+            "app.services.supervisor.evaluators.catalog_selector_evaluator._storage.get_project_paths",
+            return_value=paths,
+        ),
+        patch(
+            "app.services.supervisor.evaluators.catalog_selector_evaluator.get_llm_provider",
+            return_value=mock_provider,
+        ),
+        patch(
+            "app.services.supervisor.evaluators.catalog_selector_evaluator.resolve_system_prompt",
+            return_value="You are an evaluator.",
+        ),
+    ):
+        CatalogSelectorEvaluator().evaluate(db=db_session, project_id=proj.id)
+
+    assert len(captured_prompts) == 1
+    assert "catalog selection runs before task generation" in captured_prompts[0]

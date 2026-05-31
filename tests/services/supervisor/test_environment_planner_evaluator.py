@@ -134,7 +134,7 @@ def test_evaluator_returns_healthy_when_no_trace(
     assert result.result is None
 
 
-def _make_trace_entry(call_type: str) -> dict:
+def _make_trace_entry(call_type: str, *, has_existing_environment_context: bool = False) -> dict:
     base: dict = {
         "agent": "environment_planner",
         "call_type": call_type,
@@ -143,7 +143,12 @@ def _make_trace_entry(call_type: str) -> dict:
     if call_type == "initial":
         base.update(
             {
-                "reasoning": "Chose python_venv because all tasks require Python libraries.",
+                "inputs": {
+                    "project_name": "Test project",
+                    "has_existing_environment_context": has_existing_environment_context,
+                    "catalog_hint": None,
+                },
+                "reasoning": "Chose python_venv because the project description requires Python ML libraries.",
                 "output_snapshot": {"runtime_type": "python_venv", "image": "python:3.12-slim"},
             }
         )
@@ -412,3 +417,106 @@ def test_evaluator_omits_catalog_section_when_no_catalog_entry(
 
     assert len(captured_prompts) == 1
     assert "Catalog selector context" not in captured_prompts[0]
+
+
+def test_evaluator_includes_evolutionary_note_when_context_present(
+    db_session: Session,
+    make_project,
+    tmp_path: Path,
+):
+    """When trace shows has_existing_environment_context=True, evolutionary note must appear in prompt."""
+    proj = make_project(name="Evolutionary project")
+
+    meta_dir = tmp_path / "project_meta"
+    meta_dir.mkdir(parents=True)
+    trace_path = meta_dir / "planning_trace.jsonl"
+    trace_path.write_text(
+        json.dumps(_make_trace_entry("initial", has_existing_environment_context=True)) + "\n",
+        encoding="utf-8",
+    )
+    paths = MagicMock()
+    paths.project_meta_dir = meta_dir
+
+    captured_prompts: list[str] = []
+
+    mock_provider = MagicMock()
+    mock_provider.generate_structured.side_effect = lambda **kwargs: (
+        captured_prompts.append(kwargs.get("user_prompt", ""))
+        or {
+            "verdict": "healthy",
+            "findings": "Correctly preserved existing pinned versions.",
+            "issues": [],
+            "suggestions": [],
+        }
+    )
+
+    with (
+        patch(
+            "app.services.supervisor.evaluators.environment_planner_evaluator._storage.get_project_paths",
+            return_value=paths,
+        ),
+        patch(
+            "app.services.supervisor.evaluators.environment_planner_evaluator.get_llm_provider",
+            return_value=mock_provider,
+        ),
+        patch(
+            "app.services.supervisor.evaluators.environment_planner_evaluator.resolve_system_prompt",
+            return_value="You are an evaluator.",
+        ),
+    ):
+        EnvironmentPlannerEvaluator().evaluate(db=db_session, project_id=proj.id)
+
+    assert len(captured_prompts) == 1
+    assert "EVOLUTIONARY" in captured_prompts[0]
+    assert "existing manifest" in captured_prompts[0].lower()
+
+
+def test_evaluator_omits_evolutionary_note_for_new_project(
+    db_session: Session,
+    make_project,
+    tmp_path: Path,
+):
+    """When has_existing_environment_context=False, no evolutionary note in prompt."""
+    proj = make_project(name="New project")
+
+    meta_dir = tmp_path / "project_meta"
+    meta_dir.mkdir(parents=True)
+    trace_path = meta_dir / "planning_trace.jsonl"
+    trace_path.write_text(
+        json.dumps(_make_trace_entry("initial", has_existing_environment_context=False)) + "\n",
+        encoding="utf-8",
+    )
+    paths = MagicMock()
+    paths.project_meta_dir = meta_dir
+
+    captured_prompts: list[str] = []
+
+    mock_provider = MagicMock()
+    mock_provider.generate_structured.side_effect = lambda **kwargs: (
+        captured_prompts.append(kwargs.get("user_prompt", ""))
+        or {
+            "verdict": "healthy",
+            "findings": "Clean initial spec for a new project without existing manifests.",
+            "issues": [],
+            "suggestions": [],
+        }
+    )
+
+    with (
+        patch(
+            "app.services.supervisor.evaluators.environment_planner_evaluator._storage.get_project_paths",
+            return_value=paths,
+        ),
+        patch(
+            "app.services.supervisor.evaluators.environment_planner_evaluator.get_llm_provider",
+            return_value=mock_provider,
+        ),
+        patch(
+            "app.services.supervisor.evaluators.environment_planner_evaluator.resolve_system_prompt",
+            return_value="You are an evaluator.",
+        ),
+    ):
+        EnvironmentPlannerEvaluator().evaluate(db=db_session, project_id=proj.id)
+
+    assert len(captured_prompts) == 1
+    assert "EVOLUTIONARY" not in captured_prompts[0]

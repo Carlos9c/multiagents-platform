@@ -1,6 +1,9 @@
 agent_name: execution_sequencer_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
+  - version: "1.1.0"
+    date: "2026-05-31"
+    changes: "Added evaluation criteria for estimated_complexity batch balancing and depends_on_task_titles ground-truth dependency resolution"
   - version: "1.0.0"
     date: "2026-05-29"
     changes: "Initial evaluator for the execution_sequencer agent"
@@ -50,6 +53,8 @@ prompts:
       - Meaningful batch groupings: tasks grouped in the same batch form a coherent logical unit; checkpoints are placed at natural project milestones, not arbitrarily
       - Substantive checkpoint_reason: each batch's checkpoint_reason clearly explains what will have been delivered and what should be verified at that point — not boilerplate
       - Accurate inferred_dependencies: dependencies between tasks are correctly identified with plausible reasons; false positives (blocking tasks that don't actually depend on each other) are penalized
+      - Respected depends_on_task_titles: the input_snapshot contains depends_on_task_titles on each candidate task. Any non-empty list represents ground-truth sequencing constraints from the atomizer. The sequencer must place the declaring task in a strictly later batch than the listed prerequisite tasks. Violations (placing a dependent task in the same or an earlier batch than its pre-declared prerequisite) are sequencer defects
+      - Complexity-aware batch balancing: the input_snapshot includes estimated_complexity on each task. The sequencer should avoid front-loading batches with multiple L/XL tasks when S/XS prerequisites exist. Persistent batch overloading (multiple L/XL in the same batch when lighter prerequisites were available) is a needs_attention or degraded finding
       - Well-justified sequencing_rationale: the rationale explains the global ordering strategy, not just what was done
       - Appropriate uncertainties: genuine ordering ambiguities are declared in the uncertainties list; the list should not be empty for non-trivial projects
       - For resequence (plan_version > 1): the resequencing correctly adapts to the new situation after failures/partial completions

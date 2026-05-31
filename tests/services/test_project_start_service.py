@@ -28,7 +28,9 @@ def _planned_task() -> PlannedTask:
             "Design the main modules, implement the core business logic, and wire up all "
             "dependencies correctly following the project conventions."
         ),
-        acceptance_criteria="The system behaves as specified and passes all defined acceptance checks.",
+        acceptance_criteria=[
+            "The system behaves as specified and passes all defined acceptance checks."
+        ],
         technical_constraints="Must use the established stack and conventions without introducing new frameworks.",
         out_of_scope="Performance optimisation, deployment automation, and user documentation.",
         priority="high",

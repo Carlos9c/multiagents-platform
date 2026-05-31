@@ -22,6 +22,7 @@ from app.models.task import (
     TASK_STATUS_PARTIAL,
     TASK_STATUS_REATOMIZED,
     Task,
+    format_acceptance_criteria,
 )
 from app.services.llm.factory import get_llm_provider
 from app.services.project_storage import ProjectStorageService
@@ -115,6 +116,8 @@ def _build_atomic_tasks_context(db: Session, parent_task: Task) -> list[dict]:
             "status": child.status,
             "is_recovery_task": child.is_recovery_task,
             "followup_depth": child.followup_depth,
+            "estimated_complexity": child.estimated_complexity,
+            "depends_on_task_titles": child.depends_on_task_titles or [],
         }
         if child.status in _NON_COMPLETED_STATUSES:
             failure_info = _get_failure_info_for_task(db, child)
@@ -139,7 +142,9 @@ def _build_per_parent_user_prompt(
             "project_id": project_id,
             "parent_task_id": parent_task.id,
             "parent_task_title": parent_task.title,
-            "parent_task_acceptance_criteria": parent_task.acceptance_criteria or "",
+            "parent_task_acceptance_criteria": format_acceptance_criteria(
+                parent_task.acceptance_criteria
+            ),
             "system_prompt": system_prompt,
             "trace_entry": trace_entry or {},
             "atomic_tasks": atomic_tasks,
@@ -153,7 +158,8 @@ Project ID: {project_id}
 Parent task:
 - task_id: {parent_task.id}
 - title: {parent_task.title}
-- acceptance_criteria: {parent_task.acceptance_criteria or "(not set)"}
+- acceptance_criteria:
+{format_acceptance_criteria(parent_task.acceptance_criteria) or "(not set)"}
 - description: {parent_task.description or "(not set)"}
 - objective: {parent_task.objective or "(not set)"}
 

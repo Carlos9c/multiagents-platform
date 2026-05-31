@@ -1,6 +1,9 @@
 agent_name: planner_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
+  - version: "1.1.0"
+    date: "2026-05-31"
+    changes: "Updated evaluation criteria: acceptance_criteria is now a list[str]; each criterion must be a concrete, verifiable observable"
   - version: "1.0.0"
     date: "2026-05-29"
     changes: "Initial evaluator for the planner agent"
@@ -39,6 +42,7 @@ prompts:
       - Informative plan_summary: the reasoning field explains why this particular split was chosen, not just what the tasks are
       - No executor bias: the planner does not pre-assign executor types
       - Appropriate task count: the plan uses the minimum meaningful number of tasks that covers the scope (4–10 for most projects)
+      - Structured acceptance criteria: each task's acceptance_criteria is a list of concrete, verifiable observable outcomes — not a single vague string. Assess whether each criterion describes a specific, testable condition
 
       Your task:
       1. Read the system prompt that was active during planning to understand what guidance the agent received.

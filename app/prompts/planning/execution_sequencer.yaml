@@ -1,12 +1,15 @@
 agent_name: execution_sequencer
-version: "1.1.0"
+version: "1.2.0"
 changelog:
-  - version: "1.0.0"
-    date: "2026-05-28"
-    changes: "Initial migration from Python constant EXECUTION_SEQUENCER_SYSTEM_PROMPT"
+  - version: "1.2.0"
+    date: "2026-05-31"
+    changes: "Added guidance for estimated_complexity (batch load balancing) and depends_on_task_titles (pre-declared sequencing ground-truth) fields on CandidateAtomicTask"
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constant EXECUTION_SEQUENCER_SYSTEM_PROMPT"
 prompts:
   main:
     description: "Transforms atomic tasks into a safe, batched, checkpoint-driven execution plan"
@@ -57,6 +60,21 @@ prompts:
       - Tasks with ordering_hint="setup_first" establish project infrastructure (build system, scaffold, tooling). They MUST be placed in earlier batches than any task with ordering_hint="depends_on_setup".
       - NEVER place a "depends_on_setup" task in the same batch as or an earlier batch than a "setup_first" task.
       - If no "setup_first" tasks exist the hint has no effect — sequence normally.
+
+      Pre-declared dependency rule (depends_on_task_titles):
+      - Each candidate task carries a depends_on_task_titles field: a list of sibling task titles that must complete before this task begins.
+      - These declarations come from the atomic task generator and represent ground-truth sequencing knowledge about execution prerequisites.
+      - Treat each entry as a hard dependency: the declaring task MUST be placed in a later batch than any task whose title appears in its depends_on_task_titles.
+      - Translate title references to task_ids when building inferred_dependencies (match by exact title against the candidate task list).
+      - If a title in depends_on_task_titles does not match any candidate task, skip it silently.
+      - Pre-declared dependencies take precedence over your own inferred dependencies when there is a conflict.
+
+      Complexity-aware batch balancing rule (estimated_complexity):
+      - Each candidate task carries an estimated_complexity field: XS, S, M, L, or XL.
+      - Use complexity to avoid front-loading batches with multiple high-effort tasks when lower-effort tasks exist that could be sequenced first or interleaved.
+      - Avoid placing two or more L or XL tasks in the same batch unless they are truly independent and there is no lower-complexity work that should precede them.
+      - Prefer placing XS and S tasks that are hard prerequisites early to unblock downstream L/XL work.
+      - Do not treat complexity as an absolute batch size limit — cohesion and dependency take precedence. Complexity is a balancing signal, not a partitioning rule.
 
       Output rules:
       - Return ONLY valid JSON.

@@ -154,15 +154,15 @@ def test_workflow_continues_to_next_batch_when_intermediate_checkpoint_is_stage_
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -287,15 +287,15 @@ def test_workflow_rejects_non_atomic_task_inside_execution_batch(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -348,7 +348,7 @@ def test_workflow_uses_project_enable_technical_refinement_flag(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
 
     def _fake_run_optional_technical_refinement_phase(
@@ -356,6 +356,7 @@ def test_workflow_uses_project_enable_technical_refinement_flag(
         project_id,
         *,
         enable_technical_refinement,
+        runtime_context=None,
     ):
         captured["refinement_flag_in_refiner_phase"] = enable_technical_refinement
         return True
@@ -365,6 +366,7 @@ def test_workflow_uses_project_enable_technical_refinement_flag(
         project_id,
         *,
         enable_technical_refinement,
+        runtime_context=None,
     ):
         captured["refinement_flag_in_atomic_phase"] = enable_technical_refinement
         return True
@@ -425,7 +427,7 @@ def test_workflow_bypasses_refinement_when_project_flag_is_false(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
 
     def _fake_run_optional_technical_refinement_phase(
@@ -433,6 +435,7 @@ def test_workflow_bypasses_refinement_when_project_flag_is_false(
         project_id,
         *,
         enable_technical_refinement,
+        runtime_context=None,
     ):
         captured["refinement_flag_in_refiner_phase"] = enable_technical_refinement
         return True
@@ -442,6 +445,7 @@ def test_workflow_bypasses_refinement_when_project_flag_is_false(
         project_id,
         *,
         enable_technical_refinement,
+        runtime_context=None,
     ):
         captured["refinement_flag_in_atomic_phase"] = enable_technical_refinement
         return True
@@ -589,15 +593,15 @@ def test_workflow_adopts_patched_execution_plan_even_when_assignment_does_not_re
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -779,15 +783,15 @@ def test_workflow_invalidates_active_plan_when_iteration_requires_replan(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -958,15 +962,15 @@ def test_workflow_reuses_active_plan_after_assignment_patch(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -1126,15 +1130,15 @@ def test_workflow_does_not_reexecute_completed_batch_after_deferred_resequence(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -1308,15 +1312,15 @@ def test_workflow_keeps_completed_batches_unique_across_multiple_deferred_resequ
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -1510,15 +1514,15 @@ def test_workflow_reuses_patched_active_plan_without_regenerating_execution_plan
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -1682,15 +1686,15 @@ def test_workflow_resequence_does_not_regenerate_execution_plan_or_set_structura
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -1879,15 +1883,15 @@ def test_workflow_blocked_batches_reflect_remaining_batches_from_latest_active_p
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -2097,15 +2101,15 @@ def test_workflow_iteration_summary_tracks_plan_transition_and_blocked_batches(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -2292,15 +2296,15 @@ def test_workflow_batch_trace_includes_resolved_action_decision_signals_and_patc
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -2527,15 +2531,15 @@ def test_workflow_batch_trace_iteration_summary_and_result_blocked_batches_are_c
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -2727,15 +2731,15 @@ def test_workflow_result_matches_last_iteration_when_manual_review_stops_executi
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -2939,15 +2943,15 @@ def test_workflow_artifacts_and_results_tell_a_consistent_execution_story(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -3143,15 +3147,15 @@ def test_workflow_completed_batches_never_contains_duplicates(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
 
     generation_calls = []
@@ -3296,15 +3300,15 @@ def test_workflow_invalidates_active_plan_and_regenerates_when_iteration_require
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
 
     generation_calls = []
@@ -3452,15 +3456,15 @@ def test_workflow_blocked_batches_never_includes_completed_batches(
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",
@@ -3621,15 +3625,15 @@ def test_workflow_stops_with_manual_review_when_patched_plan_is_exhausted_but_st
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_planner_if_needed",
-        lambda db, project_id: True,
+        lambda db, project_id, *, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_optional_technical_refinement_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service._run_atomic_generation_phase",
-        lambda db, project_id, *, enable_technical_refinement: True,
+        lambda db, project_id, *, enable_technical_refinement, runtime_context=None: True,
     )
     monkeypatch.setattr(
         "app.services.project_workflow_service.generate_execution_plan",

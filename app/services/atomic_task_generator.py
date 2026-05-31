@@ -10,6 +10,7 @@ from app.models.task import (
     PLANNING_LEVEL_HIGH_LEVEL,
     PLANNING_LEVEL_REFINED,
     Task,
+    format_acceptance_criteria,
 )
 from app.schemas.atomic_task_generator import AtomicTaskGenerationOutput
 from app.services.atomic_task_generator_client import call_atomic_task_generator_model
@@ -83,10 +84,22 @@ def _validate_atomic_task_quality(tasks: list[Task]) -> None:
                 f"implementation_steps too short in atomic task: {task.title}"
             )
 
-        if len((task.acceptance_criteria or "").strip()) < 20:
-            raise AtomicTaskGenerationError(
-                f"acceptance_criteria too short in atomic task: {task.title}"
-            )
+        ac = task.acceptance_criteria
+        if isinstance(ac, list):
+            if not ac:
+                raise AtomicTaskGenerationError(
+                    f"acceptance_criteria empty in atomic task: {task.title}"
+                )
+            for criterion in ac:
+                if len(criterion.strip()) < 15:
+                    raise AtomicTaskGenerationError(
+                        f"Acceptance criterion too short or non-verifiable in: {task.title}"
+                    )
+        else:
+            if len((ac or "").strip()) < 20:
+                raise AtomicTaskGenerationError(
+                    f"acceptance_criteria too short in atomic task: {task.title}"
+                )
 
         step_count = _implementation_steps_count(task.implementation_steps or "")
         if step_count > MAX_IMPLEMENTATION_STEPS_PER_ATOMIC:
@@ -168,6 +181,8 @@ def generate_atomic_tasks(
     *,
     project_id: int,
     task_id: int,
+    runtime_context: str | None = None,
+    sibling_atomic_summary: list[dict] | None = None,
 ) -> dict:
     project = db.get(Project, project_id)
     if not project:
@@ -205,11 +220,13 @@ def generate_atomic_tasks(
         parent_task_planning_level=parent_task.planning_level,
         parent_task_proposed_solution=parent_task.proposed_solution or "",
         parent_task_implementation_steps=parent_task.implementation_steps or "",
-        parent_task_acceptance_criteria=parent_task.acceptance_criteria or "",
+        parent_task_acceptance_criteria=format_acceptance_criteria(parent_task.acceptance_criteria),
         parent_task_tests_required=parent_task.tests_required or "",
         parent_task_technical_constraints=parent_task.technical_constraints or "",
         parent_task_out_of_scope=parent_task.out_of_scope or "",
         available_executors=AVAILABLE_EXECUTORS,
+        runtime_context=runtime_context,
+        sibling_atomic_summary=sibling_atomic_summary,
         project_id=project.id,
         parent_task_id=parent_task.id,
         call_type="reatomize" if parent_task.is_recovery_task else "initial",
@@ -229,6 +246,8 @@ def generate_atomic_tasks(
             implementation_notes=None,
             implementation_steps=_format_bullet_list(atomic.implementation_steps),
             acceptance_criteria=atomic.acceptance_criteria,
+            estimated_complexity=atomic.estimated_complexity,
+            depends_on_task_titles=atomic.depends_on_task_titles,
             tests_required=_format_bullet_list(atomic.tests_required),
             technical_constraints=atomic.technical_constraints,
             out_of_scope=atomic.out_of_scope,

@@ -1,6 +1,12 @@
 agent_name: atomic_task_generator_evaluator
-version: "1.0.0"
+version: "1.2.0"
 changelog:
+  - version: "1.2.0"
+    date: "2026-05-31"
+    changes: "Added evaluation criteria for estimated_complexity calibration and depends_on_task_titles justification; atomic task context now includes these fields"
+  - version: "1.1.0"
+    date: "2026-05-31"
+    changes: "Updated: acceptance_criteria is now list[str]; each criterion must be a verifiable observable; generic criteria (tests pass, works correctly) are defects"
   - version: "1.0.0"
     date: "2026-05-29"
     changes: "Initial evaluator for the atomic_task_generator agent"
@@ -40,7 +46,9 @@ prompts:
       What constitutes good atomic_task_generator performance for this parent task:
       - Complete scope coverage: the set of atomic tasks collectively covers all the work implied by the parent task's acceptance criteria — no significant area is missing
       - Correct granularity: each atomic task has one focused deliverable and one validation boundary; no task is oversized (covering an entire module with no single clear deliverable) or under-sized (a trivial single-file change that could be bundled with its context)
-      - Concrete acceptance criteria: each atomic task's acceptance criteria is specific and verifiable, not generic ("tests pass") or circular ("task is implemented")
+      - Structured acceptance criteria: each atomic task's acceptance_criteria is a list of strings, where each string is one concrete, verifiable observable outcome. Generic items like "tests pass", "works correctly", or "task is implemented" are defects. Penalize tasks that have only vague or circular criteria
+      - Calibrated estimated_complexity: the assigned XS/S/M/L/XL value must match the actual scope of the task. Assigning XS to a task that spans multiple components is a defect; assigning L/XL to a trivial single-file change is a defect. XL on an atomic task is a strong signal the task was not properly split
+      - Justified depends_on_task_titles: declared inter-task dependencies must be genuine execution prerequisites (the depending task needs the other's outputs or created state). Flag missing obvious dependencies and unjustified declarations (title exists but tasks are actually independent)
       - Clear generation_summary: the reasoning field in the trace explains WHY this particular decomposition was chosen, referencing the parent task's scope and constraints
       - Proper separation: implementation tasks do not write test files; testing tasks are distinct when applicable
       - No non-executable work: atomic tasks assigned to the execution engine have concrete repository deliverables, not open-ended investigation

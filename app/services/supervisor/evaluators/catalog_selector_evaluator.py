@@ -162,7 +162,8 @@ Instructions:
 - Assess whether the selected_image matches the technology stack the project actually needed.
 - Compare selected_image with final_image: large differences may indicate the selection was overridden.
 - Evaluate the quality of the reasoning field: does it show genuine analysis of the project context?
-- If selected_image is null, assess whether abstaining was appropriate given the project's tasks.
+- If selected_image is null, assess whether abstaining was appropriate given the project's description and technology stack.
+- Note: catalog selection runs before task generation, so reasoning must be based on project description alone — evaluate accordingly.
 - If environment_planner_repair_count > 0: assess whether the catalog selection may have contributed to
   the downstream repairs. If the catalog chose the correct technology, do not penalize it for dependency issues.
 - Reference the selected_image, final_image, and reasoning content in your findings.

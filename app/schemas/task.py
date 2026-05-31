@@ -21,7 +21,9 @@ class TaskCreate(BaseModel):
     proposed_solution: str | None = None
     implementation_notes: str | None = None
     implementation_steps: str | None = None
-    acceptance_criteria: str | None = None
+    acceptance_criteria: list[str] | None = None
+    estimated_complexity: str | None = None
+    depends_on_task_titles: list[str] | None = None
     tests_required: str | None = None
     technical_constraints: str | None = None
     out_of_scope: str | None = None
@@ -82,7 +84,9 @@ class TaskRead(BaseModel):
     proposed_solution: str | None = None
     implementation_notes: str | None = None
     implementation_steps: str | None = None
-    acceptance_criteria: str | None = None
+    acceptance_criteria: list[str] | str | None = None
+    estimated_complexity: str | None = None
+    depends_on_task_titles: list[str] | None = None
     tests_required: str | None = None
     technical_constraints: str | None = None
     out_of_scope: str | None = None

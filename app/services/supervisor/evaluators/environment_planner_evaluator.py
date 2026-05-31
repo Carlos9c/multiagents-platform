@@ -119,6 +119,20 @@ Catalog selector context (what image was pre-selected before environment plannin
 {json.dumps(catalog_trace_entry, ensure_ascii=False, indent=2)}
 """
 
+    # Detect evolutionary project from trace inputs
+    is_evolutionary = any(
+        e.get("inputs", {}).get("has_existing_environment_context") is True
+        for e in trace_entries
+        if e.get("call_type") == "initial"
+    )
+    evolutionary_note = ""
+    if is_evolutionary:
+        evolutionary_note = """
+Note: This is an EVOLUTIONARY project — the environment_planner received existing manifest file content
+(has_existing_environment_context=true). Assess whether the planner correctly preserved pinned versions
+from the existing manifests and ensured new dependencies are compatible with the existing stack.
+"""
+
     return f"""
 Evaluate the environment_planner agent's runtime spec for this project.
 
@@ -129,7 +143,7 @@ System prompt that was active during environment planning:
 ---
 {system_prompt}
 ---
-{catalog_section}
+{catalog_section}{evolutionary_note}
 All planning trace entries (initial + any repairs):
 {json.dumps(trace_entries, ensure_ascii=False, indent=2)}
 
@@ -138,11 +152,12 @@ Final RuntimeSpec stored on the project:
 
 Instructions:
 - Use repair_count as the primary quality signal: 0 = excellent, 1 = acceptable, 2+ = problematic.
-- Assess whether the runtime_type and image are appropriate for the project's technology stack.
-- Assess completeness of the dependency list relative to what the tasks require.
+- Assess whether the runtime_type and image are appropriate for the project's description and technology stack.
+- Assess completeness and modernity of the dependency list relative to what the project description requires.
 - For repair calls, assess whether the repair_rationale correctly diagnosed the root cause.
 - If a catalog_selector entry is present, assess whether the planner built correctly on top of that selection.
   If the catalog chose the right image but repairs were still needed, the fault is in the dependency list.
+- If this is an evolutionary project (see note above), assess preservation of existing pinned versions.
 - Reference the runtime_type, image, and key dependency names in your findings.
 """.strip()
 

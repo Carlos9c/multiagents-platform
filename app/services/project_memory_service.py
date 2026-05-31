@@ -15,6 +15,7 @@ from app.models.task import (
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
     Task,
+    format_acceptance_criteria,
 )
 from app.schemas.project_memory import (
     ProjectMemoryArtifactSummary,
@@ -243,7 +244,7 @@ def _build_path_signals(
             task.proposed_solution,
             task.implementation_notes,
             task.implementation_steps,
-            task.acceptance_criteria,
+            format_acceptance_criteria(task.acceptance_criteria) or None,
             task.tests_required,
             task.technical_constraints,
             task.out_of_scope,

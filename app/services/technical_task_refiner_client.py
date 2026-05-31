@@ -20,6 +20,7 @@ def build_refiner_user_prompt(
     parent_task_acceptance_criteria: str,
     parent_task_technical_constraints: str,
     parent_task_out_of_scope: str,
+    runtime_context: str | None = None,
 ) -> str:
     prompt_loader.validate_builder_inputs(
         "technical_task_refiner",
@@ -36,12 +37,14 @@ def build_refiner_user_prompt(
             "parent_task_acceptance_criteria": parent_task_acceptance_criteria,
             "parent_task_technical_constraints": parent_task_technical_constraints,
             "parent_task_out_of_scope": parent_task_out_of_scope,
+            "runtime_context": runtime_context,
         },
     )
+    runtime_section = f"\n{runtime_context}\n" if runtime_context else ""
     return f"""
 Project name: {project_name}
 Project description: {project_description}
-
+{runtime_section}
 Parent high-level task:
 - title: {parent_task_title}
 - description: {parent_task_description}
@@ -134,6 +137,7 @@ def call_technical_task_refiner_model(
     parent_task_acceptance_criteria: str,
     parent_task_technical_constraints: str,
     parent_task_out_of_scope: str,
+    runtime_context: str | None = None,
 ) -> TechnicalTaskRefinementOutput:
     provider = get_llm_provider()
     first_user_prompt = build_refiner_user_prompt(
@@ -148,6 +152,7 @@ def call_technical_task_refiner_model(
         parent_task_acceptance_criteria=parent_task_acceptance_criteria,
         parent_task_technical_constraints=parent_task_technical_constraints,
         parent_task_out_of_scope=parent_task_out_of_scope,
+        runtime_context=runtime_context,
     )
 
     raw = provider.generate_structured(

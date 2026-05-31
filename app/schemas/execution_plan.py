@@ -40,6 +40,8 @@ class CandidateAtomicTask(BaseModel):
     parent_high_level_title: str | None = None
     implementation_steps: str | None = None
     acceptance_criteria: str | None = None
+    estimated_complexity: str | None = None
+    depends_on_task_titles: list[str] = Field(default_factory=list)
     tests_required: str | None = None
     technical_constraints: str | None = None
     out_of_scope: str | None = None

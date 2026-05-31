@@ -10,6 +10,7 @@ from app.models.task import (
     PLANNING_LEVEL_REFINED,
     TASK_STATUS_PENDING,
     Task,
+    format_acceptance_criteria,
 )
 from app.schemas.technical_task_refiner import TechnicalTaskRefinementOutput
 from app.services.technical_task_refiner_client import (
@@ -40,7 +41,8 @@ def _validate_refined_task_quality(tasks: list[Task]) -> None:
         if len((task.tests_required or "").strip()) < 10:
             raise ValueError(f"tests_required too short in refined task: {task.title}")
 
-        if len((task.acceptance_criteria or "").strip()) < 20:
+        ac_text = format_acceptance_criteria(task.acceptance_criteria)
+        if len(ac_text.strip()) < 20:
             raise ValueError(f"acceptance_criteria too short in refined task: {task.title}")
 
 
@@ -49,6 +51,7 @@ def refine_high_level_task(
     *,
     project_id: int,
     task_id: int,
+    runtime_context: str | None = None,
 ) -> dict:
     project = db.get(Project, project_id)
     if not project:
@@ -100,9 +103,10 @@ def refine_high_level_task(
         parent_task_objective=parent_task.objective or "",
         parent_task_type=parent_task.task_type,
         parent_task_implementation_notes=parent_task.implementation_notes or "",
-        parent_task_acceptance_criteria=parent_task.acceptance_criteria or "",
+        parent_task_acceptance_criteria=format_acceptance_criteria(parent_task.acceptance_criteria),
         parent_task_technical_constraints=parent_task.technical_constraints or "",
         parent_task_out_of_scope=parent_task.out_of_scope or "",
+        runtime_context=runtime_context,
     )
 
     created_tasks: list[Task] = []

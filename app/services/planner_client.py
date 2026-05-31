@@ -10,19 +10,25 @@ from app.services.supervisor.trace_writer import append_planning_trace
 PLANNER_SYSTEM_PROMPT = prompt_loader.get("planner")
 
 
-def build_planner_user_prompt(project_name: str, project_description: str) -> str:
+def build_planner_user_prompt(
+    project_name: str,
+    project_description: str,
+    runtime_context: str | None = None,
+) -> str:
     prompt_loader.validate_builder_inputs(
         "planner",
         "main",
         {
             "project_name": project_name,
             "project_description": project_description,
+            "runtime_context": runtime_context,
         },
     )
+    runtime_section = f"\n{runtime_context}\n" if runtime_context else ""
     return f"""
 Project name: {project_name}
 Project description: {project_description}
-
+{runtime_section}
 Important:
 - Plan the user's project, not the internal implementation of the orchestration platform.
 - Think in terms of real project deliverables and workstreams.
@@ -136,6 +142,7 @@ def build_evolutionary_planner_user_prompt(
     project_name: str,
     project_description: str,
     analysis: object,
+    runtime_context: str | None = None,
 ) -> str:
     context_section = _build_evolutionary_context_section(analysis)
     prompt_loader.validate_builder_inputs(
@@ -145,8 +152,10 @@ def build_evolutionary_planner_user_prompt(
             "project_name": project_name,
             "project_description": project_description,
             "codebase_analysis_context": context_section,
+            "runtime_context": runtime_context,
         },
     )
+    runtime_section = f"\n{runtime_context}\n" if runtime_context else ""
     return f"""
 {context_section}
 
@@ -155,6 +164,7 @@ def build_evolutionary_planner_user_prompt(
 NEW OBJECTIVE:
 Project name: {project_name}
 Project description: {project_description}
+{runtime_section}
 
 Important:
 - Plan the next iteration of work given the existing codebase above.
@@ -192,12 +202,14 @@ def call_planner_model(
     project_name: str,
     project_description: str,
     *,
+    runtime_context: str | None = None,
     project_id: int | None = None,
 ) -> PlannerOutput:
     provider = get_llm_provider()
     first_user_prompt = build_planner_user_prompt(
         project_name=project_name,
         project_description=project_description,
+        runtime_context=runtime_context,
     )
 
     raw = provider.generate_structured(
@@ -249,6 +261,7 @@ def call_evolutionary_planner_model(
     project_description: str,
     codebase_analysis: object,
     *,
+    runtime_context: str | None = None,
     project_id: int | None = None,
 ) -> PlannerOutput:
     provider = get_llm_provider()
@@ -256,6 +269,7 @@ def call_evolutionary_planner_model(
         project_name=project_name,
         project_description=project_description,
         analysis=codebase_analysis,
+        runtime_context=runtime_context,
     )
 
     raw = provider.generate_structured(

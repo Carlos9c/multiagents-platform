@@ -10,27 +10,11 @@ from app.services.supervisor.trace_writer import append_planning_trace
 ENVIRONMENT_PLANNER_SYSTEM_PROMPT = prompt_loader.get("environment_planner")
 
 
-def _format_atomic_tasks(atomic_tasks: list[dict]) -> str:
-    if not atomic_tasks:
-        return "[No atomic tasks provided]"
-
-    lines = []
-    for i, task in enumerate(atomic_tasks, start=1):
-        lines.append(f"Task {i}: {task.get('title', '')}")
-        if task.get("proposed_solution"):
-            lines.append(f"  proposed_solution: {task['proposed_solution']}")
-        if task.get("technical_constraints"):
-            lines.append(f"  technical_constraints: {task['technical_constraints']}")
-        if task.get("tests_required"):
-            lines.append(f"  tests_required: {task['tests_required']}")
-    return "\n".join(lines)
-
-
 def build_environment_planner_user_prompt(
     project_name: str,
     project_description: str,
-    atomic_tasks: list[dict],
     catalog_hint: str | None = None,
+    existing_environment_context: str | None = None,
 ) -> str:
     prompt_loader.validate_builder_inputs(
         "environment_planner",
@@ -38,11 +22,11 @@ def build_environment_planner_user_prompt(
         {
             "project_name": project_name,
             "project_description": project_description,
-            "atomic_tasks": atomic_tasks,
             "catalog_hint": catalog_hint,
+            "existing_environment_context": existing_environment_context,
         },
     )
-    formatted_tasks = _format_atomic_tasks(atomic_tasks)
+
     hint_section = ""
     if catalog_hint:
         hint_section = f"""
@@ -50,31 +34,40 @@ Pre-selected base image: {catalog_hint}
 The runtime_type and image fields must match this pre-selected environment.
 Choose dependencies that are compatible with and installable in this image.
 """
+
+    context_section = ""
+    if existing_environment_context:
+        context_section = f"""
+Existing environment (detected manifest files):
+{existing_environment_context}
+
+Build upon and extend this existing environment.
+Preserve all pinned versions unless there is a direct conflict.
+The runtime_type must match the ecosystem above.
+"""
+
     return f"""
 Project name: {project_name}
 Project description: {project_description}
-{hint_section}
-Atomic tasks to support:
-{formatted_tasks}
-
+{hint_section}{context_section}
 Planning instructions:
-- Determine the runtime (python_venv, node_npm, rust_cargo, java_maven, java_gradle, android_gradle, react_native, dotnet, or go) that can implement ALL tasks above.
+- Determine the runtime (python_venv, node_npm, rust_cargo, java_maven, java_gradle, android_gradle, react_native, dotnet, or go) that can implement this project.
 - Choose an appropriate Docker image as the base.
-- List every package required to implement and test all tasks.
+- List every package required to implement and test the project.
 - Pin every package to an exact version (x.y.z). No ranges.
-- If any task explicitly names a library in its technical_constraints or proposed_solution, that library is mandatory.
-- Include the test runner if any task has tests.
+- For build-system-managed runtimes (android_gradle, java_gradle, java_maven, rust_cargo, dotnet, go): return an empty dependencies list.
+- When a library is not specified, choose the most modern production-ready option (2024-2025).
+- Include the test runner appropriate for the runtime.
 - Do not include packages already provided by the runtime standard library.
-- For build-system-managed runtimes (android_gradle, java_gradle, java_maven, rust_cargo, dotnet, go): return an empty dependencies list — packages are declared in project files (build.gradle, pom.xml, Cargo.toml, go.mod, .csproj) by the code agents.
 """.strip()
 
 
 def build_environment_planner_retry_prompt(
     project_name: str,
     project_description: str,
-    atomic_tasks: list[dict],
     validation_error: str,
     catalog_hint: str | None = None,
+    existing_environment_context: str | None = None,
 ) -> str:
     from app.services.prompt_loader import prompt_loader
 
@@ -84,13 +77,16 @@ def build_environment_planner_retry_prompt(
         {
             "project_name": project_name,
             "project_description": project_description,
-            "atomic_tasks": atomic_tasks,
             "catalog_hint": catalog_hint,
+            "existing_environment_context": existing_environment_context,
             "validation_error": validation_error,
         },
     )
     base = build_environment_planner_user_prompt(
-        project_name, project_description, atomic_tasks, catalog_hint=catalog_hint
+        project_name,
+        project_description,
+        catalog_hint=catalog_hint,
+        existing_environment_context=existing_environment_context,
     )
     return f"""Your previous output was invalid.
 
@@ -149,16 +145,16 @@ ENVIRONMENT_REPAIR_SYSTEM_PROMPT = prompt_loader.get("environment_planner", "rep
 def call_environment_planner(
     project_name: str,
     project_description: str,
-    atomic_tasks: list[dict],
     catalog_hint: str | None = None,
+    existing_environment_context: str | None = None,
     project_id: int | None = None,
 ) -> RuntimeEnvironmentPlanOutput:
     provider = get_llm_provider()
     user_prompt = build_environment_planner_user_prompt(
         project_name=project_name,
         project_description=project_description,
-        atomic_tasks=atomic_tasks,
         catalog_hint=catalog_hint,
+        existing_environment_context=existing_environment_context,
     )
 
     raw = provider.generate_structured(
@@ -174,9 +170,9 @@ def call_environment_planner(
         retry_prompt = build_environment_planner_retry_prompt(
             project_name=project_name,
             project_description=project_description,
-            atomic_tasks=atomic_tasks,
             validation_error=str(exc),
             catalog_hint=catalog_hint,
+            existing_environment_context=existing_environment_context,
         )
         raw_retry = provider.generate_structured(
             system_prompt=ENVIRONMENT_PLANNER_SYSTEM_PROMPT,
@@ -195,7 +191,7 @@ def call_environment_planner(
                 "project_id": project_id,
                 "inputs": {
                     "project_name": project_name,
-                    "atomic_tasks_count": len(atomic_tasks),
+                    "has_existing_environment_context": existing_environment_context is not None,
                     "catalog_hint": catalog_hint,
                 },
                 "reasoning": result.planning_rationale,

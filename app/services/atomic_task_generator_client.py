@@ -49,10 +49,22 @@ def build_atomic_user_prompt(
     parent_task_technical_constraints: str,
     parent_task_out_of_scope: str,
     available_executors: list[str],
+    runtime_context: str | None = None,
+    sibling_atomic_summary: list[dict] | None = None,
 ) -> str:
     executors = _validate_available_executors(available_executors)
     executors_text = "\n".join(f"- {executor}" for executor in executors)
     capability_text = _build_executor_capabilities_text(executors)
+
+    if sibling_atomic_summary:
+        sibling_lines = "\n".join(
+            f'- "{s["title"]}" ({s.get("task_type", "unknown")})' for s in sibling_atomic_summary
+        )
+        sibling_text = (
+            f"Already-generated atomic tasks (siblings — avoid duplication):\n{sibling_lines}"
+        )
+    else:
+        sibling_text = None
 
     prompt_loader.validate_builder_inputs(
         "atomic_task_generator",
@@ -74,12 +86,16 @@ def build_atomic_user_prompt(
             "parent_task_out_of_scope": parent_task_out_of_scope,
             "available_executors": executors_text,
             "executor_capability_catalogs": capability_text,
+            "runtime_context": runtime_context,
+            "sibling_atomic_summary": sibling_text,
         },
     )
+    runtime_section = f"\n{runtime_context}\n" if runtime_context else ""
+    sibling_section = f"\n{sibling_text}\n" if sibling_text else ""
     return f"""
 Project name: {project_name}
 Project description: {project_description}
-
+{runtime_section}{sibling_section}
 Parent task to atomize:
 - title: {parent_task_title}
 - description: {parent_task_description}
@@ -214,6 +230,8 @@ def call_atomic_task_generator_model(
     parent_task_technical_constraints: str,
     parent_task_out_of_scope: str,
     available_executors: list[str],
+    runtime_context: str | None = None,
+    sibling_atomic_summary: list[dict] | None = None,
     project_id: int | None = None,
     parent_task_id: int | None = None,
     call_type: str = "initial",
@@ -235,6 +253,8 @@ def call_atomic_task_generator_model(
         parent_task_technical_constraints=parent_task_technical_constraints,
         parent_task_out_of_scope=parent_task_out_of_scope,
         available_executors=available_executors,
+        runtime_context=runtime_context,
+        sibling_atomic_summary=sibling_atomic_summary,
     )
 
     raw = provider.generate_structured(

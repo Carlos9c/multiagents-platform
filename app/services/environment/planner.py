@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models.project import Project
-from app.models.task import Task
 from app.services.artifacts import create_artifact
 from app.services.environment.catalog import (
     catalog_dockerfile_path,
@@ -21,44 +20,40 @@ from app.services.environment.planner_client import call_environment_planner
 logger = logging.getLogger(__name__)
 
 
-def _task_to_dict(task: Task) -> dict:
-    return {
-        "title": task.title or "",
-        "proposed_solution": task.proposed_solution or "",
-        "technical_constraints": task.technical_constraints or "",
-        "tests_required": task.tests_required or "",
-    }
-
-
 def plan_runtime_environment(
     db: Session,
     project_id: int,
-    atomic_tasks: list[Task],
+    *,
+    existing_environment_context: str | None = None,
 ) -> RuntimeSpec:
     """Determine the runtime environment for the project.
 
+    Runs before task generation so that the decided tech stack can inform
+    the planner and atomic task generator.
+
     1. An LLM catalog selector picks the best curated base image (or None).
-    2. The environment planner LLM decides which packages to install on top.
+    2. The environment planner LLM decides the full modern stack and packages.
     3. If the catalog matched, its runtime_type and image override the planner's choice.
+
+    For evolutionary projects pass *existing_environment_context* (content of detected
+    manifest files) so the planner builds on the existing stack rather than replacing it.
     """
     project = db.get(Project, project_id)
     if not project:
         raise ValueError(f"Project {project_id} not found")
 
-    task_dicts = [_task_to_dict(t) for t in atomic_tasks]
     catalog_entries = get_all_entries()
 
     logger.info(
-        "environment_planner_started project_id=%s atomic_task_count=%d",
+        "environment_planner_started project_id=%s evolutionary=%s",
         project_id,
-        len(task_dicts),
+        existing_environment_context is not None,
     )
 
-    # --- Step 1: catalog selection via LLM ---
+    # --- Step 1: catalog selection via LLM (description-based) ---
     selection = select_catalog_image(
         project_name=project.name,
         project_description=project.description or "",
-        task_dicts=task_dicts,
         entries=catalog_entries,
         project_id=project_id,
     )
@@ -67,7 +62,6 @@ def plan_runtime_environment(
     if selection.selected_image:
         catalog_entry = get_entry_by_image(selection.selected_image)
         if catalog_entry is None:
-            # LLM returned an image name not in the catalog — treat as no match.
             logger.warning(
                 "catalog_selector_unknown_image project_id=%s image=%s",
                 project_id,
@@ -82,8 +76,7 @@ def plan_runtime_environment(
             catalog_entry.runtime_type,
         )
 
-    # --- Step 2: dependency planning via LLM ---
-    # Pass the catalog choice as a hint so the planner selects compatible packages.
+    # --- Step 2: full environment planning via LLM ---
     catalog_hint = (
         f"{catalog_entry.image_name} ({catalog_entry.description})" if catalog_entry else None
     )
@@ -91,8 +84,8 @@ def plan_runtime_environment(
     output = call_environment_planner(
         project_name=project.name,
         project_description=project.description or "",
-        atomic_tasks=task_dicts,
         catalog_hint=catalog_hint,
+        existing_environment_context=existing_environment_context,
         project_id=project_id,
     )
 

@@ -15,7 +15,12 @@ from app.execution_engine.contracts import (
 )
 from app.models.execution_run import ExecutionRun
 from app.models.project import Project
-from app.models.task import TASK_STATUS_FAILED, TASK_STATUS_PARTIAL, Task
+from app.models.task import (
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PARTIAL,
+    Task,
+    format_acceptance_criteria,
+)
 from app.services.execution_runs import get_execution_run
 from app.services.local_workspace_runtime import LocalWorkspaceRuntime
 from app.services.project_memory_service import build_project_operational_context
@@ -387,14 +392,18 @@ def build_placeholder_execution_request(
         proposed_solution=task.proposed_solution,
         implementation_notes=task.implementation_notes,
         implementation_steps=task.implementation_steps,
-        acceptance_criteria=task.acceptance_criteria,
+        acceptance_criteria=format_acceptance_criteria(task.acceptance_criteria),
         tests_required=task.tests_required,
         technical_constraints=task.technical_constraints,
         out_of_scope=task.out_of_scope,
         task_type=task.task_type,
         executor_type=resolved_executor_type,
         verification_level=getattr(task, "verification_level", "runtime") or "runtime",
-        success_criteria=_split_multiline_text(task.acceptance_criteria),
+        success_criteria=(
+            [c.strip() for c in task.acceptance_criteria if c.strip()]
+            if isinstance(task.acceptance_criteria, list)
+            else _split_multiline_text(task.acceptance_criteria)
+        ),
         constraints=_split_multiline_text(task.technical_constraints),
         allowed_paths=[],
         blocked_paths=[],

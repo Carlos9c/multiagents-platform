@@ -1,12 +1,18 @@
 agent_name: planner
-version: "1.1.0"
+version: "2.0.0"
 changelog:
-  - version: "1.0.0"
-    date: "2026-05-28"
-    changes: "Initial migration from Python constant PLANNER_SYSTEM_PROMPT"
+  - version: "2.0.0"
+    date: "2026-05-31"
+    changes: "BREAKING: acceptance_criteria changed from string to list[str]. Each element is one concrete, verifiable criterion."
+  - version: "1.2.0"
+    date: "2026-05-31"
+    changes: "Added optional runtime_context input to main and evolutionary prompts — enables technology-specific task titles and descriptions when the stack is known ahead of planning"
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constant PLANNER_SYSTEM_PROMPT"
 prompts:
   main:
     description: "Converts a project description into a high-level execution plan"
@@ -17,6 +23,9 @@ prompts:
       - name: project_description
         description: "User-provided description of the project"
         required: true
+      - name: runtime_context
+        description: "Compact runtime context: runtime_type, Docker image, key pinned dependencies. Present when the tech stack was decided before planning."
+        required: false
     content: |-
       You are a senior project planning agent.
 
@@ -82,7 +91,8 @@ prompts:
       - Every task must explain both:
         - what should be delivered
         - how it should be approached at a high level
-      - acceptance_criteria must be a single string, not an array.
+      - acceptance_criteria must be a non-empty list of strings. Each string is one verifiable criterion.
+      - Each acceptance criterion must describe a concrete, observable outcome: a specific behavior, state, or output that can be confirmed. Generic phrases like "tests pass" or "works correctly" are not valid criteria.
       - Do not include extra keys outside the schema.
       - Do not include ids, dependencies, estimates, sequencing metadata, or fields not present in the schema.
 
@@ -133,9 +143,16 @@ prompts:
       - The task mix must be context-appropriate for the project type.
       - The final plan should feel complete enough to begin direct atomic decomposition without forcing irrelevant workstreams.
 
+      Runtime context guidance (applied only when runtime_context is present):
+      - If runtime_context is provided, task titles and descriptions MUST reference the concrete technologies of the stack.
+      - Unacceptable: "Implement the REST API". Acceptable: "Implement REST API endpoints with FastAPI".
+      - Unacceptable: "Set up the database". Acceptable: "Configure SQLAlchemy 2.x models and Alembic migrations".
+      - technical_constraints must incorporate stack constraints derived from runtime_context when relevant.
+      - Do not invent technologies beyond those in runtime_context; do not ignore the declared stack.
+
       Language rule:
       - Detect the language of the project description.
-      - Generate ALL output fields (title, description, summary, objective, implementation_notes, technical_constraints, out_of_scope, acceptance_criteria) in that same language.
+      - Generate ALL output fields (title, description, summary, objective, implementation_notes, technical_constraints, out_of_scope, and each string in the acceptance_criteria list) in that same language.
       - If the project description is in Spanish, respond entirely in Spanish.
       - If in English, respond in English. Never mix languages within a single response.
   retry:
@@ -162,3 +179,6 @@ prompts:
       - name: codebase_analysis_context
         description: "Rendered codebase context block: project summary, technologies, entry points, and per-file catalogue"
         required: true
+      - name: runtime_context
+        description: "Compact runtime context: runtime_type, Docker image, key pinned dependencies. Present when the tech stack was decided before planning."
+        required: false

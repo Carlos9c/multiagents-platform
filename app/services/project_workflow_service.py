@@ -30,6 +30,7 @@ from app.services.environment.contracts import (
     EnvironmentValidationError,
     RuntimeSpec,
 )
+from app.services.environment.manifest_reader import read_manifest_content
 from app.services.environment.planner import plan_runtime_environment
 from app.services.environment.validator import EnvironmentValidator
 from app.services.execution_plan_service import (
@@ -194,15 +195,25 @@ def _get_pending_atomic_generation_parents(
     return parents
 
 
-def _run_planner_if_needed(db: Session, project_id: int) -> bool:
+def _run_planner_if_needed(
+    db: Session,
+    project_id: int,
+    *,
+    runtime_context: str | None = None,
+) -> bool:
     if _has_tasks_at_level(db, project_id, PLANNING_LEVEL_HIGH_LEVEL):
         return True
 
     analysis = CodebaseAnalysisService().get_analysis(project_id)
     if analysis is not None:
-        generate_project_plan_with_analysis(db=db, project_id=project_id, analysis=analysis)
+        generate_project_plan_with_analysis(
+            db=db,
+            project_id=project_id,
+            analysis=analysis,
+            runtime_context=runtime_context,
+        )
     else:
-        generate_project_plan(db=db, project_id=project_id)
+        generate_project_plan(db=db, project_id=project_id, runtime_context=runtime_context)
     return True
 
 
@@ -211,6 +222,7 @@ def _run_optional_technical_refinement_phase(
     project_id: int,
     *,
     enable_technical_refinement: bool,
+    runtime_context: str | None = None,
 ) -> bool:
     if not enable_technical_refinement:
         return True
@@ -229,6 +241,7 @@ def _run_optional_technical_refinement_phase(
             db=db,
             project_id=project_id,
             task_id=task.id,
+            runtime_context=runtime_context,
         )
 
     return True
@@ -239,6 +252,7 @@ def _run_atomic_generation_phase(
     project_id: int,
     *,
     enable_technical_refinement: bool,
+    runtime_context: str | None = None,
 ) -> bool:
     if enable_technical_refinement:
         parent_levels_in_order = [
@@ -252,6 +266,7 @@ def _run_atomic_generation_phase(
         ]
 
     processed_any_parent = False
+    accumulated_siblings: list[dict] = []
 
     for planning_level in parent_levels_in_order:
         parents = _get_pending_atomic_generation_parents(
@@ -262,12 +277,20 @@ def _run_atomic_generation_phase(
         )
 
         for task in parents:
-            generate_atomic_tasks(
+            result = generate_atomic_tasks(
                 db=db,
                 project_id=project_id,
                 task_id=task.id,
+                runtime_context=runtime_context,
+                sibling_atomic_summary=accumulated_siblings if accumulated_siblings else None,
             )
             processed_any_parent = True
+            for atomic_id in result.get("atomic_task_ids", []):
+                atomic_task = db.get(Task, atomic_id)
+                if atomic_task:
+                    accumulated_siblings.append(
+                        {"title": atomic_task.title, "task_type": atomic_task.task_type}
+                    )
 
     if processed_any_parent:
         return True
@@ -899,6 +922,39 @@ def _build_environment_manual_review_result(
     )
 
 
+def _format_runtime_context(spec: RuntimeSpec) -> str:
+    """Serialize RuntimeSpec to the compact block injected into planning prompts."""
+    if spec.dependencies:
+        shown = spec.dependencies[:12]
+        deps_text = ", ".join(f"{d.name}=={d.version}" for d in shown)
+        if len(spec.dependencies) > 12:
+            deps_text += f" ... ({len(spec.dependencies)} total)"
+    else:
+        deps_text = "none (build-system managed)"
+
+    return (
+        f"Runtime context:\n"
+        f"- runtime_type: {spec.runtime_type}\n"
+        f"- image: {spec.image}\n"
+        f"- key dependencies: {deps_text}"
+    )
+
+
+def _detect_existing_environment(project_id: int) -> str | None:
+    """Return manifest content from the project's source directory, if any.
+
+    Returns None for brand-new projects (empty source directory) and for any
+    storage errors. Present only for evolutionary projects that have already
+    had source code imported.
+    """
+    try:
+        paths = ProjectStorageService().get_project_paths(project_id)
+        return read_manifest_content(paths.source_dir)
+    except Exception as exc:
+        logger.debug("manifest_detection_skipped project_id=%s reason=%s", project_id, exc)
+        return None
+
+
 def teardown_project_environment(project_id: int) -> None:
     """Stop the project's Docker container and remove its session entry.
 
@@ -924,25 +980,8 @@ def run_project_workflow(
 
     _bootstrap_project_storage_for_execution(project_id=project_id)
 
-    planning_completed = _run_planner_if_needed(db=db, project_id=project_id)
-    refinement_completed = _run_optional_technical_refinement_phase(
-        db=db,
-        project_id=project_id,
-        enable_technical_refinement=enable_technical_refinement,
-    )
-    atomic_generation_completed = _run_atomic_generation_phase(
-        db=db,
-        project_id=project_id,
-        enable_technical_refinement=enable_technical_refinement,
-    )
-
-    if not atomic_generation_completed:
-        raise ProjectWorkflowServiceError(
-            "Workflow could not produce or detect atomic tasks after planning/decomposition."
-        )
-
-    # --- Runtime environment phases ---
-    atomic_tasks = _get_atomic_tasks(db=db, project_id=project_id)
+    # --- Runtime environment phases (run BEFORE task generation) ---
+    existing_env_context = _detect_existing_environment(project_id)
     runtime_spec: RuntimeSpec | None = None
     bootstrapper = EnvironmentBootstrapper()
 
@@ -950,7 +989,7 @@ def run_project_workflow(
         runtime_spec = plan_runtime_environment(
             db=db,
             project_id=project_id,
-            atomic_tasks=atomic_tasks,
+            existing_environment_context=existing_env_context,
         )
         logger.info(
             "workflow_environment_planned project_id=%s runtime_type=%s",
@@ -976,9 +1015,9 @@ def run_project_workflow(
         )
         return _build_environment_manual_review_result(
             project_id=project_id,
-            planning_completed=planning_completed,
-            refinement_completed=refinement_completed,
-            atomic_generation_completed=atomic_generation_completed,
+            planning_completed=False,
+            refinement_completed=False,
+            atomic_generation_completed=False,
             reason=f"Environment bootstrap failed and requires manual review: {exc}",
         )
 
@@ -997,12 +1036,37 @@ def run_project_workflow(
         bootstrapper.teardown(project_id=project_id)
         return _build_environment_manual_review_result(
             project_id=project_id,
-            planning_completed=planning_completed,
-            refinement_completed=refinement_completed,
-            atomic_generation_completed=atomic_generation_completed,
+            planning_completed=False,
+            refinement_completed=False,
+            atomic_generation_completed=False,
             reason=f"Environment validation failed and requires manual review: {exc}",
         )
     # --- End of environment phases ---
+
+    runtime_context = _format_runtime_context(runtime_spec) if runtime_spec else None
+
+    planning_completed = _run_planner_if_needed(
+        db=db,
+        project_id=project_id,
+        runtime_context=runtime_context,
+    )
+    refinement_completed = _run_optional_technical_refinement_phase(
+        db=db,
+        project_id=project_id,
+        enable_technical_refinement=enable_technical_refinement,
+        runtime_context=runtime_context,
+    )
+    atomic_generation_completed = _run_atomic_generation_phase(
+        db=db,
+        project_id=project_id,
+        enable_technical_refinement=enable_technical_refinement,
+        runtime_context=runtime_context,
+    )
+
+    if not atomic_generation_completed:
+        raise ProjectWorkflowServiceError(
+            "Workflow could not produce or detect atomic tasks after planning/decomposition."
+        )
 
     iterations: list[WorkflowIterationSummary] = []
     completed_batches: list[str] = []

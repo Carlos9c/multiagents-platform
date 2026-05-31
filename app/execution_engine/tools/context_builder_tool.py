@@ -9,7 +9,7 @@ from app.execution_engine.context_selection import (
     ContextBuilderResult,
     HistoricalTaskCatalogEntry,
 )
-from app.models.task import TASK_STATUS_COMPLETED, Task
+from app.models.task import TASK_STATUS_COMPLETED, Task, format_acceptance_criteria
 from app.services.analysis import CodebaseAnalysisService
 from app.services.execution_runs import get_completion_execution_run_for_task
 from app.services.project_memory_service import build_project_operational_context
@@ -173,7 +173,7 @@ def _build_completed_task_catalog(
                 description=task.description,
                 summary=task.summary,
                 objective=task.objective,
-                acceptance_criteria=task.acceptance_criteria,
+                acceptance_criteria=format_acceptance_criteria(task.acceptance_criteria),
                 proposed_solution=task.proposed_solution,
                 task_type=task.task_type,
                 executor_type=task.executor_type,

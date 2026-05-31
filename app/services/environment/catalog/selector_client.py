@@ -37,20 +37,17 @@ def _build_catalog_text(entries: list[CatalogEntry]) -> str:
 def _build_selector_user_prompt(
     project_name: str,
     project_description: str,
-    task_titles: list[str],
     entries: list[CatalogEntry],
 ) -> str:
     from app.services.prompt_loader import prompt_loader
 
     catalog_text = _build_catalog_text(entries)
-    tasks_text = "\n".join(f"  - {t}" for t in task_titles[:15]) or "  (no tasks yet)"
     prompt_loader.validate_builder_inputs(
         "catalog_selector",
         "main",
         {
             "project_name": project_name,
             "project_description": project_description,
-            "task_titles": task_titles,
             "available_catalog_images": entries,
         },
     )
@@ -58,9 +55,6 @@ def _build_selector_user_prompt(
 
 Project description:
 {project_description}
-
-Atomic task titles (sample):
-{tasks_text}
 
 Available catalog images:
 {catalog_text}
@@ -72,17 +66,14 @@ Return the EXACT image_name string as it appears above."""
 def select_catalog_image(
     project_name: str,
     project_description: str,
-    task_dicts: list[dict],
     entries: list[CatalogEntry],
     project_id: int | None = None,
 ) -> CatalogSelectionOutput:
     provider = get_llm_provider()
-    task_titles = [t.get("title", "") for t in task_dicts if t.get("title")]
 
     user_prompt = _build_selector_user_prompt(
         project_name=project_name,
         project_description=project_description,
-        task_titles=task_titles,
         entries=entries,
     )
 
@@ -110,7 +101,6 @@ def select_catalog_image(
                 "project_id": project_id,
                 "inputs": {
                     "project_name": project_name,
-                    "task_titles_count": len(task_titles),
                     "catalog_images_count": len(entries),
                 },
                 "reasoning": output.reasoning,

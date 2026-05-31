@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -94,6 +94,15 @@ def is_valid_task_type(task_type: str | None) -> bool:
     return task_type in VALID_TASK_TYPES
 
 
+def format_acceptance_criteria(ac: list[str] | str | None) -> str:
+    """Format acceptance_criteria for prompt injection. Handles list (new) and str (legacy)."""
+    if not ac:
+        return ""
+    if isinstance(ac, list):
+        return "\n".join(f"- {c.strip()}" for c in ac if c.strip())
+    return str(ac)
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
@@ -118,7 +127,9 @@ class Task(Base):
     proposed_solution: Mapped[str | None] = mapped_column(Text, nullable=True)
     implementation_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     implementation_steps: Mapped[str | None] = mapped_column(Text, nullable=True)
-    acceptance_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
+    acceptance_criteria: Mapped[list[str] | str | None] = mapped_column(JSON, nullable=True)
+    estimated_complexity: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    depends_on_task_titles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     tests_required: Mapped[str | None] = mapped_column(Text, nullable=True)
     technical_constraints: Mapped[str | None] = mapped_column(Text, nullable=True)
     out_of_scope: Mapped[str | None] = mapped_column(Text, nullable=True)

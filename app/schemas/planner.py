@@ -13,7 +13,7 @@ class PlannedTask(BaseModel):
     summary: str = Field(min_length=20)
     objective: str = Field(min_length=20)
     implementation_notes: str = Field(min_length=40)
-    acceptance_criteria: str = Field(min_length=20)
+    acceptance_criteria: list[str] = Field(min_length=1)
     technical_constraints: str = Field(min_length=10)
     out_of_scope: str = Field(min_length=10)
     priority: Priority

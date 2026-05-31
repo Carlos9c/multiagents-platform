@@ -38,6 +38,15 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Cambios recientes significativos
 
+- **Mejoras de generación de tareas atómicas (Fases 0–3 + 5B/5C)**: serie de mejoras al pipeline de planificación que incrementan la especificidad, coherencia y calidad de secuenciación de las tareas generadas:
+  - **(Fase 0 — entorno primero)** `CatalogSelector` y `EnvironmentPlanner` se ejecutan *antes* del `Planner` y del `AtomicGenerator`, eliminando la dependencia circular: las tareas ya conocen el stack tecnológico cuando se generan.
+  - **(Fase 1 — runtime context flow)** `RuntimeSpec` serializado se inyecta en `planner.py`, `technical_task_refiner.py` y `atomic_task_generator.py`. El generador atómico aplica la restricción más fuerte: `proposed_solution` y `implementation_steps` deben referenciar las tecnologías concretas del stack (FastAPI, SQLAlchemy, etc.), no abstracciones genéricas.
+  - **(Fase 2 — sibling awareness)** El acumulador de `_run_atomic_generation_phase` pasa un resumen compacto `{title, task_type}` de las tareas atómicas ya generadas (`sibling_atomic_summary`) a cada llamada sucesiva del generador atómico. Evita duplicados y solapes entre ramas de distintos padres dentro del mismo plan.
+  - **(Fase 3 — acceptance criteria estructurados)** `PlannedTask.acceptance_criteria` y `AtomicTaskOutput.acceptance_criteria` cambian de `str` a `list[str]` (BREAKING: bumps MAJOR en ambos YAMLs). Cada elemento es un criterio verificable independiente. La columna en BD es JSON. Validación post-generación: suma ≥ 30 chars para tareas de alto nivel; ≥ 15 chars por criterio para atómicas. `format_acceptance_criteria()` en `task.py` maneja listas nuevas y strings legacy de forma transparente.
+  - **(Fase 5B — estimated_complexity)** Nuevo campo requerido `estimated_complexity: Literal["XS","S","M","L","XL"]` en `AtomicTaskOutput` y `CandidateAtomicTask`. El generador atómico asigna complejidad por tarea; el secuenciador la usa para balancear la carga de los batches (evita front-loading de múltiples tareas L/XL) sin necesidad de re-leer los pasos de implementación.
+  - **(Fase 5C — depends_on_task_titles)** Nuevo campo requerido `depends_on_task_titles: list[str]` en `AtomicTaskOutput`. El generador atómico declara dependencias inter-tarea usando títulos exactos de `sibling_atomic_summary`. El secuenciador las trata como restricciones de ordenación de verdad absoluta (traduce títulos a IDs y las añade a `inferred_dependencies` con prioridad sobre sus propias inferencias). `CandidateAtomicTask` incluye el campo; `None` en BD se convierte a `[]` al construir el candidato.
+  Bumps de versión: `planner.yaml` 2.0.0, `atomic_task_generator.yaml` 3.0.0, `execution_sequencer.yaml` 1.2.0. Supervisores de planner, atomic_task_generator y execution_sequencer actualizados con criterios de evaluación para los nuevos campos. Dos migraciones Alembic: `c4d5e6f7a8b9` (columna JSON para acceptance_criteria) y `d5e6f7a8b9c0` (columnas estimated_complexity y depends_on_task_titles).
+
 - **Motor QA completo — Fases 1 a 9 (11 agentes + Supervisor QA + integración Aria)**: nueva capa de aseguramiento de calidad adversarial autónomo en `app/services/qa/`. Incluye modelos de datos `QASession` y `QAFinding` con migración Alembic (`b2c3d4e5f6a7`); contratos unificados (`QARequest`, `QAFindingDetail`, `ProbeRecord`, `QAResult`, `RemediationTask`) en `contracts.py`; 7 estrategias por tipo de producto (`rest_api`, `graphql_api`, `web_app`, `cli_tool`, `library`, `mobile_android`, `desktop_app`) con listas `allowed_agents` exhaustivas incluyendo todos los agentes Fase 5 y Fase 7-9; `QABootstrapper` con detección LLM del comando de build y compilación APK en Docker (timeout 600 s); `QAOrchestrator` con bucle LLM de hasta 8 rondas con 5 validaciones post-decisión y 3 guardas de presupuesto pre-LLM; 5 agentes Fase 5 (functional_tester, security_scanner, contract_validator, performance_profiler, apk_installer) con degradación controlada sin Docker; 6 agentes Fase 7-9 (functional_qa_agent con análisis en dos pasadas, boundary_qa_agent con corpus determinista, adversarial_qa_agent, security_qa_agent con checklist OWASP completo A01-A10, performance_qa_agent con umbrales deterministas + análisis LLM, regression_qa_agent con comparación semántica entre sesiones); synthesis_agent con síntesis LLM y fallback determinístico; `producer_agent` en todos los `QAFindingDetail` y filas `QAFinding` para atribución correcta; `probes` JSON en `QASession` para historial completo de sondeos; 7 evaluadores del Supervisor (`functional_qa_agent_evaluator` … `qa_session_evaluator`) con evidencia filtrada por `producer_agent == agent_name`; `QATool` integrado en Aria (situaciones A/B/C/D, `_evaluate_yes_no` con LLM, creación de Tasks de remediación); API con endpoints `POST /qa/{id}/run`, `GET /qa/{id}/sessions`, `GET /qa/{id}/sessions/{sid}`, `POST /projects/{id}/conversations/notify-qa-completed`; documentación completa en `app/services/qa/QA.md`. **Bugs críticos corregidos**: los 6 agentes Fase 7-9 estaban ausentes de todas las listas `allowed_agents` (código muerto en producción), doble encoding JSON en `findings_summary`, desalineación de constantes de veredicto (`passed_with_warnings` → `partial`) y categorías (`crash` → `usability`, `accessibility`, etc.), `accessibility_checker` fantasma en `web_app_strategy`, y descripciones de agentes Fase 7-9 ausentes del catálogo del orquestador.
 
 - **Sistema Supervisor completo (22 evaluadores + análisis agregado)**: nueva capa de supervisión en `app/services/supervisor/` que evalúa retrospectivamente la calidad de los 22 agentes del sistema. Cada evaluador lee los trace files del proyecto (`planning_trace.jsonl`, `execution_trace.jsonl`) y los runs de ejecución de la BD, llama al LLM con el historial completo del agente, y produce un `EvaluatorOutput` con veredicto y hallazgos. El veredicto global usa media ponderada con umbrales 1.7/1.3 (no worst-case). Incluye `supervisor_runner.py` (orquestador de los 22 evaluadores), `supervisor_synthesizer.py` (síntesis cross-agent en lenguaje natural), un analizador agregado (`aggregate_runner.py`) que detecta patrones de degradación en 5–20 proyectos, y trazado histórico de prompts via `git show` para evaluar agentes contra el prompt activo en el momento del run. Resultados persistidos en `SupervisorReport` y `AgentEvaluation`. API: `POST /supervisor/projects/{project_id}/run`, `POST /supervisor/aggregate`.
@@ -66,7 +75,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Números actuales
 
-- **1409 tests unitarios** — todos passing
+- **1507 tests unitarios** — todos passing
 - **12 tests de integración** (Docker) — se ejecutan con `-m integration`
 - **0 failures** en CI
 
@@ -278,10 +287,14 @@ Opcional (controlado por `Project.enable_technical_refinement`). Refina cada tar
 Descompone tareas `high_level` o `refined` en tareas atómicas ejecutables:
 
 - Límites: `MAX_ATOMIC_TASKS_PER_PARENT = 8`, `MAX_IMPLEMENTATION_STEPS_PER_ATOMIC = 20`
-- Valida longitud mínima de campos: `implementation_notes` ≥ 60 chars, `acceptance_criteria` ≥ 30 chars
 - Los padres válidos tienen `planning_level ∈ {high_level, refined}`
 - Produce tareas con `planning_level="atomic"`, `executor_type="pending_engine_routing"`
 - Asigna `verification_level` (`"runtime"` | `"none"`) por tarea: `"none"` para cambios puramente estructurales en proyectos compilados donde la verificación en contenedor no aportaría valor
+- `acceptance_criteria` es `list[str]` — cada elemento es un criterio verificable independiente (≥ 15 chars cada uno); `format_acceptance_criteria()` serializa la lista como bullet points para inyección en prompts y maneja strings legacy
+- `estimated_complexity` (`XS` | `S` | `M` | `L` | `XL`) — estimación de esfuerzo de ejecución asignada por el LLM y consumida por el secuenciador para balancear batches
+- `depends_on_task_titles` (`list[str]`) — dependencias inter-tarea pre-declaradas usando títulos exactos de `sibling_atomic_summary`; el secuenciador las trata como restricciones de ordenación de verdad absoluta
+- Recibe `sibling_atomic_summary` (acumulado por `_run_atomic_generation_phase`) para evitar duplicados entre ramas de distintos padres
+- Recibe `runtime_context` para inyectar el stack tecnológico en las tareas generadas; `proposed_solution` e `implementation_steps` deben referenciar las tecnologías concretas del stack
 
 ### Sequencing — Execution Plan Service (`app/services/execution_plan_service.py`)
 
@@ -300,7 +313,7 @@ Construye un `ExecutionPlan` con batches secuenciados a partir de las tareas at�
 | `ExecutionBatch` | Grupo de tareas: `batch_id`, `batch_index`, `task_ids`, `checkpoint_id`, `is_patch_batch`, `anchor_batch_index`, `patch_index` |
 | `CheckpointDefinition` | Punto de evaluación: `checkpoint_id`, `after_batch_id`, `evaluation_focus` (lista de `CheckpointEvaluationFocus`) |
 | `ProjectExecutionContext` | Contexto del proyecto inyectado en el plan y en el LLM |
-| `CandidateAtomicTask` | Snapshot de tarea atómica como input al secuenciador |
+| `CandidateAtomicTask` | Snapshot de tarea atómica como input al secuenciador; incluye `ordering_hint` (setup_first/depends_on_setup/standard), `estimated_complexity` (XS–XL) y `depends_on_task_titles` (dependencias pre-declaradas por el generador) |
 | `ExecutionStateSummary` | Estado de ejecución actual: tareas completadas, pendientes, fallidas |
 
 ---
@@ -1051,7 +1064,7 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**1409 tests unitarios + 12 tests de integración — todos passing.**
+**1507 tests unitarios + 12 tests de integración — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
@@ -1087,6 +1100,10 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 | QA — agentes Fase 7-9 | `qa/test_new_qa_agents.py` |
 | QA — end-to-end | `qa/test_qa_e2e.py` |
 | Supervisor — evaluadores QA | `supervisor/test_qa_evaluators.py` |
+| Mejoras de generación — acceptance criteria (Fase 3) | `test_acceptance_criteria_phase3.py` |
+| Mejoras de generación — estimated_complexity + depends_on_task_titles (Fases 5B/5C) | `test_phase5bc_complexity_and_deps.py` |
+| Mejoras de generación — sibling accumulator (Fase 2) | `test_sibling_atomic_accumulator.py` |
+| Mejoras de generación — runtime context injection (Fase 1) | `test_runtime_context_injection.py` |
 
 ---
 
@@ -1134,19 +1151,22 @@ Tests que cubran el flujo completo con WebSocket real: gathering → Start → e
 
 ### Baja prioridad
 
-**13. Historial comparativo de sesiones QA en el frontend**
+**13. Panel de complejidad del plan de ejecución en el frontend**
+Mostrar `estimated_complexity` por tarea en el panel de tareas del proyecto: un badge de color (XS=verde, S=azul, M=amarillo, L=naranja, XL=rojo) junto al título de cada tarea atómica. En la vista del batch actual, indicar la carga agregada del batch (suma ponderada de complejidades) para que el usuario identifique visualmente batches sobrecargados. Los datos ya están en BD.
+
+**14. Historial comparativo de sesiones QA en el frontend**
 Mostrar gráficamente la evolución de hallazgos entre sesiones QA sucesivas del mismo proyecto: tendencia de `high` + `critical` en el tiempo, hallazgos nuevos vs. resueltos por sesión (datos disponibles vía `regression_qa_agent`), y duración por sesión.
 
-**14. Precisión del validador en decisiones parciales**
+**15. Precisión del validador en decisiones parciales**
 El `command_runner_agent_validator` puede declarar `partial` incluso cuando los tests pasan. Ampliar la lista de markers en `_task_looks_like_executable_implementation` (persistence, storage, data) o relajar el criterio de normalización para tareas con `exit_code=0`.
 
-**15. Métricas de ejecución por proyecto**
+**16. Métricas de ejecución por proyecto**
 Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de episodios de revisión por tarea, tiempo medio hasta confirmación. Datos para ajustar parámetros de orquestación y detectar proyectos problemáticos antes del iteration limit.
 
-**16. Contexto estructural del repositorio en `context_selection_agent`**
+**17. Contexto estructural del repositorio en `context_selection_agent`**
 El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto.
 
-**17. Mantenimiento del catálogo de imágenes Docker**
+**18. Mantenimiento del catálogo de imágenes Docker**
 Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter stable), política de versionado en el catálogo, y estrategia de publicación en un registry privado para evitar builds locales en cada máquina.
 
 ---

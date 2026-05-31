@@ -38,7 +38,7 @@ def test_planner_uses_base_planner_when_no_stored_analysis(db_session, make_proj
         result = _run_planner_if_needed(db=db_session, project_id=project.id)
 
     assert result is True
-    mock_base.assert_called_once_with(db=db_session, project_id=project.id)
+    mock_base.assert_called_once_with(db=db_session, project_id=project.id, runtime_context=None)
     mock_evo.assert_not_called()
 
 
@@ -57,5 +57,7 @@ def test_planner_uses_evolutionary_planner_when_stored_analysis_exists(db_sessio
         result = _run_planner_if_needed(db=db_session, project_id=project.id)
 
     assert result is True
-    mock_evo.assert_called_once_with(db=db_session, project_id=project.id, analysis=fake_analysis)
+    mock_evo.assert_called_once_with(
+        db=db_session, project_id=project.id, analysis=fake_analysis, runtime_context=None
+    )
     mock_base.assert_not_called()

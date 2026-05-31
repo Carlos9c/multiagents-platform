@@ -109,6 +109,8 @@ def _build_candidate_atomic_task(
         parent_high_level_title=parent_high_level_title,
         implementation_steps=task.implementation_steps,
         acceptance_criteria=task.acceptance_criteria,
+        estimated_complexity=task.estimated_complexity,
+        depends_on_task_titles=task.depends_on_task_titles or [],
         tests_required=task.tests_required,
         technical_constraints=task.technical_constraints,
         out_of_scope=task.out_of_scope,

@@ -1,12 +1,15 @@
 agent_name: technical_task_refiner
-version: "1.1.0"
+version: "1.2.0"
 changelog:
-  - version: "1.0.0"
-    date: "2026-05-28"
-    changes: "Initial migration from Python constant TECHNICAL_TASK_REFINER_SYSTEM_PROMPT"
+  - version: "1.2.0"
+    date: "2026-05-31"
+    changes: "Added optional runtime_context input — enables concrete technology references in refined task proposed_solution and implementation_steps when the stack is known"
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constant TECHNICAL_TASK_REFINER_SYSTEM_PROMPT"
 prompts:
   main:
     description: "Converts one high-level task into refined technical or execution-oriented tasks"
@@ -43,6 +46,9 @@ prompts:
         required: false
       - name: parent_task_out_of_scope
         description: "What is out of scope for the high-level task"
+        required: false
+      - name: runtime_context
+        description: "Compact runtime context: runtime_type, Docker image, key pinned dependencies. Present when the tech stack was decided before planning."
         required: false
     content: |-
       You are a senior project refinement agent.
@@ -131,6 +137,12 @@ prompts:
       - onboarding: produces contributor setup guides, quickstart docs, or handoff material
       - configuration: produces environment setup, CI/CD pipelines, tooling config, or infrastructure-as-code
       - refactor: restructures existing code without changing external behavior
+
+      Runtime context guidance (applied only when runtime_context is present):
+      - If runtime_context is provided, proposed_solution and implementation_steps MUST reference the concrete technologies of the stack.
+      - Unacceptable: "Implement the data access layer". Acceptable: "Implement the data access layer using SQLAlchemy 2.x ORM with the Session factory configured in the RuntimeSpec".
+      - technical_constraints must incorporate relevant constraints derived from runtime_context.
+      - Do not invent technologies beyond those in runtime_context; do not ignore the declared stack.
 
       Future-proofing rules:
       - Refined tasks should remain compatible with a future multi-executor system.

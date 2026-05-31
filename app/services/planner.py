@@ -35,8 +35,13 @@ def validate_task_quality(tasks: list[Task]) -> None:
         if len((task.implementation_notes or "").strip()) < 60:
             raise ValueError(f"implementation_notes too short in task: {task.title}")
 
-        if len((task.acceptance_criteria or "").strip()) < 30:
-            raise ValueError(f"acceptance_criteria too short in task: {task.title}")
+        ac = task.acceptance_criteria
+        if isinstance(ac, list):
+            if not ac or sum(len(c) for c in ac) < 30:
+                raise ValueError(f"acceptance_criteria too short in task: {task.title}")
+        else:
+            if len((ac or "").strip()) < 30:
+                raise ValueError(f"acceptance_criteria too short in task: {task.title}")
 
         if len((task.out_of_scope or "").strip()) < 20:
             raise ValueError(f"out_of_scope too short in task: {task.title}")
@@ -45,7 +50,12 @@ def validate_task_quality(tasks: list[Task]) -> None:
             raise ValueError(f"technical_constraints too short in task: {task.title}")
 
 
-def generate_project_plan(db: Session, project_id: int) -> dict:
+def generate_project_plan(
+    db: Session,
+    project_id: int,
+    *,
+    runtime_context: str | None = None,
+) -> dict:
     project = db.get(Project, project_id)
     if not project:
         raise ValueError(f"Project {project_id} not found")
@@ -53,6 +63,7 @@ def generate_project_plan(db: Session, project_id: int) -> dict:
     planner_output: PlannerOutput = call_planner_model(
         project_name=project.name,
         project_description=project.description or "",
+        runtime_context=runtime_context,
         project_id=project_id,
     )
 
@@ -119,6 +130,8 @@ def generate_project_plan_with_analysis(
     db: Session,
     project_id: int,
     analysis: object,
+    *,
+    runtime_context: str | None = None,
 ) -> dict:
     project = db.get(Project, project_id)
     if not project:
@@ -128,6 +141,7 @@ def generate_project_plan_with_analysis(
         project_name=project.name,
         project_description=project.description or "",
         codebase_analysis=analysis,
+        runtime_context=runtime_context,
         project_id=project_id,
     )
 
