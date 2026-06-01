@@ -31,7 +31,7 @@ COMMAND_RUNNER_AGENT_VALIDATOR_EVALUATOR_SYSTEM_PROMPT = prompt_loader.get(
     "command_runner_agent_validator_evaluator"
 )
 
-_AGENT_NAME = "command_runner_agent_validator"
+_AGENT_NAME = "command_runner_agent"
 _VALIDATOR_NAME = "command_runner_agent_validator"
 
 
@@ -99,7 +99,7 @@ Return valid JSON with all required fields:
 class CommandRunnerAgentValidatorEvaluator:
     """Evaluates the command_runner_agent_validator's calibration for a project."""
 
-    AGENT_NAME = _AGENT_NAME
+    AGENT_NAME = _VALIDATOR_NAME
     VALIDATOR_NAME = _VALIDATOR_NAME
 
     def evaluate(

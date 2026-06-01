@@ -1,9 +1,12 @@
 agent_name: test_builder_agent_validator_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor evaluator for test_builder_agent_validator calibration and findings quality"
+  - version: "1.1.0"
+    date: "2026-06-01"
+    changes: "Added dimension 6: infrastructure gap detection — flagging over-approval of suites that cannot be collected due to missing path setup or runner configuration"
 prompts:
   main:
     description: "Evaluates the test_builder_agent_validator's calibration accuracy and findings quality"
@@ -72,13 +75,33 @@ prompts:
       5. Consistency
          On multi-run tasks, does the validator apply consistent coverage criteria?
 
+      6. Infrastructure gap detection
+         The validator is expected to detect structurally unrunnable test suites — including
+         those that fail during runner collection due to missing path setup or infrastructure.
+
+         Flag over-approval when:
+         - The validator gave decision=completed but changed_files contains no infrastructure
+           file (no conftest.py, jest.config.*, spec_helper.rb, etc.) AND the test files import
+           from the project's own internal packages — a suite that imports internal modules
+           without a path-resolution infrastructure file is structurally unrunnable.
+         - A subsequent run (visible in runs[]) shows a collection-time failure (import error,
+           module not found, fixture unavailable) immediately after the validator approved the
+           suite — this is direct evidence of over-approval of an uncollectable suite.
+
+         A validator that systematically misses infrastructure gaps forces the orchestrator into
+         unnecessary repair loops where test logic is modified instead of infrastructure being created.
+         This is a calibration defect with direct cost implications.
+
       Executor cross-context (work_summary, changed_files paths) is provided for reference.
 
       Verdict scale:
-      - healthy: accurate placeholder detection, specific coverage findings, calibrated decisions
-      - needs_attention: occasional vague findings or minor calibration gaps
-      - degraded: systematic over-approval of placeholder tests, or consistently vague findings
-        that do not help the recovery planner understand what tests are missing
+      - healthy: accurate placeholder detection, specific coverage findings, calibrated decisions,
+        correct identification of structurally unrunnable suites (missing infrastructure)
+      - needs_attention: occasional vague findings, minor calibration gaps, or one missed
+        infrastructure-gap that was caught on the next run
+      - degraded: systematic over-approval of placeholder tests, consistently vague findings
+        that do not help the recovery planner, or repeated approval of test suites that cannot
+        be collected due to missing infrastructure
 
       Reference run_id, task_title, and specific acceptance_criteria items when raising issues.
 

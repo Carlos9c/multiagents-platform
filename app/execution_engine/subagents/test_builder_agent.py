@@ -30,6 +30,7 @@ from app.execution_engine.tools.file_snapshot_tool import (
 from app.execution_engine.tools.file_writer_tool import write_text_file
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
 from app.services.prompt_loader import prompt_loader
+from app.services.supervisor.trace_writer import append_execution_trace
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,35 @@ def _build_project_context_summary(request: ExecutionRequest) -> str:
 - source_baseline_root: {source_root}""".strip()
 
 
+def _paths_to_tree(paths: list[str]) -> str:
+    """Render a list of relative posix paths as an indented directory tree."""
+    if not paths:
+        return ""
+
+    # Build nested dict structure
+    tree: dict = {}
+    for path in sorted(paths):
+        parts = path.split("/")
+        node = tree
+        for part in parts:
+            node = node.setdefault(part, {})
+
+    lines: list[str] = []
+
+    def _render(node: dict, prefix: str) -> None:
+        entries = sorted(node.keys())
+        for i, name in enumerate(entries):
+            is_last = i == len(entries) - 1
+            connector = "└── " if is_last else "├── "
+            child_prefix = prefix + ("    " if is_last else "│   ")
+            lines.append(f"{prefix}{connector}{name}")
+            if node[name]:  # has children → it's a directory
+                _render(node[name], child_prefix)
+
+    _render(tree, "")
+    return "\n".join(lines)
+
+
 def _build_workspace_inventory_context(
     *,
     workspace_root: str,
@@ -191,14 +221,10 @@ def _build_workspace_inventory_context(
             baseline_files = sorted(baseline_files)[:max_files]
 
     overlay_section = (
-        "\n".join(f"- {path}" for path in overlay_files)
-        if overlay_files
-        else "[workspace overlay is currently empty]"
+        _paths_to_tree(overlay_files) if overlay_files else "[workspace overlay is currently empty]"
     )
     baseline_section = (
-        "\n".join(f"- {path}" for path in baseline_files)
-        if baseline_files
-        else "[source baseline is currently empty]"
+        _paths_to_tree(baseline_files) if baseline_files else "[source baseline is currently empty]"
     )
 
     return (
@@ -316,6 +342,101 @@ def _build_current_workspace_state(
     return "\n".join(parts), loaded_paths
 
 
+def _scan_existing_test_files(
+    *,
+    source_root: str | None,
+    workspace_root: str,
+    exclude_paths: set[str] | None = None,
+    max_files: int = 4,
+) -> list[str]:
+    """
+    Returns up to max_files relative paths of existing test files found in the
+    source baseline or workspace overlay, prioritising files inside recognised
+    test directories. Used to give the agent concrete pattern examples so it
+    mirrors the project's existing test conventions instead of inferring them
+    from training data.
+    """
+    _TEST_PATTERNS = (
+        "test_*.py",
+        "*_test.py",  # Python pytest
+        "*.test.js",
+        "*.spec.js",  # JS Jest / Mocha
+        "*.test.ts",
+        "*.spec.ts",  # TS Jest / Vitest
+        "*_spec.rb",  # Ruby RSpec
+        "*_test.go",  # Go testing
+        "*Test.java",  # JUnit
+    )
+    _TEST_DIR_NAMES = frozenset({"tests", "test", "spec", "__tests__"})
+
+    seen: set[str] = set(exclude_paths or ())
+    found: list[str] = []
+
+    for root_str in (source_root, workspace_root):
+        if not root_str:
+            continue
+        root_path = Path(root_str).resolve()
+        if not root_path.exists():
+            continue
+        for pattern in _TEST_PATTERNS:
+            for file_path in sorted(root_path.rglob(pattern)):
+                if not file_path.is_file():
+                    continue
+                try:
+                    rel = file_path.relative_to(root_path).as_posix()
+                except ValueError:
+                    continue
+                if rel not in seen:
+                    seen.add(rel)
+                    found.append(rel)
+
+    in_test_dir = [p for p in found if any(part in _TEST_DIR_NAMES for part in p.split("/"))]
+    rest = [p for p in found if p not in set(in_test_dir)]
+    return (in_test_dir + rest)[:max_files]
+
+
+def _build_existing_test_context(
+    *,
+    workspace_root: str,
+    source_root: str | None,
+    exclude_paths: set[str] | None = None,
+    max_files: int = 4,
+) -> str:
+    """
+    Loads the content of representative existing test files so the agent can
+    mirror the project's actual test client, import style, and fixture patterns.
+    """
+    paths = _scan_existing_test_files(
+        source_root=source_root,
+        workspace_root=workspace_root,
+        exclude_paths=exclude_paths,
+        max_files=max_files,
+    )
+    if not paths:
+        return "[no existing test files found in repository]"
+
+    parts: list[str] = []
+    for rel_path in paths:
+        try:
+            resolved = _resolve_candidate_file_for_read(
+                workspace_root=workspace_root,
+                source_root=source_root,
+                relative_path=rel_path,
+            )
+        except SubagentRejectedStepError:
+            continue
+        parts.append(f"--- {rel_path} ---")
+        if resolved is None:
+            parts.append("[file not found]")
+            continue
+        try:
+            parts.append(read_text_file(str(resolved)))
+        except Exception as exc:
+            parts.append(f"[read error: {exc}]")
+
+    return "\n\n".join(parts) if parts else "[no existing test files found in repository]"
+
+
 def _validate_generated_files(
     *,
     workspace_root: str,
@@ -392,6 +513,11 @@ def _build_user_prompt(
         request=request,
         exclude_paths=set(workspace_state_paths),
     )
+    existing_test_context = _build_existing_test_context(
+        workspace_root=request.context.workspace_path,
+        source_root=source_root,
+        exclude_paths=set(workspace_state_paths),
+    )
 
     project_context_summary = _build_project_context_summary(request)
     historical_context_summary = _build_historical_context_summary(request)
@@ -428,6 +554,7 @@ def _build_user_prompt(
             "workspace_inventory": workspace_inventory,
             "current_workspace_state": current_workspace_state,
             "implementation_files": related_file_context,
+            "existing_test_context": existing_test_context,
             "orchestration_phase": state.phase,
             "materialization_attempt_count": state.materialization_attempt_count,
             "risk_flags": state.risk_flags,
@@ -474,6 +601,9 @@ Current workspace state (files written in this run — authoritative current con
 
 Implementation files available (source baseline and historical context):
 {related_file_context}
+
+Existing test patterns in this repository (mirror these conventions — import style, test client, fixture setup):
+{existing_test_context}
 
 Current orchestration state:
 - phase: {state.phase}
@@ -553,6 +683,44 @@ Implementation files available in context:
 
 Assess the coverage of the test suite against the acceptance_criteria.
 """.strip()
+
+
+# ---------------------------------------------------------------------------
+# Trace writer
+# ---------------------------------------------------------------------------
+
+
+def _write_test_builder_trace(
+    *,
+    request: ExecutionRequest,
+    step_id: str,
+    call_type: str,
+    files_written: list[dict],
+    coverage: "TestCoverageObservation | None",
+    needs_dependency: str | None = None,
+) -> None:
+    entry: dict = {
+        "agent": "test_builder_agent",
+        "project_id": request.project_id,
+        "task_id": request.task_id,
+        "run_id": request.execution_run_id,
+        "step_id": step_id,
+        "call_type": call_type,
+        "files_written": files_written,
+    }
+    if needs_dependency:
+        entry["needs_dependency"] = needs_dependency
+    if coverage is not None:
+        entry["coverage_summary"] = {
+            "covered_count": len(coverage.covered_cases),
+            "uncovered_count": len(coverage.uncovered_cases),
+            "confidence": coverage.confidence,
+            "tested_against": coverage.tested_against,
+            "covered_cases": coverage.covered_cases,
+            "uncovered_cases": coverage.uncovered_cases,
+            "potential_implementation_gaps": coverage.potential_implementation_gaps,
+        }
+    append_execution_trace(project_id=request.project_id, entry=entry)
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +871,14 @@ class TestBuilderAgent(BaseSubagent):
                 summary=f"Dependency required: {materialization.needs_dependency}",
                 payload={"package_description": materialization.needs_dependency},
             )
+            _write_test_builder_trace(
+                request=request,
+                step_id=step.id,
+                call_type="needs_dependency",
+                files_written=[],
+                coverage=None,
+                needs_dependency=materialization.needs_dependency,
+            )
             return state
 
         _validate_generated_files(
@@ -806,6 +982,17 @@ class TestBuilderAgent(BaseSubagent):
                 )
 
         state.add_note(f"Test materialisation completed for {len(ordered_files)} file(s).")
+
+        _write_test_builder_trace(
+            request=request,
+            step_id=step.id,
+            call_type="materialise",
+            files_written=[
+                {"path": f.path, "operation": f.operation, "rationale": f.rationale}
+                for f in ordered_files
+            ],
+            coverage=coverage,
+        )
 
         logger.info(
             "test_builder_agent_completed task_id=%s step_id=%s files_written=%s coverage_assessed=%s",

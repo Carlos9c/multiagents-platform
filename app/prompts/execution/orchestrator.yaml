@@ -1,5 +1,5 @@
 agent_name: orchestrator
-version: "1.1.0"
+version: "1.2.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-28"
@@ -7,6 +7,9 @@ changelog:
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.2.0"
+    date: "2026-06-01"
+    changes: "Added verification convergence rule: stop re-calling command_runner_agent when the same failure class repeats; route to repair subagent first"
 prompts:
   decision:
     description: "Orchestrator decision loop: choose next subagent, finish, or reject"
@@ -149,6 +152,12 @@ prompts:
       - When decision_type is "finish", "reject", or "invalid": subagent_name MUST be null and target_paths MUST be an empty list.
       - When decision_type is "call_subagent": subagent_name MUST be a non-null string from
         {context_selection_agent, code_change_agent, command_runner_agent, document_writer_agent, test_builder_agent, environment_manager_agent}.
+      - When calling test_builder_agent: target_paths MUST be populated with the expected test file
+        path(s). Derive them from the workspace inventory tree using the repository's existing test
+        file naming convention (e.g. tests/services/test_foo.py mirrors src/services/foo.py).
+        If the task acceptance_criteria name specific test files, use those paths exactly.
+        An empty target_paths for test_builder_agent is a routing error — the agent needs these
+        paths to know where to write the tests.
 
       Core responsibility:
       - Look at the task, the current phase, the accumulated evidence, and the last executed subagent.
@@ -272,6 +281,20 @@ prompts:
         of patching each cascade file individually.
       - newly_discovered_files are automatically loaded into preloaded_dependency_files before this
         decision — they are already available to the next subagent.
+
+      Verification convergence rule:
+      - When executed_commands evidence shows that command_runner_agent was called two or
+        more times consecutively (or near-consecutively with no repair subagent in between)
+        and each call produced the same failure class (e.g., the test runner returned non-zero
+        with the same error category: dependency resolution failure, test infrastructure
+        failure, assertion failure), do NOT call command_runner_agent again.
+        Two consecutive runs with the same failure class is a convergence signal — a third
+        attempt provides no new evidence.
+      - After a convergence signal, use fault_side from the latest error_diagnosis to route
+        to the appropriate repair subagent. If no error_diagnosis is present and repair
+        attempts remain, default to code_change_agent.
+      - If repair_attempt_count has reached its budget, do not call command_runner_agent
+        again — choose finish (accumulate evidence for validation) or reject.
 
       Binary completion checklist:
       You must explicitly reason over these four fields before deciding:

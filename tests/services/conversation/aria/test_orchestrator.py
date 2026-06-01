@@ -448,3 +448,333 @@ class TestReviewFlow:
         assert conv.review_context is None
         assert conv.phase == CONVERSATION_PHASE_EXECUTING
         assert response.event == "review_resolved"
+
+
+# ── Tests: start_project guard ────────────────────────────────────────────────
+
+
+class TestStartProjectGuard:
+    """start_project must never fire in the same turn as requirements_agent."""
+
+    def test_start_project_blocked_when_requirements_ran_same_turn(
+        self, db_session: Session, make_project
+    ):
+        """If requirements_agent and start_project are both attempted in one turn,
+        the guard must prevent start_project and force Aria to respond instead."""
+        project = make_project()
+        conv = _make_conversation(db_session, project.id)
+
+        call_count = {"n": 0}
+
+        def _mock_llm(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return _aria_step_call(ToolName.REQUIREMENTS)
+            if call_count["n"] == 2:
+                # Model tries to start the project immediately — guard must block this.
+                return _aria_step_call(ToolName.START_PROJECT)
+            return _aria_step_respond("Requirements look complete! Ready to start?")
+
+        with (
+            patch(
+                "app.services.conversation.aria.orchestrator._call_aria_llm", side_effect=_mock_llm
+            ),
+            patch(
+                "app.services.conversation.aria.tools.requirements_tool.evaluate_requirements",
+                return_value=MagicMock(
+                    status="sufficient",
+                    next_question=None,
+                    updated_draft="Full spec",
+                    reasoning="r",
+                    product_type="rest_api",
+                ),
+            ),
+            patch(
+                "app.services.conversation.aria.tools.start_project_tool.ProjectStartService"
+            ) as mock_svc,
+        ):
+            response = process_with_pre_transitions(
+                db_session,
+                conv.id,
+                AriaInput(source="user", user_message="Build a REST API with FastAPI"),
+            )
+
+        # start_project must NOT have executed
+        mock_svc.return_value.start.assert_not_called()
+        # Conversation must NOT have transitioned to executing
+        db_session.refresh(conv)
+        assert conv.phase == CONVERSATION_PHASE_GATHERING
+        # requirements_ready IS set (requirements_agent ran successfully)
+        assert conv.requirements_ready is True
+        # Response should be confirmation-asking, not an error
+        assert response.message is not None
+
+    def test_start_project_allowed_on_confirm_start_event(self, db_session: Session, make_project):
+        """confirm_start system event must be able to call start_project freely
+        (no requirements_agent in tools_called for that turn)."""
+        project = make_project()
+        conv = _make_conversation(
+            db_session,
+            project.id,
+            requirements_ready=True,
+            requirements_draft="Full spec",
+        )
+
+        call_count = {"n": 0}
+
+        def _mock_llm(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return _aria_step_call(ToolName.START_PROJECT)
+            return _aria_step_respond("¡Proyecto iniciado!")
+
+        with (
+            patch(
+                "app.services.conversation.aria.orchestrator._call_aria_llm", side_effect=_mock_llm
+            ),
+            patch(
+                "app.services.conversation.aria.tools.start_project_tool.ProjectStartService"
+            ) as mock_svc,
+        ):
+            mock_svc.return_value.start.return_value = MagicMock(tasks_created=3)
+            process_with_pre_transitions(
+                db_session,
+                conv.id,
+                AriaInput(
+                    source="system",
+                    system_event=SystemEvent(event_type=SystemEventType.CONFIRM_START, data={}),
+                ),
+            )
+
+        mock_svc.return_value.start.assert_called_once()
+        db_session.refresh(conv)
+        assert conv.phase == CONVERSATION_PHASE_EXECUTING
+
+
+# ── Tests: resumption guard (Solution A) ──────────────────────────────────────
+
+
+class TestReviewResumptionGuard:
+    """Guard that forces resumption_agent when confirmation returns True but
+    Aria forgot to chain it — prevents the workflow from getting stuck in reviewing."""
+
+    def _setup_reviewing_conv(
+        self, db: Session, project_id: int, *, proposed_plan: str = "Use pytest"
+    ) -> tuple[Conversation, Task]:
+        """Return a conversation in reviewing/awaiting_confirmation and a matching task."""
+        task = Task(
+            project_id=project_id,
+            title="Validate schemas",
+            description="desc",
+            planning_level=PLANNING_LEVEL_ATOMIC,
+            status="awaiting_review",
+            sequence_order=1,
+        )
+        db.add(task)
+        db.flush()
+
+        ctx = TaskReviewContext(task_id=task.id, task_title="Validate schemas")
+        conv = _make_conversation(
+            db,
+            project_id,
+            phase=CONVERSATION_PHASE_REVIEWING,
+            review_context=review_context_to_json(ctx),
+            proposed_plan=proposed_plan,
+        )
+        return conv, task
+
+    def test_guard_forces_resumption_when_aria_skips_it(self, db_session: Session, make_project):
+        """Core guard scenario: Aria calls confirmation_agent (True) then responds
+        WITHOUT calling resumption_agent. The guard intercepts and forces resumption."""
+        project = make_project()
+        conv, _ = self._setup_reviewing_conv(db_session, project.id)
+
+        # Aria confirms, then tries to respond — skipping resumption
+        call_seq = iter(
+            [
+                _aria_step_call(ToolName.CONFIRMATION, hint="Sí, adelante"),
+                _aria_step_respond("¡Perfecto! Reanudando la ejecución."),
+            ]
+        )
+
+        with (
+            patch(
+                "app.services.conversation.aria.orchestrator._call_aria_llm",
+                side_effect=call_seq,
+            ),
+            patch(
+                "app.services.conversation.aria.tools.confirmation_tool.evaluate_confirmation",
+                return_value=MagicMock(confirmed=True, follow_up=None, reasoning="ok"),
+            ),
+            patch(
+                "app.services.conversation.aria.tools.resumption_tool.resume_after_review",
+                return_value=MagicMock(
+                    scope="narrow",
+                    message="Clarification applied",
+                    tasks_modified=1,
+                    tasks_added=0,
+                    tasks_superseded=0,
+                ),
+            ),
+        ):
+            response = process_with_pre_transitions(
+                db_session,
+                conv.id,
+                AriaInput(source="user", user_message="Sí, adelante"),
+            )
+
+        db_session.refresh(conv)
+        # Guard must have forced the resumption
+        assert conv.proposed_plan is None
+        assert conv.review_context is None
+        assert conv.phase == CONVERSATION_PHASE_EXECUTING
+        assert response.event == "review_resolved"
+        # The original response message must be preserved
+        assert "Reanudando" in response.message
+
+    def test_guard_does_not_fire_when_not_confirmed(self, db_session: Session, make_project):
+        """If confirmation_agent returns confirmed=False, resumption must NOT be forced."""
+        project = make_project()
+        conv, _ = self._setup_reviewing_conv(db_session, project.id)
+
+        call_seq = iter(
+            [
+                _aria_step_call(ToolName.CONFIRMATION, hint="No, I want changes"),
+                _aria_step_respond("Entendido. ¿Qué cambios quieres hacer?"),
+            ]
+        )
+
+        with (
+            patch(
+                "app.services.conversation.aria.orchestrator._call_aria_llm",
+                side_effect=call_seq,
+            ),
+            patch(
+                "app.services.conversation.aria.tools.confirmation_tool.evaluate_confirmation",
+                return_value=MagicMock(
+                    confirmed=False,
+                    follow_up="¿Qué cambios quieres?",
+                    reasoning="user wants changes",
+                ),
+            ),
+            patch(
+                "app.services.conversation.aria.tools.resumption_tool.resume_after_review",
+            ) as mock_resumption,
+        ):
+            response = process_with_pre_transitions(
+                db_session,
+                conv.id,
+                AriaInput(source="user", user_message="No, I want changes"),
+            )
+
+        db_session.refresh(conv)
+        # Phase must stay reviewing (not executing)
+        assert conv.phase == CONVERSATION_PHASE_REVIEWING
+        # resumption_agent must not have been called
+        mock_resumption.assert_not_called()
+        assert response.event != "review_resolved"
+
+    def test_guard_does_not_double_run_when_resumption_already_called(
+        self, db_session: Session, make_project
+    ):
+        """When Aria correctly chains confirmation → resumption → respond,
+        the guard must NOT call resumption a second time."""
+        project = make_project()
+        conv, _ = self._setup_reviewing_conv(db_session, project.id)
+
+        call_seq = iter(
+            [
+                _aria_step_call(ToolName.CONFIRMATION, hint="Yes"),
+                _aria_step_call(ToolName.RESUMPTION),  # Aria does it correctly
+                _aria_step_respond("¡Proyecto reanudado!"),
+            ]
+        )
+
+        resumption_calls = {"count": 0}
+
+        def _mock_resume(*args, **kwargs):
+            resumption_calls["count"] += 1
+            return MagicMock(
+                scope="narrow",
+                message="Applied",
+                tasks_modified=1,
+                tasks_added=0,
+                tasks_superseded=0,
+            )
+
+        with (
+            patch(
+                "app.services.conversation.aria.orchestrator._call_aria_llm",
+                side_effect=call_seq,
+            ),
+            patch(
+                "app.services.conversation.aria.tools.confirmation_tool.evaluate_confirmation",
+                return_value=MagicMock(confirmed=True, follow_up=None, reasoning="ok"),
+            ),
+            patch(
+                "app.services.conversation.aria.tools.resumption_tool.resume_after_review",
+                side_effect=_mock_resume,
+            ),
+        ):
+            response = process_with_pre_transitions(
+                db_session,
+                conv.id,
+                AriaInput(source="user", user_message="Yes"),
+            )
+
+        db_session.refresh(conv)
+        # resumption_agent called exactly once — not twice
+        assert resumption_calls["count"] == 1
+        assert conv.phase == CONVERSATION_PHASE_EXECUTING
+        assert response.event == "review_resolved"
+
+    def test_guard_fires_even_at_max_steps(self, db_session: Session, make_project):
+        """Guard fires at the force-respond fallback path too, not just the normal respond."""
+        project = make_project()
+        conv, _ = self._setup_reviewing_conv(db_session, project.id)
+
+        call_count = {"n": 0}
+
+        def _mock_llm(*args, **kwargs):
+            call_count["n"] += 1
+            # Step 0: call confirmation
+            if call_count["n"] == 1:
+                return _aria_step_call(ToolName.CONFIRMATION, hint="go")
+            # Steps 1..MAX_STEPS: always try another tool (triggers exhaustion path)
+            # After exhaustion the force_respond path is used
+            return _aria_step_call(ToolName.QUERY)
+
+        with (
+            patch(
+                "app.services.conversation.aria.orchestrator._call_aria_llm",
+                side_effect=_mock_llm,
+            ),
+            patch(
+                "app.services.conversation.aria.tools.confirmation_tool.evaluate_confirmation",
+                return_value=MagicMock(confirmed=True, follow_up=None, reasoning="ok"),
+            ),
+            patch(
+                "app.services.conversation.aria.tools.query_tool.answer_project_query",
+                return_value="Project status",
+            ),
+            patch(
+                "app.services.conversation.aria.tools.resumption_tool.resume_after_review",
+                return_value=MagicMock(
+                    scope="narrow",
+                    message="Applied",
+                    tasks_modified=1,
+                    tasks_added=0,
+                    tasks_superseded=0,
+                ),
+            ),
+        ):
+            response = process_with_pre_transitions(
+                db_session,
+                conv.id,
+                AriaInput(source="user", user_message="go"),
+            )
+
+        db_session.refresh(conv)
+        # Even via the fallback path, resumption must have been forced
+        assert conv.phase == CONVERSATION_PHASE_EXECUTING
+        assert response.event == "review_resolved"

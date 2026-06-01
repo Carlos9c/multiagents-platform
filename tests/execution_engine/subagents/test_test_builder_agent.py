@@ -452,3 +452,120 @@ def test_materialise_outside_workspace_raises(tmp_path: Path) -> None:
     agent = TestBuilderAgent(runtime=runtime)
     with pytest.raises(SubagentRejectedStepError, match="outside workspace"):
         agent.execute_step(db=MagicMock(), request=request, step=step, state=state)
+
+
+# ---------------------------------------------------------------------------
+# _paths_to_tree
+# ---------------------------------------------------------------------------
+
+
+from app.execution_engine.subagents.test_builder_agent import _paths_to_tree  # noqa: E402
+
+
+def test_paths_to_tree_empty_returns_empty_string() -> None:
+    assert _paths_to_tree([]) == ""
+
+
+def test_paths_to_tree_single_file() -> None:
+    result = _paths_to_tree(["tests/test_foo.py"])
+    assert "tests" in result
+    assert "test_foo.py" in result
+
+
+def test_paths_to_tree_nested_structure() -> None:
+    paths = [
+        "src/auth/service.py",
+        "src/auth/__init__.py",
+        "tests/test_auth.py",
+    ]
+    result = _paths_to_tree(paths)
+    assert "src" in result
+    assert "auth" in result
+    assert "service.py" in result
+    assert "tests" in result
+    assert "test_auth.py" in result
+
+
+def test_paths_to_tree_preserves_all_files() -> None:
+    paths = ["a/b/c.py", "a/d.py", "e.py"]
+    result = _paths_to_tree(paths)
+    assert "c.py" in result
+    assert "d.py" in result
+    assert "e.py" in result
+
+
+def test_paths_to_tree_uses_tree_connectors() -> None:
+    paths = ["foo/bar.py", "foo/baz.py"]
+    result = _paths_to_tree(paths)
+    # Tree rendering uses box-drawing connectors
+    assert "├──" in result or "└──" in result
+
+
+# ---------------------------------------------------------------------------
+# Execution trace written after materialisation
+# ---------------------------------------------------------------------------
+
+
+def test_execution_trace_written_after_materialisation(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import patch
+
+    workspace = str(tmp_path)
+    request = _make_request(workspace)
+    step = _make_step()
+    state = _make_state(request)
+
+    payload = _materialisation_payload([("tests/test_user_service.py", "create", "pass")])
+    coverage = _coverage_payload(covered=["create user"], confidence="high")
+    runtime = _CapturingRuntime([payload, coverage])
+
+    captured: list[dict] = []
+
+    def _fake_append(*, project_id, entry):
+        captured.append(entry)
+
+    with patch(
+        "app.execution_engine.subagents.test_builder_agent.append_execution_trace",
+        side_effect=_fake_append,
+    ):
+        agent = TestBuilderAgent(runtime=runtime)
+        agent.execute_step(db=MagicMock(), request=request, step=step, state=state)
+
+    assert len(captured) == 1
+    entry = captured[0]
+    assert entry["agent"] == "test_builder_agent"
+    assert entry["task_id"] == request.task_id
+    assert entry["run_id"] == request.execution_run_id
+    assert entry["call_type"] == "materialise"
+    assert any(f["path"] == "tests/test_user_service.py" for f in entry["files_written"])
+    assert entry["coverage_summary"]["confidence"] == "high"
+    assert entry["coverage_summary"]["covered_count"] == 1
+
+
+def test_execution_trace_written_for_needs_dependency(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    workspace = str(tmp_path)
+    request = _make_request(workspace)
+    step = _make_step()
+    state = _make_state(request)
+
+    payload = _materialisation_payload([], needs_dependency="pytest-asyncio>=0.23")
+    runtime = _CapturingRuntime([payload])
+
+    captured: list[dict] = []
+
+    def _fake_append(*, project_id, entry):
+        captured.append(entry)
+
+    with patch(
+        "app.execution_engine.subagents.test_builder_agent.append_execution_trace",
+        side_effect=_fake_append,
+    ):
+        agent = TestBuilderAgent(runtime=runtime)
+        agent.execute_step(db=MagicMock(), request=request, step=step, state=state)
+
+    assert len(captured) == 1
+    entry = captured[0]
+    assert entry["call_type"] == "needs_dependency"
+    assert entry["needs_dependency"] == "pytest-asyncio>=0.23"
+    assert entry["files_written"] == []

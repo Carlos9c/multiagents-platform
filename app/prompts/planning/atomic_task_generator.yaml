@@ -1,9 +1,12 @@
 agent_name: atomic_task_generator
-version: "3.0.0"
+version: "3.1.0"
 changelog:
   - version: "3.0.0"
     date: "2026-05-31"
     changes: "BREAKING: added estimated_complexity (XS/S/M/L/XL) and depends_on_task_titles (list[str]) to output schema. The sequencer uses these as sequencing ground-truth."
+  - version: "3.1.0"
+    date: "2026-06-01"
+    changes: "Added forbidden observable AC patterns for testing tasks; added storage+domain split rule; added testing task size rule"
   - version: "2.0.0"
     date: "2026-05-31"
     changes: "BREAKING: acceptance_criteria changed from string to list[str]. Each element is one concrete, verifiable criterion with an observable outcome."
@@ -127,6 +130,14 @@ prompts:
       - split when one part is executable by the available executor and another part is not
       - split when the scope covers an entire module, layer, subsystem, or "core" of the project
       - split when there are multiple natural completion checkpoints within the task
+      - split when a task bundles storage/persistence concerns (data schema, storage adapters,
+        serialization/deserialization mapping) with domain/business logic concerns —
+        storage tests require actual I/O infrastructure while domain logic tests do not;
+        combining them produces integration tests disguised as unit tests
+      - for testing tasks (task_type="testing"): split when the tests would span multiple
+        independent implementation units that could each succeed or fail separately, or when
+        the acceptance_criteria require test execution against distinct subsystems that have
+        no shared state
 
       When NOT to split:
       - one focused functional unit with a single validation boundary
@@ -146,6 +157,16 @@ prompts:
       - implementation_steps must be concrete and repository-oriented
       - tests_required must describe checks aligned with the deliverable
       - acceptance_criteria must be a non-empty list of strings — each item is one verifiable criterion with a concrete observable outcome (a specific behavior, state, output, or confirmed condition). Generic phrases like "tests pass", "works correctly", or "task is implemented" are not acceptable criteria.
+      - Forbidden observable patterns in acceptance_criteria: avoid criteria that describe
+        static presence rather than verifiable behavior. Specifically do NOT use:
+        "importable from X", "importable as X", "available in X namespace" — these are
+        satisfied merely by a file existing; they do not verify behavior.
+        "coherent with Y", "consistent with Z", "aligned with W" — these cannot fail
+        deterministically; they are opinions, not observables.
+        "prepared for", "ready for", "set up for" — these describe intermediate scaffolding
+        states, not completable outcomes.
+        Replace these with behavioral assertions: what does the code do when called? what
+        does it return? what happens under invalid input or edge conditions?
       - do not assign or emit a final executor in the output
       - atomic generation must judge executor compatibility, but executor routing is resolved later by orchestration
       - never invent new executors or future capabilities

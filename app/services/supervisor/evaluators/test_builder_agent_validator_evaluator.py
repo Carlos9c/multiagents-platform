@@ -30,7 +30,7 @@ TEST_BUILDER_AGENT_VALIDATOR_EVALUATOR_SYSTEM_PROMPT = prompt_loader.get(
     "test_builder_agent_validator_evaluator"
 )
 
-_AGENT_NAME = "test_builder_agent_validator"
+_AGENT_NAME = "test_builder_agent"
 _VALIDATOR_NAME = "test_builder_agent_validator"
 
 
@@ -97,7 +97,7 @@ Return valid JSON with all required fields:
 class TestBuilderAgentValidatorEvaluator:
     """Evaluates the test_builder_agent_validator's calibration for a project."""
 
-    AGENT_NAME = _AGENT_NAME
+    AGENT_NAME = _VALIDATOR_NAME
     VALIDATOR_NAME = _VALIDATOR_NAME
 
     def evaluate(

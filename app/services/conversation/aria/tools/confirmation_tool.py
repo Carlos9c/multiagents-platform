@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.models.conversation import Conversation
+from app.models.conversation import Conversation, ConversationMessage
 from app.services.conversation.aria.contracts import ToolName, ToolResult
 from app.services.conversation.confirmation_evaluator import (
     ConfirmationEvaluatorInput,
@@ -31,7 +31,11 @@ class ConfirmationTool:
         hint: str | None = None,
     ) -> ToolResult:
         proposed_plan = conversation.proposed_plan or "(plan details not available)"
-        user_response = hint or ""
+        # Prefer the explicit hint forwarded by Aria (should be the user's message).
+        # Fall back to loading the most recent user message directly from DB so the
+        # evaluator always has real text — prevents false negatives caused by a missing
+        # or generic hint.
+        user_response = hint or self._last_user_message(db, conversation)
 
         result = evaluate_confirmation(
             ConfirmationEvaluatorInput(
@@ -48,3 +52,17 @@ class ConfirmationTool:
                 "reasoning": result.reasoning,
             },
         )
+
+    @staticmethod
+    def _last_user_message(db: Session, conversation: Conversation) -> str:
+        """Return the content of the most recent user message in this conversation."""
+        msg = (
+            db.query(ConversationMessage)
+            .filter(
+                ConversationMessage.conversation_id == conversation.id,
+                ConversationMessage.role == "user",
+            )
+            .order_by(ConversationMessage.id.desc())
+            .first()
+        )
+        return msg.content if msg else ""

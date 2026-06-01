@@ -1,9 +1,12 @@
 agent_name: recovery_planner_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor evaluator for the recovery_planner decision quality"
+  - version: "1.1.0"
+    date: "2026-06-01"
+    changes: "Expanded Confidence calibration dimension with precise high/medium/low definitions and contradiction flags"
 prompts:
   main:
     description: "Evaluates the recovery_planner's action calibration and created task quality"
@@ -64,9 +67,19 @@ prompts:
          that insert_followup would have handled.
 
       2. Confidence calibration
-         confidence=high should be reserved for clear-cut situations with strong evidence.
-         confidence=high combined with action=manual_review suggests uncertainty (manual_review
-         is the uncertain path by definition) — note this inconsistency.
+         confidence=high requires all of: a precise, named root cause in the execution evidence
+         (specific component, specific error class, specific failure location), the selected
+         action directly addresses that cause, and no external dependency or environment
+         uncertainty remains. Flag confidence=high when the failure evidence is ambiguous or
+         when blockers_found describes multiple possible causes.
+         confidence=medium is appropriate when the diagnosis is probable but the evidence is
+         ambiguous, or the action depends on an assumption about the target state.
+         confidence=low is appropriate when multiple failure causes are plausible, or the
+         environment state is unknown.
+         confidence=high combined with action=manual_review is contradictory — manual_review
+         is the uncertain path by definition. Flag this combination as a calibration defect.
+         When no concrete root cause appears in the execution evidence but the planner chose
+         reatomize with high confidence, flag it — manual_review would have been more appropriate.
          confidence=low on every decision may indicate the planner is systematically uncertain
          about scope diagnosis.
 

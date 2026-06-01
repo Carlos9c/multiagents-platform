@@ -157,6 +157,9 @@ def _run_loop(
         aria_step = _call_aria_llm(snapshot, conversation, aria_input, tool_results)
 
         if aria_step.action == "respond":
+            snapshot = _apply_confirmation_resumption_guard(
+                db, conversation, snapshot, tool_results, tools_called, tool_registry, step
+            )
             return _finalise_response(
                 db, conversation, snapshot, aria_step, tool_results, aria_input
             )
@@ -175,6 +178,18 @@ def _run_loop(
             )
             break
 
+        # Guard: start_project must never run in the same turn as requirements_agent.
+        # When requirements_agent returns sufficient the user has not yet confirmed —
+        # Aria must present the summary and wait for the next user turn or a
+        # confirm_start system event.
+        if tool_name == ToolName.START_PROJECT and ToolName.REQUIREMENTS in tools_called:
+            logger.warning(
+                "aria_loop: start_project blocked at step %d — requirements_agent ran "
+                "in the same turn; forcing respond so user can confirm",
+                step,
+            )
+            break
+
         tool = tool_registry.get(tool_name)
         if tool is None:
             logger.warning("aria_loop: unknown tool %s — forcing respond", tool_name)
@@ -189,12 +204,55 @@ def _run_loop(
         db.refresh(conversation)
         snapshot = build_snapshot(db, conversation.project_id, conversation)
 
-    # Exhausted steps or broke out — force a respond call
+    # Exhausted steps or broke out — apply the resumption guard before the forced reply
+    snapshot = _apply_confirmation_resumption_guard(
+        db, conversation, snapshot, tool_results, tools_called, tool_registry, -1
+    )
     logger.warning("aria_loop: exhausted steps or broke early — forcing fallback respond")
     aria_step = _call_aria_llm(snapshot, conversation, aria_input, tool_results, force_respond=True)
     return _finalise_response(
         db, conversation, snapshot, aria_step, tool_results, aria_input, is_fallback=True
     )
+
+
+# ── Resumption guard ─────────────────────────────────────────────────────────
+
+
+def _apply_confirmation_resumption_guard(
+    db: "Session",
+    conversation: "Conversation",
+    snapshot: "ProjectSnapshot",
+    tool_results: "list[ToolResult]",
+    tools_called: "set[ToolName]",
+    tool_registry: "dict",
+    step: int,
+) -> "ProjectSnapshot":
+    """Force resumption_agent when confirmation returned True but it hasn't run yet.
+
+    Called just before any respond (both normal and fallback paths).  If the guard
+    fires it mutates *tool_results* and *tools_called* in place and returns a
+    refreshed snapshot; otherwise returns the original snapshot unchanged.
+    """
+    from app.services.conversation.aria.context_builder import ProjectSnapshot  # noqa: F401
+
+    _conf = next((r for r in tool_results if r.tool_name == ToolName.CONFIRMATION), None)
+    if _conf is None or not _conf.data.get("confirmed") or ToolName.RESUMPTION in tools_called:
+        return snapshot  # nothing to do
+
+    logger.warning(
+        "aria_loop: respond intercepted at step %d — confirmation_agent returned "
+        "True but resumption_agent hasn't run; forcing resumption",
+        step,
+    )
+    _res_tool = tool_registry.get(ToolName.RESUMPTION)
+    if _res_tool is None:
+        return snapshot
+
+    _res_result = _res_tool.execute(db, conversation.project_id, conversation, None)
+    tools_called.add(ToolName.RESUMPTION)
+    tool_results.append(_res_result)
+    db.refresh(conversation)
+    return build_snapshot(db, conversation.project_id, conversation)
 
 
 # ── Phase transitions ─────────────────────────────────────────────────────────
@@ -644,6 +702,11 @@ def _determine_event(
     aria_input: AriaInput | None = None,
 ) -> str:
     if is_fallback:
+        # Even on the fallback path, if the resumption guard forced execution we must
+        # surface "review_resolved" so the router can restart the workflow.
+        _res = next((r for r in tool_results if r.tool_name == ToolName.RESUMPTION), None)
+        if _res is not None and "error" not in _res.data:
+            return "review_resolved"
         return "fallback"
 
     # ── Tool results take priority when present ───────────────────────────────

@@ -157,3 +157,72 @@ class TestBuildSnapshot:
         # Should not raise — returns None for review_context
         snapshot = build_snapshot(db_session, project.id, conv)
         assert snapshot.review_context is None
+
+
+class TestReviewSubphase:
+    """Solution B: review_subphase signal disambiguates the two reviewing sub-states."""
+
+    def test_gathering_clarification_when_proposed_plan_is_none(
+        self, db_session: Session, make_project
+    ):
+        project = make_project()
+        conv = _make_conversation(
+            db_session, project.id, phase=CONVERSATION_PHASE_REVIEWING, proposed_plan=None
+        )
+        snapshot = build_snapshot(db_session, project.id, conv)
+        assert snapshot.review_subphase == "gathering_clarification"
+
+    def test_awaiting_confirmation_when_proposed_plan_is_set(
+        self, db_session: Session, make_project
+    ):
+        project = make_project()
+        conv = _make_conversation(
+            db_session,
+            project.id,
+            phase=CONVERSATION_PHASE_REVIEWING,
+            proposed_plan="Use python -m pytest to validate schemas",
+        )
+        snapshot = build_snapshot(db_session, project.id, conv)
+        assert snapshot.review_subphase == "awaiting_confirmation"
+
+    def test_review_subphase_none_when_executing(self, db_session: Session, make_project):
+        project = make_project()
+        conv = _make_conversation(db_session, project.id, phase=CONVERSATION_PHASE_EXECUTING)
+        snapshot = build_snapshot(db_session, project.id, conv)
+        assert snapshot.review_subphase is None
+
+    def test_review_subphase_none_when_gathering(self, db_session: Session, make_project):
+        project = make_project()
+        conv = _make_conversation(db_session, project.id, phase=CONVERSATION_PHASE_GATHERING)
+        snapshot = build_snapshot(db_session, project.id, conv)
+        assert snapshot.review_subphase is None
+
+    def test_format_for_prompt_includes_subphase_gathering(self, db_session: Session, make_project):
+        project = make_project()
+        conv = _make_conversation(
+            db_session, project.id, phase=CONVERSATION_PHASE_REVIEWING, proposed_plan=None
+        )
+        snapshot = build_snapshot(db_session, project.id, conv)
+        prompt_text = snapshot.format_for_prompt()
+        assert "gathering_clarification" in prompt_text
+
+    def test_format_for_prompt_includes_subphase_awaiting(self, db_session: Session, make_project):
+        project = make_project()
+        conv = _make_conversation(
+            db_session,
+            project.id,
+            phase=CONVERSATION_PHASE_REVIEWING,
+            proposed_plan="Run pytest --tb=short",
+        )
+        snapshot = build_snapshot(db_session, project.id, conv)
+        prompt_text = snapshot.format_for_prompt()
+        assert "awaiting_confirmation" in prompt_text
+
+    def test_format_for_prompt_no_subphase_line_outside_reviewing(
+        self, db_session: Session, make_project
+    ):
+        project = make_project()
+        conv = _make_conversation(db_session, project.id, phase=CONVERSATION_PHASE_EXECUTING)
+        snapshot = build_snapshot(db_session, project.id, conv)
+        prompt_text = snapshot.format_for_prompt()
+        assert "Sub-fase" not in prompt_text

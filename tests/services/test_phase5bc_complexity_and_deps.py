@@ -338,3 +338,46 @@ class TestBuildCandidateAtomicTask:
         assert candidate.parent_high_level_title == "Build REST API layer"
         assert candidate.estimated_complexity == "S"
         assert candidate.depends_on_task_titles == []
+
+
+class TestBuildCandidateAtomicTaskAcceptanceCriteria:
+    def test_list_acceptance_criteria_serialised_to_string(
+        self, db_session, make_project, make_task
+    ):
+        """Phase 3: Task.acceptance_criteria is list[str] — candidate must receive str."""
+        project = make_project()
+        task = make_task(project_id=project.id, planning_level=PLANNING_LEVEL_ATOMIC)
+        task.acceptance_criteria = [
+            "The endpoint returns HTTP 200 for valid credentials",
+            "The endpoint returns HTTP 401 for invalid credentials",
+        ]
+        db_session.commit()
+        db_session.refresh(task)
+
+        candidate = _build_candidate_atomic_task(task, parent_task=None)
+
+        assert isinstance(candidate.acceptance_criteria, str)
+        assert "HTTP 200" in candidate.acceptance_criteria
+        assert "HTTP 401" in candidate.acceptance_criteria
+
+    def test_none_acceptance_criteria_stays_none(self, db_session, make_project, make_task):
+        """Task with no acceptance_criteria → candidate gets None (not empty string)."""
+        project = make_project()
+        task = make_task(project_id=project.id, planning_level=PLANNING_LEVEL_ATOMIC)
+        task.acceptance_criteria = None
+        db_session.commit()
+        db_session.refresh(task)
+
+        candidate = _build_candidate_atomic_task(task, parent_task=None)
+        assert candidate.acceptance_criteria is None
+
+    def test_string_acceptance_criteria_passed_through(self, db_session, make_project, make_task):
+        """Legacy str acceptance_criteria → candidate receives it unchanged."""
+        project = make_project()
+        task = make_task(project_id=project.id, planning_level=PLANNING_LEVEL_ATOMIC)
+        task.acceptance_criteria = "All endpoints return correct responses."
+        db_session.commit()
+        db_session.refresh(task)
+
+        candidate = _build_candidate_atomic_task(task, parent_task=None)
+        assert candidate.acceptance_criteria == "All endpoints return correct responses."

@@ -31,7 +31,7 @@ CODE_CHANGE_AGENT_VALIDATOR_EVALUATOR_SYSTEM_PROMPT = prompt_loader.get(
     "code_change_agent_validator_evaluator"
 )
 
-_AGENT_NAME = "code_change_agent_validator"
+_AGENT_NAME = "code_change_agent"
 _VALIDATOR_NAME = "code_change_agent_validator"
 
 
@@ -98,7 +98,7 @@ Return valid JSON with all required fields:
 class CodeChangeAgentValidatorEvaluator:
     """Evaluates the code_change_agent_validator's calibration for a project."""
 
-    AGENT_NAME = _AGENT_NAME
+    AGENT_NAME = _VALIDATOR_NAME
     VALIDATOR_NAME = _VALIDATOR_NAME
 
     def evaluate(

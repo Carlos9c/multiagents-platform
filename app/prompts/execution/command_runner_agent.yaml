@@ -1,5 +1,5 @@
 agent_name: command_runner_agent
-version: "1.1.0"
+version: "1.2.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-28"
@@ -7,6 +7,9 @@ changelog:
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.2.0"
+    date: "2026-06-01"
+    changes: "Added retry adaptation rule: examine prior_commands failure pattern before planning; choose verification_not_applicable rather than repeating a structurally failing command"
 prompts:
   file_selection:
     description: "Selects files to inspect before deciding on a verification command"
@@ -199,6 +202,25 @@ prompts:
       - When test or spec files appear in the inventory under a subdirectory (e.g., tests/, spec/, __tests__/, test/), the command must explicitly reference that path — pass the subdirectory as an argument to the runner (e.g., pytest tests/, go test ./tests/..., jest tests/, rspec spec/, python -m unittest discover -s tests). Do not use a bare runner invocation that relies on root-level auto-discovery; if the test files are not at the project root, auto-discovery from '.' will produce zero results and the command will be useless.
       - Do not invent tools, executables, frameworks, entrypoints, or files that are not grounded in the provided inventory/context.
       - The goal is to produce operational evidence for external validation, not to perform open-ended exploration.
+
+      Retry adaptation rule:
+      - When prior_commands is non-empty, examine the failure pattern before planning your command.
+      - If a prior command failed because the runner could not resolve a dependency (missing
+        package, module not found, import failure at runner startup time): do NOT re-run the
+        same command. Choose verification_not_applicable and note in your rationale that the
+        environment must be updated before verification can proceed. The environment agent
+        must install the missing dependency first.
+      - If a prior command failed because the runner found zero test files or could not
+        discover the test suite (configuration missing, wrong working directory): try a more
+        explicit command that passes the known test file paths directly as arguments, rather
+        than relying on auto-discovery.
+      - If a prior command failed because assertions did not pass (the runner launched, tests
+        ran, some assertions failed): this is a code or test issue, not a runner issue.
+        Choose verification_not_applicable — repeating the command will produce the same
+        result. The repair subagent must address the underlying issue first.
+      - If two prior commands failed with the same error class (the runner returned non-zero
+        for the same structural reason each time): choose verification_not_applicable rather
+        than a third attempt. The pattern is structural, not transient.
 
       Planning policy:
       - Base your command decision on the actual candidate run-tree inventory and the inspected file contents.

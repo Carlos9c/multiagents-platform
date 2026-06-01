@@ -5,6 +5,7 @@ const PHASE_LABELS = {
   ready_to_start: 'Listo para iniciar',
   executing: 'Ejecutando',
   awaiting_review: 'Revisión pendiente',
+  paused: 'Pausado',
   completed: 'Completado',
 }
 
@@ -13,7 +14,8 @@ const INPUT_PLACEHOLDERS = {
   ready_to_start: 'Responde "sí" para confirmar, o edita la descripción de la derecha…',
   executing: 'Pregunta a Aria sobre el estado del proyecto…',
   awaiting_review: 'Responde a Aria sobre la tarea bloqueada…',
-  completed: 'Proyecto finalizado.',
+  paused: 'Pregunta a Aria sobre el estado del proyecto…',
+  completed: 'Pregunta a Aria sobre el proyecto completado…',
 }
 
 export function ChatPanel({ messages, phase, wsStatus, onSendMessage }) {
@@ -24,7 +26,7 @@ export function ChatPanel({ messages, phase, wsStatus, onSendMessage }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const inputDisabled = phase === 'completed'
+  const inputDisabled = false
 
   const handleSubmit = (e) => {
     e.preventDefault()

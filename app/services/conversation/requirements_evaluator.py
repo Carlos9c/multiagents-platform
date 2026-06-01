@@ -84,6 +84,22 @@ def _render_history(history: list[ConversationTurn]) -> str:
     return "\n".join(lines)
 
 
+_SPANISH_CHARS = frozenset("áéíóúñüÁÉÍÓÚÑÜ¿¡")
+
+
+def _detect_language(history: list[ConversationTurn]) -> str:
+    """Return the dominant language of user messages based on character heuristics.
+
+    Scans user turns from most recent to oldest. Returns 'Spanish' if Spanish-specific
+    characters are found, otherwise 'English' as the default.
+    """
+    for turn in reversed(history):
+        if turn.role == "user" and turn.content:
+            if any(c in _SPANISH_CHARS for c in turn.content):
+                return "Spanish"
+    return "English"
+
+
 def _build_user_prompt(inp: RequirementsEvaluatorInput) -> str:
     from app.services.prompt_loader import prompt_loader
 
@@ -96,12 +112,15 @@ def _build_user_prompt(inp: RequirementsEvaluatorInput) -> str:
             "conversation_history": inp.history,
         },
     )
+    detected_language = _detect_language(inp.history)
     draft_section = (
         f"\nCURRENT REQUIREMENTS DRAFT:\n{inp.current_draft}"
         if inp.current_draft
         else "\nCURRENT REQUIREMENTS DRAFT: (none yet)"
     )
     return f"""
+OUTPUT LANGUAGE: {detected_language}. You MUST write next_question and updated_draft in {detected_language}. Do not use any other language.
+
 Project name: {inp.project_name}
 {draft_section}
 

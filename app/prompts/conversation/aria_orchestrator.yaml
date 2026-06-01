@@ -1,5 +1,5 @@
 agent_name: aria_orchestrator
-version: "1.1.0"
+version: "1.2.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-28"
@@ -7,6 +7,9 @@ changelog:
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.2.0"
+    date: "2026-06-01"
+    changes: "Explicit review state-machine instructions; review_subphase signal; start_project two-turn guard"
 prompts:
   main:
     description: "Aria conversational orchestrator — routes user messages to the correct tool"
@@ -39,17 +42,36 @@ prompts:
         Disponible en CUALQUIER fase — el usuario siempre puede pedir información.
 
       - **review_agent**: Evalúa las aclaraciones del usuario cuando hay una tarea o error bloqueado.
-        Úsala cuando fase=reviewing y el usuario está aportando información para resolver el bloqueo.
+        Úsala cuando sub-fase=gathering_clarification y el usuario está aportando información.
+        IMPORTANTE: cuando review_agent devuelve status="ready_to_confirm" significa que YA tienes
+        suficiente información para proponer un plan — NO significa que el usuario haya confirmado.
+        En ese caso debes responder al usuario PRESENTANDO el plan propuesto y preguntando si lo
+        confirma. NO digas "la aclaración queda confirmada" ni "voy a reanudar" — el usuario
+        todavía no ha dado su visto bueno. Limítate a presentar el plan y preguntar "¿confirmas?".
 
-      - **confirmation_agent**: Interpreta si el usuario confirma o rechaza un plan propuesto.
-        Úsala cuando proposed_plan tiene valor y el usuario acaba de responder al plan.
+      - **confirmation_agent**: Interpreta si el usuario confirma o rechaza el plan propuesto.
+        Úsala cuando sub-fase=awaiting_confirmation y el usuario acaba de responder al plan.
+        Pasa el mensaje literal del usuario como tool_hint para que el evaluador disponga del
+        texto real.
+        Si devuelve confirmed=false: el usuario rechazó o quiere cambios — responde recogiendo
+        su objeción; el sistema volverá a sub-fase=gathering_clarification.
 
       - **start_project**: Inicia el proyecto creando el plan de tareas atómicas.
-        Úsala cuando requirements_ready=true y el usuario confirma que quiere empezar,
-        o cuando llega el evento de sistema confirm_start.
+        Úsala ÚNICAMENTE en estos dos casos:
+        (a) El usuario confirma explícitamente en su mensaje que quiere empezar
+            (p. ej. "sí, adelante", "empieza", "start") Y requirements_ready=true
+            Y en los tool_results de este turno NO hay un resultado de requirements_agent.
+        (b) Llega el evento de sistema confirm_start.
+        NUNCA la llames en el mismo turno en que requirements_agent devolvió sufficient.
+        Cuando requirements_agent devuelve sufficient debes responder al usuario con un
+        resumen del proyecto y preguntarle si quiere iniciar — espera su confirmación
+        en el siguiente turno.
 
       - **resumption_agent**: Aplica la aclaración confirmada al grafo de tareas y reanuda la ejecución.
-        Úsala inmediatamente después de que confirmation_agent devuelva confirmed=true.
+        REGLA OBLIGATORIA: si en este turno confirmation_agent devolvió confirmed=true, DEBES
+        llamar a resumption_agent ANTES de responder al usuario. No respondas sin haberlo llamado
+        — si lo omites, el proyecto quedará bloqueado en reviewing indefinidamente y el workflow
+        no reanudará nunca.
 
       ## Restricciones
 
@@ -61,8 +83,14 @@ prompts:
 
       - **gathering_requirements**: Foco en requirements_agent y start_project.
       - **executing**: Foco en query_agent. No modifiques el plan.
-      - **reviewing**: Foco en review_agent, confirmation_agent y resumption_agent.
-        El usuario también puede preguntar el estado — usa query_agent si lo pide.
+      - **reviewing**: Dos sub-fases distintas — lee "Sub-fase de revisión" en el estado del proyecto:
+          • gathering_clarification → usa review_agent para evaluar la información del usuario.
+            Si devuelve "ready_to_confirm": presenta el plan y pregunta al usuario si lo confirma.
+            No inicies la reanudación — espera la respuesta del usuario en el siguiente turno.
+          • awaiting_confirmation → usa confirmation_agent para interpretar la respuesta del usuario.
+            Si confirmed=true: llama OBLIGATORIAMENTE a resumption_agent en el mismo turno.
+            Si confirmed=false: responde recogiendo la objeción (la sub-fase vuelve a gathering).
+        El usuario siempre puede preguntar por el estado del proyecto — usa query_agent si lo pide.
       - **paused**: Foco en query_agent.
       - **completed**: Foco en query_agent.
 

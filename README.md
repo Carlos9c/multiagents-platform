@@ -38,6 +38,22 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Cambios recientes significativos
 
+- **Correcciones de bugs y endurecimiento de prompts (2026-06-01)**:
+
+  *Bugs corregidos:*
+  - **`test_builder_agent` invisible al Supervisor** — el agente no escribía entradas en `execution_trace.jsonl`. Añadida función `_write_test_builder_trace()` que emite una entrada por llamada con `call_type` (`"materialise"` | `"needs_dependency"`), `files_written[]` (path + operation + rationale), y `coverage_summary` completo (covered_cases, uncovered_cases, confidence, tested_against, potential_implementation_gaps). El Supervisor puede ahora evaluar el comportamiento real del agente.
+  - **`test_builder_agent` recibía inventario plano y `target_paths` vacío** — el inventario del workspace se convierte ahora a un árbol de directorios ASCII con conectores `├──`/`└──` (función `_paths_to_tree()`), y el orquestador tiene la obligación explícita de poblar `target_paths` para toda llamada a `test_builder_agent`. Un `target_paths` vacío se clasifica como error de routing.
+  - **Input de Aria bloqueado tras completar el proyecto con tareas fallidas** — `ChatPanel.jsx` tenía `inputDisabled = phase === 'completed'` que desactivaba el textarea en la fase `completed`, impidiendo el Q&A via `ProjectQueryAgent`. Corregido a `inputDisabled = false` con placeholder contextual por fase.
+  - **Todos los evaluadores de validadores del Supervisor producían veredicto `null`** — los cuatro evaluadores (`code_change_agent_validator_evaluator`, `command_runner_agent_validator_evaluator`, `test_builder_agent_validator_evaluator`, `document_writer_agent_validator_evaluator`) tenían `_AGENT_NAME` apuntando al nombre del validador en lugar del nombre del ejecutor. `build_pair_evaluation_context()` filtra runs via `agent_participated_in_run(run, agent_name)`, que busca el nombre en `execution_agent_sequence` — los validadores nunca aparecen en esa secuencia, por lo que el contexto era siempre vacío y el evaluador devolvía `result=None`. Corregido: `_AGENT_NAME` apunta ahora al ejecutor correspondiente (`"code_change_agent"`, `"command_runner_agent"`, etc.).
+
+  *Mejoras de prompts (actualización de versiones + alineación de supervisores):*
+  - **`orchestrator.yaml` v1.2.0** — regla de convergencia de verificación: si `command_runner_agent` produce dos fallos consecutivos con la misma clase de error sin un agente de reparación entre ellos, el orquestador no debe llamarlo de nuevo; debe enrutar al agente de reparación correcto usando `fault_side`, o cerrar si el presupuesto está agotado. Supervisor `orchestrator_evaluator.yaml` v1.1.0 añade los "convergence loops" como patrón de degradación.
+  - **`atomic_task_generator.yaml` v3.1.0** — (a) patrones de AC prohibidos: "importable from X", "coherente con Y", "preparado para Z" — estos patrones describen presencia estática en lugar de comportamiento verificable; (b) regla de split storage+dominio: persistencia y lógica de negocio deben separarse en tareas atómicas distintas porque sus tests requieren infraestructura diferente; (c) regla de scope de testing tasks: una tarea de test no debe abarcar múltiples unidades de implementación independientes con fronteras de fallo separadas. Supervisor `atomic_task_generator_evaluator.yaml` v1.3.0 añade evaluación de los tres criterios nuevos.
+  - **`code_change_agent.yaml` v1.2.0** — restricción de scope en repair pass: cuando `materialization_attempt_count > 0` y la evidencia indica un fallo de verificación previo, el agente debe limitarse al cambio mínimo que cierra el gap identificado; no añadir abstracciones, no refactorizar módulos no relacionados. Supervisor `code_change_agent_evaluator.yaml` v1.1.0 añade evaluación de scope en rondas de reparación (`attempt_number > 1`).
+  - **`command_runner_agent.yaml` v1.2.0** — regla de adaptación en retry: antes de planificar un comando, el agente examina `prior_commands` para clasificar el tipo de fallo previo (fallo de resolución de dependencias → `verification_not_applicable`; descubrimiento cero de tests → comando más explícito con rutas directas; fallo de aserción → `verification_not_applicable`, la reparación la hace el agente de código; mismo error class dos veces → `verification_not_applicable` estructural). Supervisor `command_runner_agent_evaluator.yaml` v1.1.0 amplía la dimensión "Retry adaptation" con estos patrones específicos.
+  - **`recovery_planner.yaml` v1.2.0** — reglas de calibración de confianza: `high` requiere causa raíz nombrada con precisión + acción directamente vinculada + sin incertidumbre de entorno; `medium` cuando la diagnosis es probable pero la evidencia es ambigua; `low` cuando hay múltiples causas plausibles; `high + manual_review` es una combinación contradictoria (siempre degradar a `medium`); sin causa raíz concreta en la evidencia → `manual_review`, no `reatomize` con confianza inflada. Supervisor `recovery_planner_evaluator.yaml` v1.1.0 alinea la dimensión de calibración con estas definiciones.
+  - **`test_builder_agent_evaluator.yaml` v1.1.0** — actualizado para consumir `test_builder_trace_entries[]` (5ª dimensión: "Coverage assessment self-awareness" — ¿identifica correctamente gaps de implementación vs. gaps de cobertura?).
+
 - **Mejoras de generación de tareas atómicas (Fases 0–3 + 5B/5C)**: serie de mejoras al pipeline de planificación que incrementan la especificidad, coherencia y calidad de secuenciación de las tareas generadas:
   - **(Fase 0 — entorno primero)** `CatalogSelector` y `EnvironmentPlanner` se ejecutan *antes* del `Planner` y del `AtomicGenerator`, eliminando la dependencia circular: las tareas ya conocen el stack tecnológico cuando se generan.
   - **(Fase 1 — runtime context flow)** `RuntimeSpec` serializado se inyecta en `planner.py`, `technical_task_refiner.py` y `atomic_task_generator.py`. El generador atómico aplica la restricción más fuerte: `proposed_solution` y `implementation_steps` deben referenciar las tecnologías concretas del stack (FastAPI, SQLAlchemy, etc.), no abstracciones genéricas.
@@ -75,7 +91,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Números actuales
 
-- **1507 tests unitarios** — todos passing
+- **1554 tests unitarios** — todos passing
 - **12 tests de integración** (Docker) — se ejecutan con `-m integration`
 - **0 failures** en CI
 
@@ -1015,6 +1031,8 @@ CODE_AGENT_PROVIDER=...          # code_change_agent
 CODE_AGENT_MODEL=...
 COMMAND_AGENT_PROVIDER=...       # command_runner_agent
 COMMAND_AGENT_MODEL=...
+TEST_AGENT_PROVIDER=...          # test_builder_agent (si no se define, hereda openai_model)
+TEST_AGENT_MODEL=...             # ej. gpt-5.2
 VALIDATOR_PROVIDER=...           # ambos validadores (ej. openai)
 VALIDATOR_MODEL=...              # ej. gpt-5.2
 
@@ -1064,7 +1082,7 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**1507 tests unitarios + 12 tests de integración — todos passing.**
+**1554 tests unitarios + 12 tests de integración — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
@@ -1120,53 +1138,56 @@ Los informes del Supervisor se generan y persisten en BD pero no hay endpoint `G
 **3. Respuestas en el idioma del usuario**
 Los evaluadores LLM (`RequirementsEvaluator`, `ReviewEvaluator`, `ConfirmationEvaluator`, `ProjectQueryAgent`) y el planificador producen contenido en inglés independientemente del idioma del usuario, lo que provoca que tareas, borradores y mensajes aparezcan en inglés en la UI aunque el usuario escriba en español. Añadir una instrucción de idioma en los system prompts de cada evaluador tomando como referencia el idioma del último mensaje del usuario. Aria ya tiene acceso al historial sin llamada LLM adicional.
 
-**4. Ejecución paralela de los 22 evaluadores del Supervisor**
-El `supervisor_runner.py` ejecuta los 22 evaluadores secuencialmente. Dado que cada evaluador es independiente, pueden ejecutarse en paralelo con `ThreadPoolExecutor`. Reduciría el tiempo de ~22 × latencia_LLM a ~1 × latencia_LLM. El runner ya gestiona errores por evaluador de forma aislada.
+**4. Ejecución paralela de los evaluadores del Supervisor**
+El `supervisor_runner.py` ejecuta todos los evaluadores secuencialmente. Dado que cada evaluador es independiente, pueden ejecutarse en paralelo con `ThreadPoolExecutor`. Reduciría el tiempo de N × latencia_LLM a ~1 × latencia_LLM. El runner ya gestiona errores por evaluador de forma aislada.
 
 **5. Soporte multi-stage**
 El sistema ejecuta un único stage por proyecto. Para proyectos reales con múltiples stages secuenciales (ej. "backend" → "frontend" → "integración"), el `ProjectWorkflowService` necesita un loop externo que cierre el stage actual, genere el siguiente y reutilice el contexto acumulado. Las bases ya están: `project_stage_closed`, `stage_goal` y `ProjectOperationalContext` son stage-aware.
 
+**6. Validación E2E post-sesión de supervisión**
+Los cambios de prompt realizados en esta sesión (convergencia, AC prohibidos, repair pass, retry adaptation, calibración de confianza) deben validarse empíricamente con proyectos reales. Diseñar un protocolo de comparación: ejecutar 3–5 proyectos equivalentes con los prompts anteriores y los nuevos, comparar los informes del Supervisor, y confirmar que los nuevos patrones reducen las ocurrencias de los comportamientos degradados detectados.
+
 ### Media prioridad
 
-**6. Trigger automático del QA tras `PROJECT_COMPLETED`**
+**7. Trigger automático del QA tras `PROJECT_COMPLETED`**
 Actualmente el QA requiere que el usuario lo acepte explícitamente mediante la oferta de Aria. Para proyectos configurados con `auto_qa=True`, el runner podría dispararse automáticamente al recibir el evento `PROJECT_COMPLETED`, sin intervención del usuario. Añadir el campo `auto_qa` al modelo `Project` y la lógica de disparo en el manejador de `PROJECT_COMPLETED` de Aria.
 
-**7. Remediación automática sin confirmación del usuario**
+**8. Remediación automática sin confirmación del usuario**
 Cuando todos los hallazgos tienen `auto_remediable=True`, el `QATool` podría crear las Tasks de remediación directamente sin pasar por la oferta de confirmación. Añadir la lógica de cortocircuito en `_summarize_qa_result()`: si `has_remediation and all_auto_remediable`, devolver `status="remediation_auto_confirmed"` y crear las Tasks sin esperar respuesta.
 
-**8. Pre-fetch de dependencias en el bootstrapper para ecosistemas compilados**
+**9. Pre-fetch de dependencias en el bootstrapper para ecosistemas compilados**
 Cuando `code_change_agent` escribe archivos de manifiesto (`pom.xml`, `Cargo.toml`, `go.mod`, `.csproj`, `pubspec.yaml`), el bootstrapper del siguiente run no ejecuta pre-fetch. Añadir una fase opcional en `bootstrapper.py` que detecte estos archivos y ejecute el comando de descarga antes del smoke test. Reduciría el tiempo de primera compilación y daría feedback temprano sobre manifests rotos.
 
-**9. Routing de modelo para Aria, evaluadores conversacionales y agentes QA**
+**10. Routing de modelo para Aria, evaluadores conversacionales y agentes QA**
 Los LLM calls del orquestador Aria, evaluadores conversacionales y agentes QA usan el provider por defecto. Añadir variables de configuración (`ARIA_MODEL`, `ARIA_PROVIDER`, `QA_AGENT_MODEL`, `QA_AGENT_PROVIDER`) para enrutar capas a modelos distintos del motor de ejecución, igual que ya existe `VALIDATOR_MODEL`.
 
-**10. Nuevo executor type: generación de media**
-Para proyectos con assets (sprites, iconos, sonidos), añadir un nuevo `executor_type` (`image_generation`, `audio_generation`) que llame APIs generativas externas (DALL-E 3, etc.) sin necesidad de contenedor Docker. El `atomic_task_generator` emitiría tareas de este tipo; el orquestador las delegaría a un `MediaGenerationAgent`.
+**11. Precisión del validador en decisiones parciales**
+El `command_runner_agent_validator` puede declarar `partial` incluso cuando los tests pasan. Ampliar la lista de markers en `_task_looks_like_executable_implementation` (persistence, storage, data) o relajar el criterio de normalización para tareas con `exit_code=0`.
 
-**11. Observabilidad estructurada del pipeline completo**
+**12. Observabilidad estructurada del pipeline completo**
 Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`, `aria_tool_called`, `qa_verdict`, `qa_findings_count`) en todo el pipeline. Incluir telemetría del loop de Aria y del orquestador QA (agente llamado, ronda, si se agotó el presupuesto).
 
-**12. Tests de integración end-to-end del flujo conversacional**
+**13. Tests de integración end-to-end del flujo conversacional**
 Tests que cubran el flujo completo con WebSocket real: gathering → Start → executing → revisión manual → confirmación → reanudación. Los tests actuales mockean el LLM pero no prueban el ciclo completo con WebSocket y persistencia en BD.
 
 ### Baja prioridad
 
-**13. Panel de complejidad del plan de ejecución en el frontend**
+**14. Panel de complejidad del plan de ejecución en el frontend**
 Mostrar `estimated_complexity` por tarea en el panel de tareas del proyecto: un badge de color (XS=verde, S=azul, M=amarillo, L=naranja, XL=rojo) junto al título de cada tarea atómica. En la vista del batch actual, indicar la carga agregada del batch (suma ponderada de complejidades) para que el usuario identifique visualmente batches sobrecargados. Los datos ya están en BD.
 
-**14. Historial comparativo de sesiones QA en el frontend**
+**15. Historial comparativo de sesiones QA en el frontend**
 Mostrar gráficamente la evolución de hallazgos entre sesiones QA sucesivas del mismo proyecto: tendencia de `high` + `critical` en el tiempo, hallazgos nuevos vs. resueltos por sesión (datos disponibles vía `regression_qa_agent`), y duración por sesión.
 
-**15. Precisión del validador en decisiones parciales**
-El `command_runner_agent_validator` puede declarar `partial` incluso cuando los tests pasan. Ampliar la lista de markers en `_task_looks_like_executable_implementation` (persistence, storage, data) o relajar el criterio de normalización para tareas con `exit_code=0`.
+**16. Nuevo executor type: generación de media**
+Para proyectos con assets (sprites, iconos, sonidos), añadir un nuevo `executor_type` (`image_generation`, `audio_generation`) que llame APIs generativas externas sin necesidad de contenedor Docker. El `atomic_task_generator` emitiría tareas de este tipo; el orquestador las delegaría a un `MediaGenerationAgent`.
 
-**16. Métricas de ejecución por proyecto**
+**17. Métricas de ejecución por proyecto**
 Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de episodios de revisión por tarea, tiempo medio hasta confirmación. Datos para ajustar parámetros de orquestación y detectar proyectos problemáticos antes del iteration limit.
 
-**17. Contexto estructural del repositorio en `context_selection_agent`**
+**18. Contexto estructural del repositorio en `context_selection_agent`**
 El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto.
 
-**18. Mantenimiento del catálogo de imágenes Docker**
+**19. Mantenimiento del catálogo de imágenes Docker**
 Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter stable), política de versionado en el catálogo, y estrategia de publicación en un registry privado para evitar builds locales en cada máquina.
 
 ---
@@ -1187,7 +1208,8 @@ Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter s
 | EnvironmentManager | `environment_manager_agent` no produce entregables validables (en `IGNORED_VALIDATION_PRODUCERS`); su fallo es terminal (no entra en loop de reparación); `exact_only` + conflicto de versión → `needs_user_input`; archivos de manifiesto modificados en disco siempre se registran en evidencia independientemente del éxito de la instalación |
 | Aria loop | `MAX_STEPS = 4`; misma herramienta ≤ 1 vez por turno (no-repeat); si el loop se agota sin `respond`, se fuerza una respuesta de fallback; los eventos de sistema aplican transiciones DB antes del loop LLM |
 | ReviewContext | `conversation.proposed_plan != None` ↔ estado "esperando confirmación"; `conversation.review_context` serializa el ADT completo (`TaskReviewContext` \| `ProjectReviewContext`); se limpia al resolver la revisión |
-| Supervisor | `result=None` (not_supervised) si el agente nunca fue llamado en el proyecto; los evaluadores de validador DEBEN tener `AGENT_NAME` distinto del ejecutor (comparten BD con clave compuesta `(report_id, agent_name)`); veredicto global = media ponderada, no worst-case; >30% not_supervised → `not_evaluated` antes de calcular la media |
+| Supervisor | `result=None` (not_supervised) si el agente nunca fue llamado en el proyecto; los evaluadores de validador (`code_change_agent_validator_evaluator` et al.) DEBEN tener `_AGENT_NAME` igual al **ejecutor** (ej. `"code_change_agent"`), NO al validador — `build_pair_evaluation_context()` filtra por `execution_agent_sequence` donde los validadores nunca aparecen; `_VALIDATOR_NAME` sigue siendo el nombre del validador para extraer su resultado del artefacto; veredicto global = media ponderada, no worst-case; >30% not_supervised → `not_evaluated` antes de calcular la media |
+| test_builder_agent | escribe una entrada en `execution_trace.jsonl` por cada llamada materializada o bloqueada (`call_type="materialise"` \| `"needs_dependency"`); la entrada incluye `files_written[]`, `coverage_summary` completo, y `needs_dependency` cuando aplica; `target_paths` DEBE estar poblado por el orquestador en toda llamada — un `target_paths` vacío es un error de routing |
 | Motor QA — orquestador | Guardas de presupuesto (timeout, max_rounds, max_findings) se evalúan ANTES de cada llamada LLM; tras la decisión, el orden de validación es fijo: synthesis_agent excluido → no repetición → estrategia → límite por agente → registrado; synthesis_agent nunca participa en el bucle de sondeo |
 | Motor QA — agentes | `session.record_agent_call(self.name)` es obligatorio al inicio de cada `probe()`; `session.add_probe(ProbeRecord(...))` es obligatorio antes de retornar; los agentes nunca lanzan excepciones por fallos de sondeo esperados (retornan `outcome="skipped"`); `producer_agent=self.name` en todos los `QAFindingDetail` emitidos |
 | Motor QA — persistencia | `findings_summary` se almacena como dict JSON (sin `json.dumps` adicional); veredicto `blocked` en `QAResult` → `QASession.status = BLOCKED`; cualquier otro veredicto → `status = COMPLETED`; `_persist_result` nunca lanza — sus errores se capturan con `logger.warning` |

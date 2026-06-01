@@ -317,7 +317,8 @@ def _build_historical_execution_context(
                 description=selected_task.description,
                 summary=selected_task.summary,
                 objective=selected_task.objective,
-                acceptance_criteria=selected_task.acceptance_criteria,
+                acceptance_criteria=format_acceptance_criteria(selected_task.acceptance_criteria)
+                or None,
                 proposed_solution=selected_task.proposed_solution,
                 run_summary=selected_run.work_summary,
                 completed_scope=selected_run.completed_scope,

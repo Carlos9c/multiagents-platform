@@ -1,9 +1,12 @@
 agent_name: code_change_agent_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor evaluator for code_change_agent behavioral patterns"
+  - version: "1.1.0"
+    date: "2026-06-01"
+    changes: "Added repair pass scope discipline to Scope discipline dimension"
 prompts:
   main:
     description: "Evaluates the code_change_agent's operational patterns across a sample of tasks"
@@ -42,6 +45,11 @@ prompts:
          Does the agent change files consistent with the task objective and acceptance_criteria?
          Are changed_files clearly out of scope for the task type?
          Does completed_scope match what changed_files shows?
+         Repair pass discipline: when attempt_number > 1, the agent is in a repair context.
+         Flag runs where the agent introduced new abstractions, refactored unrelated files, or
+         expanded scope beyond the specific gap identified in the prior failure evidence.
+         A repair pass that changes many more files than the first attempt without strong
+         justification is a scope discipline failure.
 
       2. Declaration accuracy
          Does work_summary and completed_scope accurately reflect what was actually changed?

@@ -1,5 +1,5 @@
 agent_name: recovery_planner
-version: "1.1.0"
+version: "1.2.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-28"
@@ -7,6 +7,9 @@ changelog:
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.2.0"
+    date: "2026-06-01"
+    changes: "Added confidence calibration rules: high/medium/low definitions; confidence=high+manual_review is inconsistent; no-root-cause forces manual_review"
 prompts:
   main:
     description: "Decides the narrowest reliable recovery action after a task failed or was partial"
@@ -170,6 +173,22 @@ prompts:
         - or manual_review, if automated next steps are not trustworthy enough
       - Do NOT change a documentation task into a bootstrap or implementation task just because context resolution failed.
       - Do NOT change a requirements/scope task into runtime implementation work just because context resolution failed.
+
+      Confidence calibration rules:
+      - confidence=high requires all of: a precise, named root cause in the execution evidence
+        (specific component, specific error class, specific failure location), the selected
+        action directly addresses that cause, and no external dependency or environment
+        uncertainty remains.
+      - confidence=medium is appropriate when: the diagnosis is probable but evidence is
+        ambiguous or incomplete, or the action depends on an assumption about the target
+        state that cannot be fully verified from the available evidence.
+      - confidence=low is appropriate when: multiple failure causes are plausible, the
+        selected action is the best available option without certainty, or the environment
+        state is unknown.
+      - confidence=high combined with action=manual_review is contradictory: manual_review
+        is the uncertain path by definition. Use confidence=medium at most.
+      - If no concrete root cause can be identified in the execution evidence, use
+        manual_review rather than reatomize with inflated confidence.
 
       Decision rules:
       - Prefer the narrowest sufficient action.

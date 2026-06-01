@@ -133,6 +133,15 @@ def _load_command_trace_entries_for_run(
     return [e for e in all_entries if e.get("run_id") == run_id]
 
 
+def _load_test_builder_trace_entries_for_run(
+    project_id: int,
+    run_id: int,
+) -> list[dict[str, Any]]:
+    """Return test_builder_agent trace entries that belong to this specific run_id."""
+    all_entries = load_execution_trace_entries(project_id, agent="test_builder_agent")
+    return [e for e in all_entries if e.get("run_id") == run_id]
+
+
 def _get_budget_exceeded_task_ids(project_id: int) -> set[int]:
     """Return the set of task_ids that had at least one budget_exceeded orchestrator run."""
     entries = load_execution_trace_entries(project_id, agent="orchestrator")
@@ -155,6 +164,7 @@ def _build_run_evidence(
     project_id: int,
     validator_key: str,
     include_command_trace: bool,
+    include_test_builder_trace: bool = False,
 ) -> dict[str, Any]:
     """Build a compact evidence dict for one ExecutionRun."""
     artifact = load_artifact_for_run(db, run.id, run.task_id)
@@ -186,6 +196,10 @@ def _build_run_evidence(
     if include_command_trace:
         command_trace_entries = _load_command_trace_entries_for_run(project_id, run.id)
 
+    test_builder_trace_entries: list[dict[str, Any]] = []
+    if include_test_builder_trace:
+        test_builder_trace_entries = _load_test_builder_trace_entries_for_run(project_id, run.id)
+
     agent_sequence: list[str] = []
     if run.execution_agent_sequence:
         try:
@@ -207,6 +221,8 @@ def _build_run_evidence(
         "agent_sequence": agent_sequence,
         # command_runner_agent only — empty list for other agents
         "command_trace_entries": command_trace_entries,
+        # test_builder_agent only — empty list for other agents
+        "test_builder_trace_entries": test_builder_trace_entries,
         # cross-context: joint decision for executor evaluator
         "joint_validation_decision": joint_decision,
         # cross-context: per-validator result (executor → sees validator; validator → primary data)
@@ -222,6 +238,7 @@ def _build_task_evidence(
     project_id: int,
     validator_key: str,
     include_command_trace: bool,
+    include_test_builder_trace: bool = False,
 ) -> dict[str, Any]:
     """Build a compact evidence dict for one Task and all its ExecutionRuns."""
     run_evidences = [
@@ -231,6 +248,7 @@ def _build_task_evidence(
             project_id=project_id,
             validator_key=validator_key,
             include_command_trace=include_command_trace,
+            include_test_builder_trace=include_test_builder_trace,
         )
         for run in runs
     ]
@@ -329,6 +347,7 @@ def build_pair_evaluation_context(
     budget_exceeded_task_ids = _get_budget_exceeded_task_ids(project_id)
 
     include_command_trace = agent_name == "command_runner_agent"
+    include_test_builder_trace = agent_name == "test_builder_agent"
 
     # Build task evidence for each task group
     all_task_evidences: list[dict[str, Any]] = []
@@ -341,6 +360,7 @@ def build_pair_evaluation_context(
             project_id=project_id,
             validator_key=validator_name,
             include_command_trace=include_command_trace,
+            include_test_builder_trace=include_test_builder_trace,
         )
         evidence["had_budget_exceeded"] = task_id in budget_exceeded_task_ids
         all_task_evidences.append(evidence)

@@ -188,7 +188,20 @@ class OpenAIProvider(LLMProvider):
                 len(output_text),
             )
 
-            parsed = json.loads(output_text)
+            output_text_stripped = output_text.strip()
+            try:
+                parsed = json.loads(output_text_stripped)
+            except json.JSONDecodeError:
+                # Some models append trailing text after the JSON object even
+                # with structured-output mode enabled. raw_decode parses the
+                # first complete JSON value and ignores anything that follows.
+                logger.warning(
+                    "llm_json_extra_data_fallback provider=openai model=%s schema=%s — using raw_decode",
+                    self.model,
+                    schema_name,
+                )
+                decoder = json.JSONDecoder()
+                parsed, _ = decoder.raw_decode(output_text_stripped)
 
             elapsed_ms = int((time.perf_counter() - started_at) * 1000)
             input_tokens = self._safe_usage_value(response, "input_tokens")

@@ -305,3 +305,144 @@ def test_phase_transition_overwrites_existing_product_type(db_session: Session, 
     db_session.refresh(project)
 
     assert project.product_type == "desktop_app"
+
+
+# ── _detect_language ──────────────────────────────────────────────────────────
+
+
+class TestDetectLanguage:
+    """Unit tests for the language heuristic used to inject OUTPUT LANGUAGE."""
+
+    from app.services.conversation.requirements_evaluator import (
+        ConversationTurn,
+        _detect_language,
+    )
+
+    def _turns(self, *pairs: tuple[str, str]) -> list:
+        from app.services.conversation.requirements_evaluator import ConversationTurn
+
+        return [ConversationTurn(role=r, content=c) for r, c in pairs]
+
+    def test_detects_spanish_from_accented_vowels(self):
+        from app.services.conversation.requirements_evaluator import _detect_language
+
+        history = self._turns(("user", "Quiero construir una aplicación web con autenticación"))
+        assert _detect_language(history) == "Spanish"
+
+    def test_detects_spanish_from_enie(self):
+        from app.services.conversation.requirements_evaluator import _detect_language
+
+        history = self._turns(("user", "El sistema debe gestionar la información de usuarios"))
+        assert _detect_language(history) == "Spanish"
+
+    def test_detects_spanish_from_inverted_question_mark(self):
+        from app.services.conversation.requirements_evaluator import _detect_language
+
+        history = self._turns(("user", "¿Puede generar reportes automáticos?"))
+        assert _detect_language(history) == "Spanish"
+
+    def test_defaults_to_english_for_ascii_only(self):
+        from app.services.conversation.requirements_evaluator import _detect_language
+
+        history = self._turns(("user", "I want to build a REST API with authentication"))
+        assert _detect_language(history) == "English"
+
+    def test_empty_history_defaults_to_english(self):
+        from app.services.conversation.requirements_evaluator import _detect_language
+
+        assert _detect_language([]) == "English"
+
+    def test_scans_from_most_recent_user_message(self):
+        from app.services.conversation.requirements_evaluator import _detect_language
+
+        # Most recent user message is Spanish; earlier one is English
+        history = self._turns(
+            ("user", "I want a web app"),
+            ("assistant", "Sure! What features?"),
+            ("user", "También necesito autenticación con OAuth"),
+        )
+        assert _detect_language(history) == "Spanish"
+
+    def test_ignores_assistant_messages(self):
+        from app.services.conversation.requirements_evaluator import _detect_language
+
+        # Assistant message has Spanish chars but user message is English
+        history = self._turns(
+            ("assistant", "¡Perfecto! ¿Qué funcionalidad necesitas?"),
+            ("user", "I need a user login system"),
+        )
+        assert _detect_language(history) == "English"
+
+
+# ── Language injection in user_prompt ─────────────────────────────────────────
+
+
+class TestLanguageInjectionInPrompt:
+    """Verify that OUTPUT LANGUAGE is injected into the user_prompt passed to the LLM."""
+
+    def _make_spanish_input(self) -> RequirementsEvaluatorInput:
+        return RequirementsEvaluatorInput(
+            project_name="Mi Proyecto",
+            history=[
+                ConversationTurn(
+                    role="user",
+                    content="Quiero construir una API REST con autenticación JWT",
+                )
+            ],
+            current_draft=None,
+        )
+
+    def _make_english_input(self) -> RequirementsEvaluatorInput:
+        return RequirementsEvaluatorInput(
+            project_name="My Project",
+            history=[
+                ConversationTurn(
+                    role="user",
+                    content="I want to build a REST API with JWT authentication",
+                )
+            ],
+            current_draft=None,
+        )
+
+    def test_spanish_input_injects_spanish_language(self):
+        mock_provider = MagicMock()
+        mock_provider.generate_structured.return_value = _raw_sufficient("rest_api")
+        with patch(
+            "app.services.conversation.requirements_evaluator.get_llm_provider",
+            return_value=mock_provider,
+        ):
+            evaluate_requirements(self._make_spanish_input())
+
+        call_kwargs = mock_provider.generate_structured.call_args
+        user_prompt = call_kwargs[1]["user_prompt"] if call_kwargs[1] else call_kwargs[0][1]
+        assert "OUTPUT LANGUAGE: Spanish" in user_prompt
+        assert "You MUST write" in user_prompt
+
+    def test_english_input_injects_english_language(self):
+        mock_provider = MagicMock()
+        mock_provider.generate_structured.return_value = _raw_sufficient("rest_api")
+        with patch(
+            "app.services.conversation.requirements_evaluator.get_llm_provider",
+            return_value=mock_provider,
+        ):
+            evaluate_requirements(self._make_english_input())
+
+        call_kwargs = mock_provider.generate_structured.call_args
+        user_prompt = call_kwargs[1]["user_prompt"] if call_kwargs[1] else call_kwargs[0][1]
+        assert "OUTPUT LANGUAGE: English" in user_prompt
+
+    def test_language_line_appears_before_project_name(self):
+        """OUTPUT LANGUAGE instruction must be the first thing in the prompt."""
+        mock_provider = MagicMock()
+        mock_provider.generate_structured.return_value = _raw_sufficient()
+        with patch(
+            "app.services.conversation.requirements_evaluator.get_llm_provider",
+            return_value=mock_provider,
+        ):
+            evaluate_requirements(self._make_spanish_input())
+
+        call_kwargs = mock_provider.generate_structured.call_args
+        user_prompt = call_kwargs[1]["user_prompt"] if call_kwargs[1] else call_kwargs[0][1]
+        lang_pos = user_prompt.index("OUTPUT LANGUAGE")
+        name_pos = user_prompt.index("Mi Proyecto")
+        assert lang_pos < name_pos

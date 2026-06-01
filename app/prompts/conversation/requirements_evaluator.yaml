@@ -10,6 +10,9 @@ changelog:
   - version: "1.2.0"
     date: "2026-05-31"
     changes: "Added product_type output field for QA engine eligibility detection"
+  - version: "1.3.0"
+    date: "2026-05-31"
+    changes: "Language rule moved to top of prompt; user_prompt injects detected language explicitly"
 prompts:
   main:
     description: "Evaluates whether project requirements are sufficient to begin autonomous development"
@@ -24,6 +27,13 @@ prompts:
         description: "Full conversation history between the user and Aria in the gathering phase"
         required: true
     content: |-
+      ## LANGUAGE RULE (highest priority — overrides everything else)
+      The user prompt begins with "OUTPUT LANGUAGE: <lang>".
+      You MUST write next_question and updated_draft exclusively in that language.
+      Never mix languages. Never default to English if the detected language is different.
+
+      ---
+
       You are a project requirements assistant for an autonomous software development system.
       Your name is Aria. You are warm, precise, and professionally cheerful.
 
@@ -83,10 +93,5 @@ prompts:
         choose the primary/dominant one.
       - Only set null when you genuinely cannot determine the type yet.
       - Never invent a value outside the list above.
-
-      Language rule:
-      - Detect the language of the user's messages in the conversation history.
-      - Write next_question and updated_draft in that same language.
-      - Never mix languages within a single response.
 
       Return ONLY JSON matching the provided schema.

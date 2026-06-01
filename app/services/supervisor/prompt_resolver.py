@@ -23,11 +23,52 @@ logger = logging.getLogger(__name__)
 
 # Mapping of agent_name → relative path inside app/prompts/
 _AGENT_YAML_PATHS: dict[str, str] = {
+    # ── Planning agents ──────────────────────────────────────────────────────
     "planner": "planning/planner.yaml",
     "atomic_task_generator": "planning/atomic_task_generator.yaml",
     "execution_sequencer": "planning/execution_sequencer.yaml",
+    "technical_task_refiner": "planning/technical_task_refiner.yaml",
+    # ── Environment agents ───────────────────────────────────────────────────
     "environment_planner": "environment/environment_planner.yaml",
     "catalog_selector": "environment/catalog_selector.yaml",
+    # ── Execution agents ─────────────────────────────────────────────────────
+    "orchestrator": "execution/orchestrator.yaml",
+    "context_selection_agent": "execution/context_selection_agent.yaml",
+    "command_runner_agent": "execution/command_runner_agent.yaml",
+    "code_change_agent": "execution/code_change_agent.yaml",
+    "test_builder_agent": "execution/test_builder_agent.yaml",
+    "document_writer_agent": "execution/document_writer_agent.yaml",
+    "environment_manager_agent": "execution/environment_manager_agent.yaml",
+    "error_diagnostic_tool": "execution/error_diagnostic_tool.yaml",
+    # ── Validation agents ────────────────────────────────────────────────────
+    "command_runner_agent_validator": "validation/command_runner_agent_validator.yaml",
+    "code_change_agent_validator": "validation/code_change_agent_validator.yaml",
+    "test_builder_agent_validator": "validation/test_builder_agent_validator.yaml",
+    "document_writer_agent_validator": "validation/document_writer_agent_validator.yaml",
+    # ── Recovery agents ──────────────────────────────────────────────────────
+    "recovery_planner": "recovery/recovery_planner.yaml",
+    "recovery_assignment": "recovery/recovery_assignment.yaml",
+    "stage_evaluator": "recovery/stage_evaluator.yaml",
+    # ── Conversation agents ──────────────────────────────────────────────────
+    "aria_orchestrator": "conversation/aria_orchestrator.yaml",
+    "requirements_evaluator": "conversation/requirements_evaluator.yaml",
+    "review_evaluator": "conversation/review_evaluator.yaml",
+    "confirmation_evaluator": "conversation/confirmation_evaluator.yaml",
+    "impact_assessment_agent": "conversation/impact_assessment_agent.yaml",
+    "project_query_agent": "conversation/project_query_agent.yaml",
+    # ── QA agents ────────────────────────────────────────────────────────────
+    "functional_qa_agent": "qa/functional_qa_agent.yaml",
+    "boundary_qa_agent": "qa/boundary_qa_agent.yaml",
+    "adversarial_qa_agent": "qa/adversarial_qa_agent.yaml",
+    "security_qa_agent": "qa/security_qa_agent.yaml",
+    "performance_qa_agent": "qa/performance_qa_agent.yaml",
+    "regression_qa_agent": "qa/regression_qa_agent.yaml",
+    "qa_orchestrator": "qa/qa_orchestrator.yaml",
+    "qa_bootstrapper": "qa/qa_bootstrapper.yaml",
+    # ── Analysis agents ──────────────────────────────────────────────────────
+    "codebase_analyzer": "analysis/codebase_analyzer.yaml",
+    "file_analyzer": "analysis/file_analyzer.yaml",
+    # ── Supervisor evaluators ────────────────────────────────────────────────
     "planner_evaluator": "supervisor/planner_evaluator.yaml",
     "atomic_task_generator_evaluator": "supervisor/atomic_task_generator_evaluator.yaml",
     "execution_sequencer_evaluator": "supervisor/execution_sequencer_evaluator.yaml",
@@ -50,7 +91,7 @@ _AGENT_YAML_PATHS: dict[str, str] = {
     "requirements_evaluator_evaluator": "supervisor/requirements_evaluator_evaluator.yaml",
     "review_episode_evaluator": "supervisor/review_episode_evaluator.yaml",
     "aria_conversation_evaluator": "supervisor/aria_conversation_evaluator.yaml",
-    # QA agent evaluators (Phase 7-9)
+    "qa_session_evaluator": "supervisor/qa_session_evaluator.yaml",
     "functional_qa_agent_evaluator": "supervisor/functional_qa_agent_evaluator.yaml",
     "boundary_qa_agent_evaluator": "supervisor/boundary_qa_agent_evaluator.yaml",
     "adversarial_qa_agent_evaluator": "supervisor/adversarial_qa_agent_evaluator.yaml",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from pathlib import Path
 
 import docker
@@ -315,10 +316,6 @@ class DockerDriver(BaseEnvironmentDriver):
         # build scripts use bash-only features and rely on login-shell PATH initialisation
         # (e.g. jenv shims, ANDROID_HOME exports from /etc/profile.d/).
         _bash_runtimes = {"android_gradle", "java_gradle", "react_native"}
-        if session.runtime_type in _bash_runtimes:
-            full_command = ["bash", "-lc", f"cd {container_cwd} && {command}"]
-        else:
-            full_command = ["sh", "-c", f"cd {container_cwd} && {command}"]
 
         logger.debug(
             "docker_driver_exec project_id=%s command=%s cwd=%s",
@@ -327,10 +324,26 @@ class DockerDriver(BaseEnvironmentDriver):
             container_cwd,
         )
 
-        exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(
-            cmd=full_command,
-            demux=True,
-        )
+        if session.runtime_type in _bash_runtimes:
+            # Keep bash -lc for runtimes that need login-shell initialisation.
+            # The cd prefix is necessary here because bash -lc does not support
+            # the workdir exec parameter reliably across all images.
+            exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(
+                cmd=["bash", "-lc", f"cd {container_cwd} && {command}"],
+                demux=True,
+            )
+        else:
+            # For all other runtimes: use exec_run(workdir=...) + shlex.split so
+            # that the command is never passed through a shell interpreter.
+            # This eliminates the sh -c wrapper and makes shell-operator detection
+            # in _contains_disallowed_shell_constructs meaningful: operators that
+            # reach exec_run would be treated as literal argument characters, not
+            # shell syntax, so a stray `;` in a quoted python -c argument is safe.
+            exit_code, (stdout_bytes, stderr_bytes) = container.exec_run(
+                cmd=shlex.split(command, posix=True),
+                workdir=str(container_cwd),
+                demux=True,
+            )
 
         return EnvironmentCommandResult(
             exit_code=exit_code if exit_code is not None else 1,

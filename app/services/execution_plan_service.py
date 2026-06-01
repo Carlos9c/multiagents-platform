@@ -14,6 +14,7 @@ from app.models.task import (
     TASK_STATUS_PENDING,
     TASK_STATUS_RUNNING,
     Task,
+    format_acceptance_criteria,
 )
 from app.schemas.execution_plan import (
     CandidateAtomicTask,
@@ -108,7 +109,7 @@ def _build_candidate_atomic_task(
         parent_refined_title=parent_refined_title,
         parent_high_level_title=parent_high_level_title,
         implementation_steps=task.implementation_steps,
-        acceptance_criteria=task.acceptance_criteria,
+        acceptance_criteria=format_acceptance_criteria(task.acceptance_criteria) or None,
         estimated_complexity=task.estimated_complexity,
         depends_on_task_titles=task.depends_on_task_titles or [],
         tests_required=task.tests_required,

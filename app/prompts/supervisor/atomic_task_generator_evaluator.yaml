@@ -1,9 +1,12 @@
 agent_name: atomic_task_generator_evaluator
-version: "1.2.0"
+version: "1.3.0"
 changelog:
   - version: "1.2.0"
     date: "2026-05-31"
     changes: "Added evaluation criteria for estimated_complexity calibration and depends_on_task_titles justification; atomic task context now includes these fields"
+  - version: "1.3.0"
+    date: "2026-06-01"
+    changes: "Added forbidden observable AC patterns as defects; added storage+domain split as a missed-split signal; added testing task scope dimension"
   - version: "1.1.0"
     date: "2026-05-31"
     changes: "Updated: acceptance_criteria is now list[str]; each criterion must be a verifiable observable; generic criteria (tests pass, works correctly) are defects"
@@ -47,6 +50,19 @@ prompts:
       - Complete scope coverage: the set of atomic tasks collectively covers all the work implied by the parent task's acceptance criteria — no significant area is missing
       - Correct granularity: each atomic task has one focused deliverable and one validation boundary; no task is oversized (covering an entire module with no single clear deliverable) or under-sized (a trivial single-file change that could be bundled with its context)
       - Structured acceptance criteria: each atomic task's acceptance_criteria is a list of strings, where each string is one concrete, verifiable observable outcome. Generic items like "tests pass", "works correctly", or "task is implemented" are defects. Penalize tasks that have only vague or circular criteria
+      - No forbidden observable patterns: flag acceptance_criteria that use static-presence patterns
+        instead of behavioral assertions. Defects include: "importable from X" / "available in X
+        namespace" (satisfied by file existence, not behavior); "coherent with Y" / "consistent with Z"
+        (cannot fail deterministically — not verifiable); "prepared for" / "ready for" / "set up for"
+        (intermediate scaffolding states, not completable outcomes). These patterns produce criteria that
+        cannot be used as executable verification targets
+      - Storage/domain separation: flag tasks that bundle storage/persistence concerns (data schema,
+        storage adapters, serialization layer) with domain/business logic — these layers require
+        different test infrastructure and should be separate atomic tasks. A missed split here will
+        produce integration tests disguised as unit tests, making verification fragile
+      - Testing task scope: for task_type="testing" tasks, flag tasks whose acceptance_criteria
+        require tests across multiple independent implementation units that have separate failure
+        boundaries. Such tasks should have been split by unit
       - Calibrated estimated_complexity: the assigned XS/S/M/L/XL value must match the actual scope of the task. Assigning XS to a task that spans multiple components is a defect; assigning L/XL to a trivial single-file change is a defect. XL on an atomic task is a strong signal the task was not properly split
       - Justified depends_on_task_titles: declared inter-task dependencies must be genuine execution prerequisites (the depending task needs the other's outputs or created state). Flag missing obvious dependencies and unjustified declarations (title exists but tasks are actually independent)
       - Clear generation_summary: the reasoning field in the trace explains WHY this particular decomposition was chosen, referencing the parent task's scope and constraints

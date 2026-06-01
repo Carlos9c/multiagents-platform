@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.models.conversation import Conversation
+from app.models.conversation import CONVERSATION_PHASE_REVIEWING, Conversation
 from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
     TASK_STATUS_AWAITING_REVIEW,
@@ -49,6 +49,10 @@ class ProjectSnapshot:
     review_context: ReviewContext | None
     task_counts: TaskCounts
     requirements_draft: str | None
+    # Present only when phase == "reviewing".
+    # "gathering_clarification" — no plan yet; collecting info via review_agent.
+    # "awaiting_confirmation"   — plan proposed (proposed_plan set); waiting for user yes/no.
+    review_subphase: str | None = None
 
     def format_for_prompt(self) -> str:
         """Serialise the snapshot into a compact text block for the LLM prompt."""
@@ -56,6 +60,9 @@ class ProjectSnapshot:
             f"Proyecto: {self.project_name}",
             f"Fase actual: {self.phase}",
         ]
+
+        if self.review_subphase:
+            lines.append(f"Sub-fase de revisión: {self.review_subphase}")
 
         if self.project_description:
             desc = self.project_description[:300]
@@ -139,6 +146,14 @@ def build_snapshot(
         except Exception:
             review_ctx = None
 
+    # Compute review sub-phase: distinguishes between "still gathering info"
+    # and "plan presented, waiting for user's yes/no".
+    review_subphase: str | None = None
+    if conversation.phase == CONVERSATION_PHASE_REVIEWING:
+        review_subphase = (
+            "awaiting_confirmation" if conversation.proposed_plan else "gathering_clarification"
+        )
+
     return ProjectSnapshot(
         project_id=project_id,
         project_name=project_name,
@@ -149,4 +164,5 @@ def build_snapshot(
         review_context=review_ctx,
         task_counts=counts,
         requirements_draft=conversation.requirements_draft,
+        review_subphase=review_subphase,
     )

@@ -1,9 +1,12 @@
 agent_name: command_runner_agent_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor evaluator for command_runner_agent behavioral patterns"
+  - version: "1.1.0"
+    date: "2026-06-01"
+    changes: "Expanded Retry adaptation dimension with specific failure class patterns to detect"
 prompts:
   main:
     description: "Evaluates the command_runner_agent's command selection and execution patterns"
@@ -57,6 +60,17 @@ prompts:
          When a task required multiple runs, did the command_runner_agent change its approach
          in subsequent attempts (different command, corrected verification_goal)?
          Or did it repeat the same failing command?
+         Check for these specific failure-class patterns in prior_commands evidence:
+         - Dependency resolution failure (runner could not start due to missing package): the agent
+           should have chosen verification_not_applicable, not re-run the same command. Flag if it
+           attempted the same command again.
+         - Zero-test-discovery failure (runner launched but found no test files): the agent should
+           have passed explicit file paths as arguments, not relied on auto-discovery a second time.
+           Flag if the second command is identical to the first.
+         - Assertion failure (tests ran, some assertions failed): repeating the runner command is
+           incorrect because the failure is in the code, not the runner. The agent should have
+           chosen verification_not_applicable and let the repair subagent act.
+         Flag any run where the agent repeated the same command with the same structural failure class.
 
       4. Appropriate non-execution decisions
          When call_type="verification_not_applicable", does the rationale make sense for

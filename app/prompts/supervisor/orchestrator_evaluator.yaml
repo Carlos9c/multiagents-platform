@@ -1,9 +1,12 @@
 agent_name: orchestrator_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial evaluator for the execution orchestrator"
+  - version: "1.1.0"
+    date: "2026-06-01"
+    changes: "Added convergence loop pattern to poor orchestrator criteria"
 prompts:
   main:
     description: "Evaluates the execution orchestrator's decision-making quality across runs for a project"
@@ -51,6 +54,10 @@ prompts:
       - final_decision="budget_exceeded" on most runs (orchestrator could not converge within the step budget)
       - Repeated repair loops for the same error class without progress (high repair_attempts_used combined
         with final_decision="reject" or forced_terminal=true)
+      - Convergence loops: calling command_runner_agent consecutively two or more times with no repair
+        subagent in between, when each run returned the same failure class. This wastes budget and
+        delays routing to the repair subagent. Look for runs where execution_agent_sequence shows
+        back-to-back command_runner_agent calls after initial failures
       - Inappropriate subagent sequences for the task type (e.g. calling environment_manager_agent for a
         task that had no environment errors)
 

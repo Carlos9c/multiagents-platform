@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from pathlib import Path
 from typing import Literal
 
@@ -163,17 +164,24 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
 
 
+_DISALLOWED_SHELL_OPERATORS = frozenset({"&&", "||", "|", ">", ">>", "<", ";"})
+
+
 def _contains_disallowed_shell_constructs(command: str) -> bool:
-    disallowed_tokens = [
-        "&&",
-        "||",
-        "|",
-        ">",
-        ">>",
-        "<",
-        ";",
-    ]
-    return any(token in command for token in disallowed_tokens)
+    """Return True if *command* contains shell operators at the top level.
+
+    Uses shlex.split() so that operators inside quoted arguments are ignored.
+    Example: ``python -c "import sys; print(sys.version)"`` is safe (the ``;``
+    lives inside a quoted string token) while ``pytest && echo done`` is not.
+
+    An unparseable command (unmatched quotes, etc.) is treated as unsafe.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        # Unbalanced quotes or other parse error → treat as unsafe
+        return True
+    return any(token in _DISALLOWED_SHELL_OPERATORS for token in tokens)
 
 
 def _build_file_selection_prompt(
