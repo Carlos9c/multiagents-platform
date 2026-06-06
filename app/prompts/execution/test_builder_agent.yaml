@@ -1,6 +1,34 @@
 agent_name: test_builder_agent
-version: "1.4.0"
+version: "1.8.0"
 changelog:
+  - version: "1.9.0"
+    date: "2026-06-04"
+    changes: |
+      Added code_change_agent_files_context input: implementation files written by code_change_agent
+      in this run, exposed as a dedicated section so test_builder sees the actual API it must test
+      even in code+test sequences where implementation was just created.
+      Added last_command_failure_summary input: structured stdout/stderr of the most recent failed
+      command, included on repair passes (materialization_attempt_count > 0) so the agent can
+      distinguish infrastructure failures from assertion failures from signature errors.
+  - version: "1.8.0"
+    date: "2026-06-02"
+    changes: |
+      Added main_retry prompt section for compact ValidationError retry on primary materialisation call.
+      Updated coverage_assessment inputs: added relevant_files_context and other_agent_changes_context
+      so the coverage analyst sees relevant files and code written by other agents in this run.
+      File-documentation validation: empty file_documentation now raises SubagentRejectedStepError.
+      Infrastructure-first file ordering enforced in code: conftest.py, pytest.ini, jest.config.* etc.
+      always precede test files regardless of LLM output order.
+      relevant_files now bypass the max_files cap in _build_related_file_context.
+  - version: "1.7.0"
+    date: "2026-06-02"
+    changes: "Added file_documentation field to MaterializedFile output — every test file produced must include a thorough description for the project-wide workspace manifest"
+  - version: "1.6.0"
+    date: "2026-06-02"
+    changes: "Inverted infrastructure check default: answer is NO unless ALL three conditions have positive evidence in workspace_inventory; YES now requires active confirmation of each condition, not absence of a reason to say NO"
+  - version: "1.5.0"
+    date: "2026-06-01"
+    changes: "Upgraded infrastructure check from conditional assessment to mandatory binary YES/NO decision before writing any file; made consequence of skipping explicit (collection failure before assertions)"
   - version: "1.0.0"
     date: "2026-05-28"
     changes: "Initial migration from Python constants TEST_BUILDER_AGENT_SYSTEM_PROMPT and COVERAGE_ASSESSMENT_SYSTEM_PROMPT"
@@ -92,6 +120,12 @@ prompts:
       - name: existing_test_context
         description: "Sample of existing test files from the source baseline showing the project's test conventions, import style, test client, and fixture patterns"
         required: false
+      - name: code_change_agent_files_context
+        description: "Implementation files written by code_change_agent in this run — authoritative source for module paths, function signatures, and class interfaces to test against (key for code+test sequences)"
+        required: false
+      - name: last_command_failure_summary
+        description: "Structured stdout/stderr of the most recent failed command — used on repair passes to distinguish infrastructure failures (ModuleNotFoundError → conftest fix) from assertion failures (wrong test logic) from signature errors (stale call sites)"
+        required: false
       - name: orchestration_phase
         description: "Current orchestration phase"
         required: true
@@ -141,6 +175,10 @@ prompts:
       - Use repository-relative paths only.
       - Do not return duplicate paths.
       - Test files must be runnable with the project's standard test runner without manual setup.
+      - For every file you produce, populate the file_documentation field with a thorough description
+        of what the test file covers: which module or component it tests, what scenarios and acceptance
+        criteria it verifies, what infrastructure it relies on, and what it would expose if it failed.
+        This description is used to build a project-wide index so future agents know what each test file contains.
       - When target_paths is non-empty, the file paths you return MUST match those exact paths.
         The orchestrator pre-determined the target locations by inspecting the repository tree
         and the task's acceptance_criteria. Do not substitute or invent alternative paths.
@@ -149,22 +187,41 @@ prompts:
 
       Test infrastructure responsibilities:
 
-      Before writing the first test file, assess whether the runner infrastructure is complete.
-      The runner must be able to discover and execute the tests without failing during collection
-      or import resolution. Infrastructure is required when any of the following apply:
+      Before writing any file, make an explicit binary determination:
 
-      - The tests import from the project's own packages or modules
-        (e.g. `from app.x import y`, `import myproject.service`, `require('./src/...')`):
-        verify that the runner can resolve those paths without ad-hoc manipulation in every
-        individual test file. Path resolution belongs in one shared infrastructure file.
-      - The tests need shared fixtures (test database, HTTP client, mock factories, auth tokens):
-        those fixtures belong in a shared file, not duplicated across test files.
-      - The tests require environment variables or test-specific configuration that must be
-        active before any test runs: verify a setup file provides them.
+        CAN the test runner discover and execute my tests without path resolution errors,
+        missing fixtures, or missing runner configuration?  YES or NO.
 
-      If any condition applies and the required infrastructure file does not exist in the
-      workspace_inventory, create it as the FIRST entry in your files list — before the test
-      files. Keep infrastructure files minimal: only what these specific tests concretely need.
+      This is a mandatory pre-write decision — not an optional assessment.
+      The DEFAULT answer is NO. The answer is YES ONLY when ALL three of the following
+      conditions have positive evidence visible in the workspace_inventory:
+
+      1. Import resolution is covered: the runner can already resolve project-local imports
+         (e.g. `from app.x import y`, `import myproject.service`, `require('./src/...')`)
+         without per-file path manipulation. Positive evidence means an existing infrastructure
+         file (pytest.ini with pythonpath, conftest.py with sys.path setup, tsconfig with paths,
+         jest.config with moduleNameMapper, go.mod with module declaration, etc.) visibly
+         handles this for the whole test suite.
+
+      2. Test state isolation is covered: shared fixtures, test database setup, HTTP clients,
+         mock factories, or auth token helpers are visibly provided by an existing shared file,
+         not requiring duplication across individual test files.
+
+      3. Pre-test environment is covered: any environment variables or test-specific
+         configuration that must be active before tests run are visibly provided by an existing
+         setup file (conftest.py session fixture, .env.test, setupFilesAfterFramework, TestMain,
+         etc.).
+
+      If ANY of these three conditions lacks positive evidence in the workspace_inventory —
+      even if you are uncertain — the answer is NO. Do not assume YES because you cannot
+      see a reason to say NO; require positive evidence for all three before answering YES.
+      When the answer is NO, create the required infrastructure file(s) FIRST, as the FIRST
+      entry in your files list — before any test file. Do not write test files and assume
+      the infrastructure will be inferred or already present. Skipping this step means your
+      tests will fail at collection (before any assertion executes) — no test logic will be
+      verified at all, and a repair pass will be needed just to reach the first test.
+
+      Keep infrastructure files minimal: only what these specific tests concretely need.
 
       Repair pass — collection and import errors:
       If materialization_attempt_count > 0 and the evidence shows the runner failed during
@@ -211,7 +268,13 @@ prompts:
         description: "Full contents of the test files just written by the agent in this run"
         required: true
       - name: implementation_files_context
-        description: "Contents of implementation files available as context for gap analysis"
+        description: "Contents of implementation files available as context for gap analysis (preloaded deps, relevant files, other-agent changes)"
+        required: false
+      - name: relevant_files_context
+        description: "Comma-separated list of relevant files declared most important for this task"
+        required: false
+      - name: other_agent_changes_context
+        description: "Summary of files written by other agents (code_change_agent, document_writer_agent) in this run"
         required: false
     content: |-
       You are a test coverage analyst.
@@ -237,7 +300,32 @@ prompts:
       - confidence: your overall confidence in the coverage assessment
         ("high", "medium", or "low").
 
+      When evaluating implementation context:
+      - Files labelled "relevant_file" or "written_by_code_change_agent" in implementation_files_context
+        are the most authoritative and current implementation files for this task.
+      - Compare test imports and test case logic against these files specifically.
+      - If a relevant_file appears in the context but none of the test files import from it or
+        exercise its behaviour, flag it as an uncovered_case.
+      - When recent code changes (written_by_code_change_agent) are visible, assess coverage
+        against the updated implementation, not an assumed prior state.
+
       Important:
       - Assess the TEST QUALITY, not the implementation quality.
       - potential_implementation_gaps are informational — they do not make the tests wrong.
       - Return ONLY JSON matching the provided schema.
+
+  main_retry:
+    description: "Compact retry when primary materialisation LLM output is invalid (ValidationError)"
+    user_prompt_inputs:
+      - name: task_id
+        description: "Unique identifier of the task"
+        required: true
+      - name: task_title
+        description: "Short title of the task"
+        required: true
+      - name: step_id
+        description: "Identifier of the current orchestrator step"
+        required: true
+      - name: validation_error
+        description: "The Pydantic validation error message from the previous attempt"
+        required: true

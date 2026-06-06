@@ -95,6 +95,19 @@ def test_system_prompt_verification_level_none_for_scaffolding_only():
     assert "scaffolding" in ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT.lower()
 
 
+def test_system_prompt_verification_level_deferred_present():
+    """'deferred' must be defined as a value for coding tasks that don't own their verification."""
+    assert '"deferred"' in ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT
+
+
+def test_system_prompt_verification_level_deferred_not_for_testing_tasks():
+    """Testing tasks must not use 'deferred' — they own their own verification."""
+    assert (
+        "Do not assign" in ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT
+        and "testing tasks" in ATOMIC_TASK_GENERATOR_SYSTEM_PROMPT
+    )
+
+
 # ---------------------------------------------------------------------------
 # System prompt — task type assignment rules still present
 # ---------------------------------------------------------------------------

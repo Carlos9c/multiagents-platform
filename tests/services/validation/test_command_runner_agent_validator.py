@@ -240,9 +240,109 @@ def test_command_runner_agent_validator_builds_prompt_with_command_evidence_and_
     assert "latest_command" in user_prompt
     assert "terminal_verification_clean: True" in user_prompt
 
+    assert "Code repair context" in user_prompt
+    assert "code_change_agent: 1 file(s) changed" in user_prompt
+
     assert "Context files to read and use:" in user_prompt
     assert "README.md" in user_prompt
     assert "one narrow repository-local verification step" in user_prompt
+
+
+def test_command_runner_agent_validator_shows_no_repair_context_when_no_writing_agents(
+    tmp_path,
+    monkeypatch,
+):
+    """When no writing agents produced changed_files, code_repair_context says so."""
+    workspace_dir = tmp_path / "workspace"
+    source_dir = tmp_path / "source"
+    workspace_dir.mkdir()
+    source_dir.mkdir()
+
+    validation_input = _make_validation_input(
+        workspace_path=str(workspace_dir),
+        source_path=str(source_dir),
+        relevant_files=[],
+        # No changed_files — no writing agent ran
+        changed_files=[],
+        commands=[
+            CommandExecution(
+                command="pytest tests/ -q",
+                producer="command_runner_agent",
+                exit_code=0,
+                stdout="3 passed",
+                stderr="",
+                expected_exit_codes=[0],
+            )
+        ],
+    )
+
+    provider = _CapturingProvider(_successful_llm_payload())
+    monkeypatch.setattr(
+        "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
+        lambda **_kw: provider,
+    )
+
+    CommandRunnerAgentValidator().validate(validation_input)
+
+    user_prompt = provider.calls[0]["user_prompt"]
+    assert "Code repair context" in user_prompt
+    assert "no writing-agent changes" in user_prompt
+
+
+def test_command_runner_agent_validator_shows_multiple_writing_agents_in_repair_context(
+    tmp_path,
+    monkeypatch,
+):
+    """When both code_change_agent and test_builder_agent ran, both appear in code_repair_context."""
+    workspace_dir = tmp_path / "workspace"
+    source_dir = tmp_path / "source"
+    workspace_dir.mkdir()
+    source_dir.mkdir()
+
+    validation_input = _make_validation_input(
+        workspace_path=str(workspace_dir),
+        source_path=str(source_dir),
+        relevant_files=[],
+        changed_files=[
+            ChangedFile(
+                path="app/service.py",
+                change_type=CHANGE_TYPE_CREATED,
+                producer="code_change_agent",
+            ),
+            ChangedFile(
+                path="app/utils.py",
+                change_type=CHANGE_TYPE_CREATED,
+                producer="code_change_agent",
+            ),
+            ChangedFile(
+                path="tests/test_service.py",
+                change_type=CHANGE_TYPE_CREATED,
+                producer="test_builder_agent",
+            ),
+        ],
+        commands=[
+            CommandExecution(
+                command="pytest tests/test_service.py -q",
+                producer="command_runner_agent",
+                exit_code=0,
+                stdout="2 passed",
+                stderr="",
+                expected_exit_codes=[0],
+            )
+        ],
+    )
+
+    provider = _CapturingProvider(_successful_llm_payload())
+    monkeypatch.setattr(
+        "app.services.validation.validators.command_runner_agent_validator.get_llm_provider",
+        lambda **_kw: provider,
+    )
+
+    CommandRunnerAgentValidator().validate(validation_input)
+
+    user_prompt = provider.calls[0]["user_prompt"]
+    assert "code_change_agent: 2 file(s) changed" in user_prompt
+    assert "test_builder_agent: 1 file(s) changed" in user_prompt
 
 
 def test_command_runner_agent_validator_validated_evidence_ids_include_only_command_runner_items(

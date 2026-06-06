@@ -1,6 +1,26 @@
 agent_name: orchestrator
-version: "1.2.0"
+version: "1.5.0"
 changelog:
+  - version: "1.5.0"
+    date: "2026-06-05"
+    changes: |
+      Added verification_level semantics: "deferred" means this coding task does not own its
+      own verification — finish after writing code. Updated command_runner_agent rule and checklist
+      guidance to treat deferred = not_required. Added grey-area rule for "runtime" tasks where
+      no meaningful command target exists (import/syntax checks do not constitute verification).
+      local_verification_done_if_material now surfaces as "not_required" for deferred/none tasks.
+  - version: "1.4.0"
+    date: "2026-06-04"
+    changes: |
+      Added test_discovery_failure_detected to operational_state_summary — signals when the latest
+      command found 0 tests (no test files), enabling correct routing to test_builder_agent instead
+      of code_change_agent. Updated checklist guidance to explain discovery failure routing.
+      Clarified fault_side="both" repair path to include test_builder_agent when tests are stale
+      after implementation repair. Added testing-task forced-finish guard: _maybe_build_forced_terminal_decision
+      no longer fires FINISH for testing tasks when test_builder_agent has not yet run.
+  - version: "1.3.0"
+    date: "2026-06-02"
+    changes: "Added authorship asymmetry rule for testing tasks: when test_builder_agent has already run and command_runner fails with an ambiguous error, prefer test_builder_agent over code_change_agent for the repair pass"
   - version: "1.0.0"
     date: "2026-05-28"
     changes: "Initial migration from Python constant ORCHESTRATOR_SYSTEM_PROMPT"
@@ -96,7 +116,7 @@ prompts:
         description: "Notes accumulated across steps"
         required: false
       - name: operational_state_summary
-        description: "Derived operational state summary with boolean flags about progress"
+        description: "Derived operational state summary with boolean flags, verification_level, and test_discovery_failure_detected"
         required: true
       - name: checklist_context_ready
         description: "Whether the context selection step is complete"
@@ -222,7 +242,17 @@ prompts:
          - Do not call code_change_agent for tasks whose primary goal is writing test files — route those to test_builder_agent instead.
          - Do not call test_builder_agent for implementation tasks whose deliverable is source code or configuration — route those to code_change_agent.
          - Do not call document_writer_agent for implementation tasks whose deliverable is a source code file, test file, or configuration file meant to be executed or imported.
-         - Call command_runner_agent only if repository-local verification would materially improve the evidence.
+         - Call command_runner_agent only if repository-local verification would materially improve
+           the evidence — and only when there is a concrete executable target.
+           NEVER call command_runner_agent when verification_level="deferred": this task's
+           verification responsibility belongs to a separate testing task or later step.
+           Finish after writing code.
+           NEVER call command_runner_agent when verification_level="runtime" but the only
+           available command would be a trivial import or syntax check (e.g.,
+           `python -c "import app"`, `py_compile`, `mypy` on a single file with no test
+           suite) AND the acceptance_criteria do not describe a concrete runtime outcome
+           (exit codes, HTTP responses, test results, CLI output). An import check proves
+           the file exists — it does not verify acceptance criteria. Finish after writing code.
          - Finish when the completion checklist says the pass is sufficient.
          - Reject only when no safe contribution is possible with the available subagents.
 
@@ -261,7 +291,10 @@ prompts:
       - Use fault_side (PRIMARY) to guide which repair subagent to call:
         - "implementation" → call code_change_agent to repair the identified issue in source code.
         - "test"           → call test_builder_agent to fix stale or incorrect test expectations.
-        - "both"           → call code_change_agent first (fix implementation), then re-verify.
+        - "both"           → call code_change_agent first (fix implementation gaps), then if tests
+                             are now stale because the API changed, call test_builder_agent to update
+                             them, then command_runner_agent. Do not skip test_builder_agent when
+                             the implementation API changed and tests reference the old signatures.
         - "environment"    → call environment_manager_agent to install missing packages or fix deps.
         - "uncertain"      → fall back to overall_error_class rules below.
       - When fault_side is absent or "uncertain", use overall_error_class as fallback:
@@ -295,6 +328,27 @@ prompts:
         attempts remain, default to code_change_agent.
       - If repair_attempt_count has reached its budget, do not call command_runner_agent
         again — choose finish (accumulate evidence for validation) or reject.
+
+      Authorship asymmetry rule (testing tasks):
+      - This rule applies when ALL of the following are true:
+          * task_type = "testing"
+          * test_builder_agent has already executed at least once in this run
+            (visible in completed_steps or last_completed_subagent_name)
+          * command_runner_agent just failed (visible in failed_steps)
+          * error_diagnosis fault_side is "uncertain", "test", or absent — meaning the
+            failure does NOT clearly and confidently point to application logic
+      - When the above conditions hold, PREFER test_builder_agent as the repair subagent
+        over code_change_agent.
+      - Rationale: in a testing task the application code was already validated by prior
+        tasks. The test code written in the current run is the most recently authored code
+        and is therefore the more likely source of the failure. Routing to code_change_agent
+        modifies previously validated application files while leaving the freshly written
+        test infrastructure unexamined.
+      - Only route to code_change_agent when fault_side is explicitly "implementation" or
+        "both" with high or medium confidence — meaning the error clearly originates in
+        application logic, not in the newly written tests.
+      - This rule does NOT override the fault_side routing when fault_side="implementation"
+        with high confidence. It applies specifically to ambiguous or test-attributed failures.
 
       Binary completion checklist:
       You must explicitly reason over these four fields before deciding:

@@ -1,6 +1,9 @@
 agent_name: orchestrator_evaluator
-version: "1.1.0"
+version: "1.2.0"
 changelog:
+  - version: "1.2.0"
+    date: "2026-06-02"
+    changes: "Added authorship asymmetry violation to poor orchestrator criteria: routing to code_change_agent instead of test_builder_agent for ambiguous failures in testing tasks where test_builder has already run"
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial evaluator for the execution orchestrator"
@@ -58,6 +61,15 @@ prompts:
         subagent in between, when each run returned the same failure class. This wastes budget and
         delays routing to the repair subagent. Look for runs where execution_agent_sequence shows
         back-to-back command_runner_agent calls after initial failures
+      - Authorship asymmetry violations (testing tasks): when task_type="testing", test_builder_agent
+        has already executed in the run, and command_runner_agent fails with an ambiguous error
+        (fault_side="uncertain" or absent), routing to code_change_agent instead of test_builder_agent
+        is a repair-routing priority error. In testing tasks the application code was validated in prior
+        tasks; the freshly-written test infrastructure is the more likely failure source. Look for runs
+        on testing tasks where execution_agent_sequence shows the pattern
+        test_builder_agent → command_runner_agent → code_change_agent without a clear "implementation"
+        fault_side signal. Multiple code_change_agent repair passes on testing tasks that ultimately
+        fail or require review is a strong signal of this anti-pattern
       - Inappropriate subagent sequences for the task type (e.g. calling environment_manager_agent for a
         task that had no environment errors)
 

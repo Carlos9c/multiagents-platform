@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from app.schemas.task_types import TaskType
 
 Priority = Literal["high", "medium", "low"]
-VerificationLevel = Literal["none", "runtime"]
+VerificationLevel = Literal["none", "deferred", "runtime"]
 ComplexityLevel = Literal["XS", "S", "M", "L", "XL"]
 
 

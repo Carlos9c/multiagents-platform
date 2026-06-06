@@ -1,6 +1,9 @@
 agent_name: document_writer_agent_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
+  - version: "1.1.0"
+    date: "2026-06-02"
+    changes: "Added dimension 5 (file_documentation quality) and dimension 6 (workspace manifest context usage); agent now receives {path:description} index and must document each file it produces"
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor evaluator for document_writer_agent behavioral patterns"
@@ -56,18 +59,36 @@ prompts:
          On multi-run tasks, did the agent address the validator's feedback
          in subsequent attempts?
 
+      5. File documentation quality (when agent_system_prompt >= v1.3.0)
+         The agent must populate file_documentation for each file it writes.
+         From the work_summary and changed_files, assess whether the agent appears to have
+         generated substantive documentation per file (not generic descriptions).
+         Flag runs where work_summary is generic ("wrote docs") without any file-specific
+         content description — this correlates with empty or placeholder file_documentation fields.
+
+      6. Workspace manifest context usage (when agent_system_prompt >= v1.3.0)
+         The agent receives a workspace_file_index (path → what the file does) when the
+         manifest has been populated by prior runs. Flag runs on documentation or design tasks
+         where the work_summary or blockers_found suggest the agent used generic conventions
+         (e.g. "pip install X" without knowing what X is) despite the file index being available.
+         The agent should derive accurate commands, import paths, and version references
+         from the file index rather than from generic assumptions.
+
       Cross-context:
          joint_validation_decision and validator_result are provided for reference.
          Use them to verify alignment between declared scope and validator findings.
 
       Note: do NOT assess documentation content quality.
-      Focus on format, placement, scope coverage, and retry behavior.
+      Focus on format, placement, scope coverage, retry behavior, and manifest usage.
 
       Verdict scale:
-      - healthy: appropriate formats, correct placement, scope-aligned coverage
-      - needs_attention: occasional format or placement issues
+      - healthy: appropriate formats, correct placement, scope-aligned coverage, evidence of
+        file-index usage in later runs when manifest is available
+      - needs_attention: occasional format or placement issues, or generic file documentation
+        descriptions on one or two tasks
       - degraded: systematic wrong formats, code files produced instead of docs,
-        or consistently vague scope declarations
+        consistently vague scope declarations, or repeated use of generic commands/paths despite
+        workspace file index being available
 
       Reference run_id and task_title when raising specific issues.
 

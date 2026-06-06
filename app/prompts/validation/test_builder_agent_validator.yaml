@@ -1,15 +1,28 @@
 agent_name: test_builder_agent_validator
-version: "1.2.0"
+version: "1.4.0"
 changelog:
+  - version: "1.4.0"
+    date: "2026-06-04"
+    changes: |
+      Added code-change sequence rule: when execution_agent_sequence shows code_change_agent
+      preceded test_builder_agent, test import paths must match the implementation files
+      actually written (visible in context_files or evidence_files). Import path mismatch is
+      a structural defect → decision=failed.
+      Added repair pass rule: evidence of a prior command failure classifies the correct
+      repair type (collection/import failure → infrastructure; assertion failure → test logic).
+      Mismatched strategy is a structural defect regardless of test logic appearance.
+  - version: "1.3.0"
+    date: "2026-06-02"
+    changes: "Added relevant files rule — only flag relevant_file gaps when concretely absent from all produced tests; do not lower decision for files not explicitly named in every test function"
+  - version: "1.2.0"
+    date: "2026-06-01"
+    changes: "Extended scope to evaluate test infrastructure files; added collection-failure detection as a structural blocker; clarified decision=failed criteria for unrunnable suites"
   - version: "1.0.0"
     date: "2026-05-28"
     changes: "Initial migration from Python constant TEST_BUILDER_AGENT_VALIDATOR_SYSTEM_PROMPT"
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
-  - version: "1.2.0"
-    date: "2026-06-01"
-    changes: "Extended scope to evaluate test infrastructure files; added collection-failure detection as a structural blocker; clarified decision=failed criteria for unrunnable suites"
 prompts:
   main:
     description: "Validates the quality, correctness, and sufficiency of test files from test_builder_agent"
@@ -90,6 +103,46 @@ prompts:
       a corresponding path-resolution infrastructure file is present in the evidence. If tests import
       from internal modules and no infrastructure provides path resolution, flag it as a structural blocker.
 
+      Code-change sequence rule:
+      - When execution_agent_sequence shows code_change_agent ran before test_builder_agent
+        in this run, the agent had access to the actual implementation files just created.
+      - Inspect the evidence_files (test files produced) and context_files for the module
+        paths they import from.
+      - If the test files import from a path that does NOT correspond to any file in the
+        evidence (e.g., they import from a hardcoded path that the project doesn't use),
+        AND the correct path was available from code_change_agent output, this is a structural
+        defect: the tests will fail at import time regardless of test logic quality.
+      - Classify as decision=failed when import paths are concretely wrong based on the
+        available implementation evidence.
+      - Only apply this rule when the mismatch is concrete (wrong module name, non-existent
+        path) — do not lower the decision for uncertainty about import style.
+
+      Repair pass rule:
+      - When execution_agent_sequence shows command_runner_agent ran and failed BEFORE this
+        test_builder_agent call (visible via execution_result and evidence_notes), the nature
+        of that failure determines what the correct repair is:
+        * Collection/import failure (ModuleNotFoundError, "collected 0 items"): the correct
+          repair is infrastructure — a conftest.py or path-setup file. If the produced files
+          do not include any infrastructure fix and the test logic is unchanged, classify as
+          decision=partial and annotate the missing infrastructure.
+        * Assertion failure (AssertionError, wrong status codes): the correct repair is
+          test logic or implementation. If the produced files only add/modify infrastructure
+          (conftest.py, pytest.ini) with no test logic change, classify as decision=partial —
+          the repair is misdirected.
+      - Only apply when the failure type is explicitly identifiable from execution_result or
+        evidence_notes — do not speculate about repair strategy when evidence is ambiguous.
+
+      Relevant files rule:
+      - relevant_files lists the files declared most important for this task.
+      - A test suite that imports from or exercises any relevant_file covers it; do not penalise
+        for relevant_files not explicitly named in every single test function.
+      - A shared test module that exercises multiple relevant files at once is sufficient.
+      - Only flag a relevant_files gap as a partial_annotation if the evidence concretely shows
+        that a specific relevant_file is completely absent from all produced test files' imports —
+        i.e., no produced test references its module path at all.
+      - Do not lower the decision to partial solely because a relevant_file does not have a
+        dedicated, individually named test file.
+
       Decision guide:
       - completed: the test files materially cover the acceptance_criteria, are correctly structured,
         and the infrastructure (if needed) is present and sufficient for the runner to collect and
@@ -139,3 +192,13 @@ prompts:
       - Each required_action must be actionable: recovery consumes these annotations to create follow-up tasks.
 
       Return ONLY JSON matching the provided schema.
+
+  retry:
+    description: "Retry prompt when the LLM returns invalid structured output"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID of the project being validated"
+        required: true
+      - name: validation_error
+        description: "The Pydantic validation error message from the previous attempt"
+        required: true

@@ -1,12 +1,29 @@
 agent_name: command_runner_agent_evaluator
-version: "1.1.0"
+version: "1.3.0"
 changelog:
+  - version: "1.3.0"
+    date: "2026-06-04"
+    changes: |
+      Dimension 3 (Retry adaptation): refined post-repair re-verification to distinguish
+      implementation repair (code_change_agent) from test repair (test_builder_agent).
+      Assertion failure + implementation repair → SHOULD re-verify (correct).
+      Assertion failure + test-only repair → verification_not_applicable is defensible (not flagged).
+      Collection/import failure + test repair → SHOULD re-verify (infrastructure was fixed).
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor evaluator for command_runner_agent behavioral patterns"
   - version: "1.1.0"
     date: "2026-06-01"
     changes: "Expanded Retry adaptation dimension with specific failure class patterns to detect"
+  - version: "1.2.0"
+    date: "2026-06-02"
+    changes: |
+      Dimension 3 (Retry adaptation): added post-repair re-verification pattern — after
+      writing agents apply changes the agent should attempt fresh verification even when
+      prior commands failed with assertion errors. Flag as incorrect when agent chose
+      verification_not_applicable despite repairs being present in agent_sequence.
+      Added dimension 6 (Relevant files coverage) to flag when the agent consistently
+      ignores relevant_files in command selection.
 prompts:
   main:
     description: "Evaluates the command_runner_agent's command selection and execution patterns"
@@ -50,6 +67,15 @@ prompts:
          For documentation tasks: "verification_not_applicable" is often correct.
          Flag commands that seem misaligned with the task type.
 
+         verification_level routing (flag if violated):
+         - verification_level="deferred": command_runner_agent should NOT have been called.
+           The task declared that verification is not its responsibility. If command_runner
+           was called on a "deferred" task, the orchestrator made a routing error — flag it.
+         - verification_level="runtime" but only a trivial import or syntax check ran
+           (e.g., `python -c "import app"`, `py_compile`, `mypy` on a single file) AND the
+           acceptance_criteria do not describe a runtime outcome: this is a wasted call —
+           the check provides no meaningful evidence. Flag as low-value verification.
+
       2. Success/failure patterns
          What is the success rate across all command executions?
          Do failures correlate with specific task types, command types, or error categories
@@ -67,19 +93,53 @@ prompts:
          - Zero-test-discovery failure (runner launched but found no test files): the agent should
            have passed explicit file paths as arguments, not relied on auto-discovery a second time.
            Flag if the second command is identical to the first.
-         - Assertion failure (tests ran, some assertions failed): repeating the runner command is
-           incorrect because the failure is in the code, not the runner. The agent should have
-           chosen verification_not_applicable and let the repair subagent act.
+         - Assertion failure WITHOUT prior repairs: if no writing agent appears in agent_sequence
+           before the command_runner_agent call, the agent should have chosen
+           verification_not_applicable. Flag if it repeated the command anyway.
+         - Assertion failure WITH implementation repair (code_change_agent or document_writer_agent
+           in agent_sequence before the command_runner_agent call): the implementation was changed;
+           prior assertion failures reflect pre-repair state. The agent SHOULD attempt fresh
+           verification. Flag as "post-repair re-verification skipped" if it chose
+           verification_not_applicable citing prior assertion failures after an implementation repair.
+         - Assertion failure WITH test-only repair (ONLY test_builder_agent in agent_sequence,
+           no code_change_agent): test_builder_agent fixed test infrastructure or test logic but
+           did NOT change the implementation. If the prior failure was an assertion error (not a
+           collection error), choosing verification_not_applicable is defensible — the assertion
+           reflects a real implementation gap that test repair did not address. Do NOT flag this
+           as "post-repair re-verification skipped".
+         - Collection/import failure WITH test repair (test_builder_agent in agent_sequence):
+           test_builder_agent fixed the infrastructure (conftest.py, path setup). The agent SHOULD
+           attempt fresh verification to confirm the collection failure was resolved. Flag as
+           "post-repair re-verification skipped" if it chose verification_not_applicable after a
+           test infrastructure repair when the prior failure was a collection/import error.
          Flag any run where the agent repeated the same command with the same structural failure class.
+         Flag any run where implementation repair was applied but verification was skipped.
 
       4. Appropriate non-execution decisions
          When call_type="verification_not_applicable", does the rationale make sense for
          the task? Is the agent being appropriately selective, or avoiding commands
          for tasks that clearly warranted verification?
+         Differentiate by repair type when evaluating agent_sequence:
+         - code_change_agent preceded the call: verification_not_applicable is hard to justify —
+           the implementation changed, and fresh verification is expected.
+         - ONLY test_builder_agent preceded the call with a prior assertion failure:
+           verification_not_applicable is more defensible — test repair alone does not fix
+           implementation-level assertion failures.
+         - test_builder_agent preceded the call with a prior collection failure:
+           verification_not_applicable is NOT justified — the infrastructure fix likely resolved it.
 
       5. Blocker correlation
          Do blockers_found in the run align with the command failures in command_trace_entries?
          Misalignment may indicate the agent is not properly recording the source of failures.
+
+      6. Relevant files coverage
+         Each task provides acceptance_criteria. When the criteria clearly name specific
+         files or endpoints, does the agent's command appear to exercise them?
+         Flag systematic patterns where the chosen commands are generic (e.g., always
+         `python -m py_compile` or `python -c "import app"`) while the task acceptance
+         criteria clearly demand behavioral verification of specific components.
+         Do NOT flag individual cases where a broad test runner invocation (e.g., `pytest tests/`)
+         likely covers the relevant files implicitly.
 
       Cross-context:
          joint_validation_decision and validator_result are provided for reference.

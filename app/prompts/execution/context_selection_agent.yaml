@@ -1,12 +1,15 @@
 agent_name: context_selection_agent
-version: "1.1.0"
+version: "1.2.0"
 changelog:
-  - version: "1.0.0"
-    date: "2026-05-28"
-    changes: "Initial migration from Python constant HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT"
+  - version: "1.2.0"
+    date: "2026-06-02"
+    changes: "Added workspace_file_index optional input — when present, injected into prompt so the agent can identify which historical tasks are relevant based on which files they modified and what those files do"
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constant HISTORICAL_TASK_SELECTION_SYSTEM_PROMPT"
 prompts:
   main:
     description: "Selects which historical completed tasks should enter execution context for the current task"
@@ -28,6 +31,13 @@ prompts:
         required: false
       - name: codebase_analysis_excerpt
         description: "Static analysis snapshot of the codebase structure"
+        required: false
+      - name: workspace_file_index
+        description: >
+          Optional dict mapping file path → description of what the file does. Derived from
+          the workspace manifest built across all previous task runs. When present, use it to
+          determine which historical tasks touched files that are relevant to the current task —
+          enabling selection based on semantic file knowledge rather than task title alone.
         required: false
     content: |-
       You are a historical task selector for atomic task execution.

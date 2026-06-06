@@ -27,7 +27,9 @@ from app.execution_engine.tools.file_snapshot_tool import (
 )
 from app.execution_engine.tools.file_writer_tool import write_text_file
 from app.execution_engine.tools.workspace_scan_tool import list_workspace_files
+from app.services.project_storage import ProjectStorageService
 from app.services.prompt_loader import prompt_loader
+from app.services.workspace_manifest_service import WorkspaceManifestService
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +242,7 @@ def _build_user_prompt(
     request: ExecutionRequest,
     step: ExecutionStep,
     state: ResolutionState,
+    workspace_manifest_context: dict[str, str] | None = None,
 ) -> tuple[str, list[tuple[str, str | None]]]:
     source_root = _get_source_root_from_request(request)
 
@@ -254,6 +257,17 @@ def _build_user_prompt(
     )
     project_context_summary = _build_project_context_summary(request)
     historical_context_summary = _build_historical_context_summary(request)
+
+    import json as _json
+
+    manifest_section = ""
+    if workspace_manifest_context:
+        manifest_section = (
+            "\nWorkspace file index (path → what the file does — use this to derive"
+            " accurate commands, import paths, and references):\n"
+            + _json.dumps(workspace_manifest_context, ensure_ascii=False, indent=2)
+            + "\n"
+        )
 
     prompt_loader.validate_builder_inputs(
         "document_writer_agent",
@@ -280,6 +294,7 @@ def _build_user_prompt(
             "historical_context_summary": historical_context_summary,
             "workspace_inventory": workspace_inventory,
             "related_file_context": related_file_context,
+            "workspace_manifest_context": workspace_manifest_context,
         },
     )
     prompt = f"""
@@ -312,13 +327,16 @@ Historical task context:
 
 Repository inventory:
 {workspace_inventory}
-
+{manifest_section}
 Related file content (for style reference and avoiding duplication):
 {related_file_context}
 
 Quality expectations:
 - Every returned file must contain complete, substantive content — no placeholders or TODOs.
 - Derive all content from the task description, objective, proposed solution, and technical constraints.
+- When a workspace file index is provided, use it as the primary source for accurate file paths,
+  import locations, package names, and command derivation — prefer specific file knowledge over
+  generic conventions.
 - Match the existing documentation style and structure present in the repository.
 - When deciding create vs modify, reason against the project candidate baseline:
   workspace overlay takes precedence, then source baseline.
@@ -409,7 +427,20 @@ class DocumentWriterAgent(BaseSubagent):
 
         source_root = _get_source_root_from_request(request)
 
-        user_prompt, files_read = _build_user_prompt(request, step, state)
+        # Load workspace manifest for richer file context (non-fatal)
+        workspace_manifest_context: dict[str, str] | None = None
+        try:
+            project_meta_dir = (
+                ProjectStorageService().get_project_paths(request.project_id).project_meta_dir
+            )
+            index = WorkspaceManifestService().get_path_descriptions(project_meta_dir)
+            workspace_manifest_context = index or None
+        except Exception:
+            logger.warning("document_writer_agent_manifest_load_failed task_id=%s", request.task_id)
+
+        user_prompt, files_read = _build_user_prompt(
+            request, step, state, workspace_manifest_context=workspace_manifest_context
+        )
         for path, source_label in files_read:
             state.evidence.add_file_read(
                 path=path,
@@ -482,6 +513,13 @@ class DocumentWriterAgent(BaseSubagent):
                     path=generated.path,
                     change_type=change_type,
                     producer=self.name,
+                )
+                state.evidence.add_file_documentation(
+                    path=generated.path,
+                    documentation=generated.file_documentation,
+                    change_summary=generated.rationale,
+                    agent=self.name,
+                    operation=generated.operation,
                 )
                 state.evidence.add_note(
                     message=f"Wrote document {generated.path} at {absolute_path}",

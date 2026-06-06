@@ -651,6 +651,13 @@ class CodeChangeAgent(BaseSubagent):
                     change_type=change_type,
                     producer=self.name,
                 )
+                state.evidence.add_file_documentation(
+                    path=generated.path,
+                    documentation=generated.file_documentation,
+                    change_summary=generated.rationale,
+                    agent=self.name,
+                    operation=generated.operation,
+                )
                 state.evidence.add_note(
                     message=f"Wrote file {generated.path} at {absolute_path}",
                     producer=self.name,

@@ -1,6 +1,9 @@
 agent_name: code_change_agent_validator_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
+  - version: "1.1.0"
+    date: "2026-06-01"
+    changes: "Added dimension 5b: task-type scope discipline — flag findings that penalize code_change_agent for not writing tests on testing tasks"
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor evaluator for code_change_agent_validator calibration and findings quality"
@@ -65,6 +68,17 @@ prompts:
          Does the validator stay within its domain (code correctness, task-level completion)?
          Flag if findings mention orchestrator behavior, other validators, workflow state,
          execution pipeline, or promotion mechanics — these are out of scope for this validator.
+
+      4b. Task-type scope discipline (critical)
+         When a task has task_type="testing", code_change_agent is not responsible for
+         producing test files — that is test_builder_agent's exclusive deliverable.
+         Flag as a calibration defect any finding that:
+         - Criticises the absence of test file materialisation on a testing task.
+         - Fails or marks partial because "code_change_agent did not write tests".
+         - Conflates the test suite's missing coverage with the code change's quality.
+         The correct focus for a testing task: does the code change support the contract
+         the tests expect? If code_change_agent produced no files, was that correct given
+         its scope boundary?
 
       5. Consistency across retries
          On tasks with multiple runs, does the validator apply consistent criteria?

@@ -365,6 +365,7 @@ async def websocket_chat(
                 _workflow_executor.submit(_run_workflow_background, response.project_id)
 
             if response.event == "review_resolved" and response.project_id:
+                clear_workflow_stop(response.project_id)
                 _workflow_executor.submit(_run_workflow_background, response.project_id)
 
     except WebSocketDisconnect:

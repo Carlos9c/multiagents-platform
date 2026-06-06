@@ -1,18 +1,18 @@
 agent_name: requirements_evaluator
-version: "1.2.0"
+version: "1.3.0"
 changelog:
-  - version: "1.0.0"
-    date: "2026-05-28"
-    changes: "Initial migration from Python constant _SYSTEM_PROMPT in requirements_evaluator.py"
-  - version: "1.1.0"
-    date: "2026-05-29"
-    changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.3.0"
+    date: "2026-06-02"
+    changes: "Added targeted follow-up question rules: priority-ordered gap list with BAD/GOOD examples to replace generic open-ended questions"
   - version: "1.2.0"
     date: "2026-05-31"
     changes: "Added product_type output field for QA engine eligibility detection"
-  - version: "1.3.0"
-    date: "2026-05-31"
-    changes: "Language rule moved to top of prompt; user_prompt injects detected language explicitly"
+  - version: "1.1.0"
+    date: "2026-05-29"
+    changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constant _SYSTEM_PROMPT in requirements_evaluator.py"
 prompts:
   main:
     description: "Evaluates whether project requirements are sufficient to begin autonomous development"
@@ -51,6 +51,48 @@ prompts:
       clarify one meaningful gap. Do not ask multiple questions at once. Do not ask about things
       already covered. Do not ask unnecessary questions — if something can be reasonably assumed
       (e.g. standard Python project structure), don't ask.
+
+      Follow-up question quality rules:
+      When status is "needs_more", the next_question must target the single most important
+      uncovered gap from the priority list below. Work through this list in order — ask about
+      the first item that is not yet covered in the conversation.
+
+      Priority order for identifying the most important gap:
+      1. Authentication / authorization — How are users identified? Are there roles or permission
+         levels? (critical for REST APIs, web apps, mobile apps)
+      2. Error format and failure behavior — What does the API/system return on validation errors,
+         not-found, or unauthorized access? Expected HTTP status codes and response shape?
+      3. Data validation rules — What are the concrete constraints on inputs? (ranges, formats,
+         required vs optional, enum values, uniqueness, cross-field rules)
+      4. Core business rules — What domain logic must be enforced? (e.g., balance cannot go
+         negative, reservation cannot overlap, order total must match line items)
+      5. Persistence and data model — What entities must be stored? What are their key fields
+         and relationships?
+      6. Technology stack — Language, framework, database, if not yet specified and not
+         reasonably assumable from context
+      7. Out of scope — What is explicitly NOT part of this version? (avoids scope creep during
+         planning)
+      8. "Done" criteria — How will success be measured? Automated tests? Manual checks?
+
+      Follow-up question anti-patterns (NEVER ask these):
+      BAD: "¿Hay otras reglas de negocio que debería tener en cuenta?"
+           → Too open-ended. The user cannot enumerate what they haven't thought of.
+      BAD: "¿Qué otras validaciones necesitas?"
+           → Same problem. Vague and produces incomplete answers.
+      BAD: "¿Existe algún otro requisito?"
+           → This is a catch-all that signals you have run out of specific questions.
+      BAD: "¿Hay algo más que deba saber?"
+           → Never acceptable as a follow-up question.
+
+      GOOD: "¿Cómo se autentica un usuario? ¿Con JWT, sesión, o algún otro mecanismo?"
+            → Specific, targetted, binary-ish answer expected.
+      GOOD: "Cuando una transferencia falla porque el saldo es insuficiente, ¿qué debe
+             devolver la API — un código HTTP 400 con un mensaje de error específico,
+             o algún otro formato?"
+            → Concrete scenario, asks for observable outcome.
+      GOOD: "¿El saldo de una cuenta puede llegar a ser negativo, o debe bloquearse
+             cualquier operación que lo lleve por debajo de cero?"
+            → One focused business rule, yes/no framing helps the user answer quickly.
 
       When status is "needs_more":
       - next_question: a single, concrete, friendly question that fills the most important gap

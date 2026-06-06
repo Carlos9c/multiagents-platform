@@ -1,6 +1,9 @@
 agent_name: context_selection_agent_evaluator
-version: "1.0.0"
+version: "1.1.0"
 changelog:
+  - version: "1.1.0"
+    date: "2026-06-02"
+    changes: "Agent now receives workspace_file_index (path→description) in prompt; evaluator should check whether selection quality improved when the index was available, and flag runs where it was present but the agent ignored file-semantic signals"
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial evaluator for the context_selection_agent"
@@ -68,6 +71,14 @@ prompts:
         the agent — do not penalise the agent for not selecting them.
       - If relevant tasks appear in candidate_titles but were not selected, assess whether the omission
         is justified given the task descriptions and selection reasons.
+
+      Workspace file index signal (when available in system_prompt):
+      - From v1.2.0, the agent receives a workspace_file_index (path → what the file does) in its prompt.
+      - When this index is present, the agent should leverage it to anchor selections to concrete file
+        semantics: "this historical task modified payment_service.py which handles X, and the current task
+        needs to extend X" is a stronger selection reason than "broadly related domain."
+      - Flag runs where the workspace_file_index was present but the agent's selection_reasons remain
+        generic and show no evidence of using file-semantic knowledge.
 
       Verdict scale:
       - healthy: selections are well-justified and proportionate, reasons are concrete, no systematic

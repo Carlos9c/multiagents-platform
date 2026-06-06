@@ -1,6 +1,12 @@
 from unittest.mock import MagicMock
 
-from app.services.execution_plan_service import _compute_ordering_hints, persist_execution_plan
+from app.services.execution_plan_service import (
+    _DEFAULT_PHASE_ORDER,
+    _build_candidate_atomic_task,
+    _compute_ordering_hints,
+    _compute_phase_orders,
+    persist_execution_plan,
+)
 
 # ---------------------------------------------------------------------------
 # _compute_ordering_hints — Fix 1: deterministic task ordering
@@ -202,3 +208,111 @@ def test_batches_from_different_plan_versions_do_not_collide_in_internal_identit
     assert batch_v2.plan_version == 2
     assert batch_v1.batch_index == 1
     assert batch_v2.batch_index == 1
+
+
+# ---------------------------------------------------------------------------
+# _compute_phase_orders — deterministic 4-phase classification
+# ---------------------------------------------------------------------------
+
+
+def test_phase_order_design_types():
+    tasks = [
+        _make_task_stub(1, "design"),
+        _make_task_stub(2, "requirements"),
+        _make_task_stub(3, "planning"),
+    ]
+    orders = _compute_phase_orders(tasks)
+    assert orders[1] == 1
+    assert orders[2] == 1
+    assert orders[3] == 1
+
+
+def test_phase_order_implementation_types():
+    tasks = [
+        _make_task_stub(1, "implementation"),
+        _make_task_stub(2, "configuration"),
+        _make_task_stub(3, "refactor"),
+    ]
+    orders = _compute_phase_orders(tasks)
+    assert orders[1] == 2
+    assert orders[2] == 2
+    assert orders[3] == 2
+
+
+def test_phase_order_testing_type():
+    tasks = [_make_task_stub(1, "testing")]
+    orders = _compute_phase_orders(tasks)
+    assert orders[1] == 3
+
+
+def test_phase_order_documentation_types():
+    tasks = [
+        _make_task_stub(1, "documentation"),
+        _make_task_stub(2, "onboarding"),
+        _make_task_stub(3, "review"),
+    ]
+    orders = _compute_phase_orders(tasks)
+    assert orders[1] == 4
+    assert orders[2] == 4
+    assert orders[3] == 4
+
+
+def test_phase_order_unknown_type_falls_back_to_default():
+    tasks = [_make_task_stub(1, "unknown_future_type")]
+    orders = _compute_phase_orders(tasks)
+    assert orders[1] == _DEFAULT_PHASE_ORDER
+
+
+def test_phase_order_none_task_type_falls_back_to_default():
+    task = MagicMock()
+    task.id = 1
+    task.task_type = None
+    orders = _compute_phase_orders([task])
+    assert orders[1] == _DEFAULT_PHASE_ORDER
+
+
+def test_phase_order_strictly_ordered_design_before_implementation_before_testing_before_docs():
+    tasks = [
+        _make_task_stub(1, "design"),
+        _make_task_stub(2, "implementation"),
+        _make_task_stub(3, "testing"),
+        _make_task_stub(4, "documentation"),
+    ]
+    orders = _compute_phase_orders(tasks)
+    assert orders[1] < orders[2] < orders[3] < orders[4]
+
+
+def _make_atomic_task_stub(task_id: int, task_type: str) -> MagicMock:
+    t = MagicMock()
+    t.id = task_id
+    t.task_type = task_type
+    t.planning_level = "atomic"
+    t.title = f"Task {task_id}"
+    t.description = None
+    t.summary = None
+    t.objective = None
+    t.priority = "medium"
+    t.executor_type = "pending_engine_routing"
+    t.status = "pending"
+    t.parent_task_id = None
+    t.parent_task = None
+    t.implementation_steps = None
+    t.acceptance_criteria = None
+    t.estimated_complexity = None
+    t.depends_on_task_titles = []
+    t.tests_required = None
+    t.technical_constraints = None
+    t.out_of_scope = None
+    return t
+
+
+def test_build_candidate_atomic_task_propagates_phase_order():
+    task = _make_atomic_task_stub(1, "design")
+    candidate = _build_candidate_atomic_task(task, None, "standard", phase_order=1)
+    assert candidate.phase_order == 1
+
+
+def test_build_candidate_atomic_task_phase_order_defaults_to_default_constant():
+    task = _make_atomic_task_stub(1, "implementation")
+    candidate = _build_candidate_atomic_task(task, None)
+    assert candidate.phase_order == _DEFAULT_PHASE_ORDER

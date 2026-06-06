@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
@@ -29,6 +30,8 @@ from app.services.validation.helpers.resources import (
     TextResource,
     read_many_text_resources,
 )
+
+logger = logging.getLogger(__name__)
 
 VALIDATOR_KEY = "test_builder_agent_validator"
 PRODUCER_KEY = "test_builder_agent"
@@ -476,12 +479,45 @@ class TestBuilderAgentValidator(BaseTaskValidator):
             json_schema=TestBuilderAgentValidationLLMOutput.model_json_schema(),
         )
 
+        first_error: str | None = None
         try:
             llm_output = TestBuilderAgentValidationLLMOutput.model_validate(raw)
         except ValidationError as exc:
-            raise TestBuilderAgentValidatorError(
-                f"TestBuilderAgentValidator returned invalid structured output: {str(exc)}"
-            ) from exc
+            first_error = str(exc)
+            logger.warning(
+                "test_builder_agent_validator_invalid_output project_id=%s error=%s retrying=true",
+                validation_input.execution_request.project_id,
+                first_error,
+            )
+
+        if first_error is not None:
+            prompt_loader.validate_builder_inputs(
+                "test_builder_agent_validator",
+                "retry",
+                {
+                    "project_id": validation_input.execution_request.project_id,
+                    "validation_error": first_error,
+                },
+            )
+            retry_user_prompt = (
+                f"project_id: {validation_input.execution_request.project_id}\n\n"
+                f"Your previous output was invalid.\n"
+                f"Validation error: {first_error}\n\n"
+                f"Return ONLY valid JSON matching the TestBuilderAgentValidationLLMOutput schema."
+            )
+            retry_raw = provider.generate_structured(
+                system_prompt=TEST_BUILDER_AGENT_VALIDATOR_SYSTEM_PROMPT,
+                user_prompt=retry_user_prompt,
+                schema_name="test_builder_agent_validator_output",
+                json_schema=TestBuilderAgentValidationLLMOutput.model_json_schema(),
+            )
+            try:
+                llm_output = TestBuilderAgentValidationLLMOutput.model_validate(retry_raw)
+            except ValidationError as retry_exc:
+                raise TestBuilderAgentValidatorError(
+                    f"TestBuilderAgentValidator returned invalid structured output after retry: "
+                    f"{str(retry_exc)}"
+                ) from retry_exc
 
         llm_output = _sanitize_llm_output(llm_output)
 

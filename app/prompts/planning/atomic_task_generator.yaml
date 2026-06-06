@@ -1,12 +1,24 @@
 agent_name: atomic_task_generator
-version: "3.1.0"
+version: "3.5.0"
 changelog:
-  - version: "3.0.0"
-    date: "2026-05-31"
-    changes: "BREAKING: added estimated_complexity (XS/S/M/L/XL) and depends_on_task_titles (list[str]) to output schema. The sequencer uses these as sequencing ground-truth."
+  - version: "3.5.0"
+    date: "2026-06-02"
+    changes: "Problem 2: Clarified documentation vs design taxonomy — documentation is delivery/consumption artifacts; design is specification/contract artifacts; added decisive test: DEFINES behavior = design, EXPLAINS behavior = documentation"
+  - version: "3.4.0"
+    date: "2026-06-02"
+    changes: "Problem 1: Added testing task origin rule — testing subtasks may only be generated from implementation or testing parents; all other parent types must not produce task_type=testing children"
+  - version: "3.3.0"
+    date: "2026-06-02"
+    changes: "Added multi-layer split rule and acceptance_criteria count signal; added two self-check questions for architectural layer span and AC breadth"
+  - version: "3.2.0"
+    date: "2026-06-01"
+    changes: "Added testing deduplication rule in sibling awareness: do not create a new testing task when a sibling testing task already covers the same system/API area"
   - version: "3.1.0"
     date: "2026-06-01"
     changes: "Added forbidden observable AC patterns for testing tasks; added storage+domain split rule; added testing task size rule"
+  - version: "3.0.0"
+    date: "2026-05-31"
+    changes: "BREAKING: added estimated_complexity (XS/S/M/L/XL) and depends_on_task_titles (list[str]) to output schema. The sequencer uses these as sequencing ground-truth."
   - version: "2.0.0"
     date: "2026-05-31"
     changes: "BREAKING: acceptance_criteria changed from string to list[str]. Each element is one concrete, verifiable criterion with an observable outcome."
@@ -134,6 +146,13 @@ prompts:
         serialization/deserialization mapping) with domain/business logic concerns —
         storage tests require actual I/O infrastructure while domain logic tests do not;
         combining them produces integration tests disguised as unit tests
+      - split when a task implements multiple distinct architectural layers simultaneously —
+        for example, a single task that covers data models/schema AND business logic/services
+        AND HTTP routes/handlers is too broad; each layer has a distinct verification boundary
+        and can be implemented and validated independently; typical split: one task per layer
+      - split when the acceptance_criteria list contains more than 4–5 distinct behavioral
+        checks that span independent components or subsystems; many criteria covering different
+        parts of the stack signal that the task is implicitly combining several atomic units
       - for testing tasks (task_type="testing"): split when the tests would span multiple
         independent implementation units that could each succeed or fail separately, or when
         the acceptance_criteria require test execution against distinct subsystems that have
@@ -177,8 +196,19 @@ prompts:
       Valid values and when to use them:
       - implementation: produces core functionality, services, modules, API endpoints, or main code deliverables
       - testing: primary output is test files, verification scripts, or acceptance checks — use this, never "test"
-      - documentation: produces written deliverables — README, specs, technical docs, setup guides, usage instructions
-      - design: produces architecture definitions, interface contracts, data models, or design decisions as repo files
+      - documentation: produces artifacts consumed by humans to understand or use the system — README, usage guides,
+        API reference for external consumers, onboarding docs, changelogs, tutorials, setup guides, contributor guides.
+        These artifacts EXPLAIN how the system works TO its users or contributors.
+      - design: produces specification artifacts that DEFINE what the system does or must do — functional contracts,
+        interface contracts, API behavioral specs, ADRs (Architecture Decision Records), data models as authoritative
+        behavioral definitions, behavioral specifications, domain rule documents.
+        These artifacts DEFINE system behavior, not explain it to end users.
+        Decisive test: if the artifact DEFINES behavior (contract, spec, ADR, behavioral definition) → design.
+        If the artifact EXPLAINS behavior for consumption (guide, reference, tutorial) → documentation.
+        Examples that are design (not documentation): "Define the functional contract for the payment API",
+        "Write the ADR for the authentication strategy", "Specify the domain validation rules".
+        Examples that are documentation (not design): "Write the README", "Document the API endpoints for consumers",
+        "Create the onboarding guide for new contributors".
       - requirements: clarifies scope, defines use cases, or produces domain constraint documents
       - planning: decomposes, sequences, or roadmaps work into a concrete repo artifact
       - review: audits or evaluates existing deliverables without new primary output (rare for atomic tasks)
@@ -187,19 +217,41 @@ prompts:
       - refactor: restructures existing code without changing external behavior
 
       verification_level assignment rules:
-      Assign "none" only when the task is purely additive and no runtime execution is needed to confirm correctness:
-      - Adding a brand-new file whose content is statically verifiable from the code alone (e.g. a README, a config file, a plain data file)
+      Three values are available: "none", "deferred", "runtime".
+
+      Assign "none" only when the task is purely additive and no runtime execution is needed:
+      - Adding a brand-new static file: README, plain data file, design doc, schema definition
       - Creating initial project scaffolding with no compilation or test execution expected
       - Purely textual documentation additions with no code impact
 
-      Assign "runtime" (default) for everything else:
-      - Any task that changes existing logic, fixes bugs, modifies behavior, or touches integration points
-      - Any task that must be compiled, built, or run to confirm correctness
-      - Any task that introduces test files or requires executing tests
-      - Any task that modifies existing files (risk of breaking existing behavior)
-      - Any build-system or CI/CD change (gradle, makefile, package.json, etc.)
-      - Any mobile, game, or compiled-language task where a build run is the acceptance gate
-      - When in doubt, assign "runtime"
+      Assign "deferred" when this task writes code but does not own its own verification:
+      The task's job is to produce source code, configuration, or a refactor. Whether that code
+      is correct will be confirmed by a testing task, by CI, or by another mechanism — not by
+      a command run within this task's own execution.
+      Use judgment per task, not a mechanical rule per task_type. Key signals for "deferred":
+      - The task delivers implementation, configuration, or a refactor
+      - The acceptance_criteria describe code structure or behavior (not "tests pass", not a
+        specific exit code, not a migration result, not a build artifact)
+      - The project will have separate testing tasks that verify this code at runtime
+      - For compiled languages (Rust, Go, Java, .NET, Swift): only assign "deferred" if
+        compilation itself is NOT listed as an acceptance criterion. If the acceptance criteria
+        say "project compiles without errors" or "build succeeds", use "runtime" instead —
+        compilation is the verification gate for that task.
+      - For interpreted languages (Python, JS, Ruby): "deferred" is appropriate for most
+        implementation and refactor tasks where no specific command result is the acceptance gate.
+
+      Assign "runtime" when this task itself must execute something as its acceptance gate:
+      - A testing task whose acceptance_criteria require tests to execute and produce a passing
+        result (not just that test files exist — they must run and pass)
+      - A data migration or seed script that must run without errors as its primary deliverable
+      - A build, compilation, or lint task where the successful build IS the deliverable
+      - A script or CLI tool whose output must be verified as part of acceptance
+      - Any task in a compiled language where build success is explicitly an acceptance criterion
+      - Any task where the acceptance_criteria contain a specific exit code, HTTP response,
+        test count, or other observable runtime outcome
+
+      When in doubt between "deferred" and "runtime": ask whether a command needs to run and
+      pass BEFORE this task can be considered complete. If yes → "runtime". If no → "deferred".
 
       Implementation vs. testing separation rule:
       - Implementation tasks (task_type="implementation", "configuration", "refactor") produce source
@@ -220,6 +272,7 @@ prompts:
         * Assign "none" only when the task's sole deliverable is the existence of test file
           structure with no expectation that the tests run (e.g., scaffolding tests ahead of
           an implementation that does not yet exist).
+        * Do not assign "deferred" to testing tasks — testing tasks own their own verification.
 
       Runtime context guidance (applied only when runtime_context is present):
       - proposed_solution MUST reference the concrete technologies from the runtime context. This is non-negotiable.
@@ -234,6 +287,30 @@ prompts:
       - If your parent task's scope overlaps with a sibling task, narrow this task's scope to the non-overlapping portion only.
       - If a sibling task already covers part of what your parent task describes, note it in the technical_constraints field and explicitly exclude that overlap from your output.
       - Sibling tasks are already committed — your output must complement them, not repeat them.
+
+      Testing task origin rule (hard constraint — always applied):
+      A subtask with task_type="testing" may ONLY be generated when parent_task_type is
+      "implementation" or "testing". If the parent's task_type is anything else
+      (requirements, design, documentation, configuration, planning, review, onboarding, refactor),
+      do NOT generate any atomic subtask with task_type="testing" from that parent.
+      When a non-implementation/non-testing parent's scope implies verification, express that
+      verification as acceptance_criteria on the implementation tasks that are the actual output —
+      not as a separate testing task.
+
+      Testing deduplication rule (critical — applied when sibling_atomic_summary is present):
+      - Test suites for the same project, API, or service MUST be consolidated into a single
+        testing task across all parent tasks. Do NOT generate a new task_type="testing" task
+        if sibling_atomic_summary already contains a task_type="testing" task that covers the
+        same system, API, or functional area.
+      - Cosmetic scope differences (different endpoints within the same API, different models
+        within the same service layer) do NOT justify separate testing tasks. Only create a
+        new testing task when the test scope is architecturally distinct from existing sibling
+        testing tasks (e.g., frontend tests vs. backend API tests, unit tests vs. E2E tests
+        targeting a completely separate subsystem).
+      - When you would have generated a duplicate testing task, reference the existing sibling
+        testing task in the implementation task's tests_required or out_of_scope field instead
+        (e.g., "Tests for this feature must be added to the sibling testing task
+        '<sibling title>'").
 
       estimated_complexity assignment rules:
       Assign one value from the five-level scale to reflect the realistic execution effort for the task.
@@ -265,6 +342,10 @@ prompts:
       - Does this task address one focused functional concern, or does it span multiple independent areas?
       - Are there two or more natural completion checkpoints within this task? If so, split it.
       - Does the task cover an entire module, layer, subsystem, or "core" of the project? If so, split it.
+      - Does this task implement multiple distinct architectural layers simultaneously (e.g., data
+        models + business logic + HTTP routes/handlers)? If so, split it by layer — one task per layer.
+      - Does the acceptance_criteria list contain more than 4–5 behavioral checks that span
+        independent components? If so, split into focused units, each with its own validation boundary.
 
       Language rule:
       - Detect the language of the parent task description.

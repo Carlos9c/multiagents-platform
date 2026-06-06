@@ -253,7 +253,7 @@ def _is_executable_implementation_like_task(request: ExecutionRequest) -> bool:
 
 
 def _task_explicitly_requests_repo_local_verification(request: ExecutionRequest) -> bool:
-    if request.verification_level == "none":
+    if request.verification_level in ("none", "deferred"):
         return False
 
     if request.task_type and request.task_type.lower() in TASK_TYPES_REQUIRING_VERIFICATION:
@@ -422,6 +422,32 @@ def _command_succeeded(command) -> bool:
     return exit_code == 0
 
 
+_TEST_DISCOVERY_FAILURE_MARKERS: tuple[str, ...] = (
+    "collected 0 items",
+    "no tests ran",
+    "ran 0 tests",
+    "no test files found",
+    "no tests found",
+)
+
+
+def _test_discovery_failure_in_latest_command(resolution_state: ResolutionState) -> bool:
+    """Return True when the latest failed command shows 0 tests discovered.
+
+    This distinguishes "no test files exist yet" from "tests exist but have
+    assertion errors".  The correct repair for a discovery failure is
+    test_builder_agent, not code_change_agent.
+    """
+    latest_command = _latest_command_execution(resolution_state)
+    if latest_command is None or _command_succeeded(latest_command):
+        return False
+    stdout = (getattr(latest_command, "stdout", "") or "").lower()
+    stderr = (getattr(latest_command, "stderr", "") or "").lower()
+    summary = (getattr(latest_command, "observed_outcome_summary", "") or "").lower()
+    combined = "\n".join([stdout, stderr, summary])
+    return any(marker in combined for marker in _TEST_DISCOVERY_FAILURE_MARKERS)
+
+
 _SETUP_ONLY_COMMAND_PREFIXES: tuple[str, ...] = (
     "chmod ",
     "mkdir ",
@@ -457,7 +483,7 @@ def _verification_would_materially_improve(
     request: ExecutionRequest,
     resolution_state: ResolutionState,
 ) -> bool:
-    if request.verification_level == "none":
+    if request.verification_level in ("none", "deferred"):
         return False
 
     latest_command = _latest_command_execution(resolution_state)
@@ -695,6 +721,20 @@ def _checklist_requires_finish(checklist: dict[str, bool]) -> bool:
     )
 
 
+def _verification_status_label(
+    request: ExecutionRequest,
+    checklist: dict[str, bool],
+) -> str:
+    """Return 'not_required', 'yes', or 'no' for the verification checklist item.
+
+    'not_required' signals to the orchestrator LLM that verification is not this
+    task's responsibility — no command_runner call is needed or expected.
+    """
+    if request.verification_level in ("none", "deferred"):
+        return "not_required"
+    return "yes" if checklist["local_verification_done_if_material"] else "no"
+
+
 def _build_operational_state_summary(
     request: ExecutionRequest,
     resolution_state: ResolutionState,
@@ -730,6 +770,10 @@ def _build_operational_state_summary(
             resolution_state
         ),
         "latest_command_succeeded": _command_succeeded(latest_command) if latest_command else None,
+        "test_discovery_failure_detected": _test_discovery_failure_in_latest_command(
+            resolution_state
+        ),
+        "verification_level": request.verification_level,
         "completion_checklist": checklist,
     }
 
@@ -843,17 +887,29 @@ Current orchestration state:
 - step_notes: {resolution_state.step_notes}
 - operational_state_summary: {_build_operational_state_summary(request, resolution_state, runtime_state)}
 
+verification_level: {request.verification_level}
+  "none"     → no runtime verification needed; finish after writing deliverables.
+  "deferred" → this coding task does not own its verification; a separate testing task or
+               later step is responsible. Finish after writing code. Do NOT call
+               command_runner_agent — there is no meaningful target here.
+  "runtime"  → this task must execute something to confirm acceptance. command_runner_agent
+               is expected after the writing agent completes, but only when there is a real
+               executable target (test suite, migration, build) — not a trivial import check.
+
 Completion checklist (use as a reasoning aid, not a hard rule):
 - context_ready: {"yes" if checklist["context_ready"] else "no"}
 - implementation_done_if_needed: {"yes" if checklist["implementation_done_if_needed"] else "no"}
-- local_verification_done_if_material: {"yes" if checklist["local_verification_done_if_material"] else "no"}
+- local_verification_done_if_material: {_verification_status_label(request, checklist)}
+  ("not_required" means verification_level is "none" or "deferred" — treat the same as "yes")
 - new_concrete_gap_detected: {"yes" if checklist["new_concrete_gap_detected"] else "no"}
 
 Checklist guidance:
 - When the first three fields are yes and the last is no, that is a strong signal to finish — but always verify against task_type and the actual accumulated evidence before deciding.
 - For implementation or configuration task types, do not finish unless at least one of code_change_agent or command_runner_agent has executed.
 - For testing task types:
-  * Do not finish unless at least one of test_builder_agent or code_change_agent has executed.
+  * Do not finish unless test_builder_agent has executed at least once in this run.
+    A compile check or type check by command_runner_agent does NOT satisfy the testing task
+    requirement — test files must have been written first.
   * When verification_level="runtime", local_verification_done_if_material requires
     command_runner_agent to have executed successfully — test_builder_agent completing alone
     does not satisfy it. If no command has run yet after test_builder_agent, continue.
@@ -861,10 +917,18 @@ Checklist guidance:
     consult error_diagnosis.fault_side to pick the repair subagent:
       fault_side="implementation" → code_change_agent → command_runner_agent
       fault_side="test"           → test_builder_agent → command_runner_agent
-      fault_side="both"           → code_change_agent → command_runner_agent
+      fault_side="both"           → code_change_agent (fix implementation) → if tests are now stale,
+                                    test_builder_agent (update tests) → command_runner_agent
       fault_side="environment"    → environment_manager_agent → command_runner_agent
       fault_side="uncertain"      → use overall_error_class and is_recoverable to decide
     Do not finish here — call the appropriate repair subagent first.
+- Test discovery failure routing: when operational_state_summary["test_discovery_failure_detected"] is True
+  (the command found 0 test items, no test files were discovered, or no tests ran):
+  * If test_builder_agent has NOT yet completed a step → call test_builder_agent.
+    Discovery failures are almost always caused by missing test files, not implementation bugs.
+    Do NOT route to code_change_agent for a test discovery failure.
+  * If test_builder_agent HAS already run → the discovery failure is likely an infrastructure
+    problem (missing path setup, missing conftest). Call test_builder_agent again for a repair pass.
 - A checklist that looks satisfied but contradicts the task_type or the visible evidence means a subagent step was likely skipped — call the appropriate subagent instead of finishing.
 
 Latest error diagnosis (structured, from error_diagnostic_tool — use for routing decisions):
@@ -1303,15 +1367,25 @@ def _maybe_build_forced_terminal_decision(
             and _command_is_setup_only(latest_command)
         )
     ):
-        return NextActionDecision(
-            decision_type=DECISION_FINISH,
-            rationale=(
-                "A material repository output exists and the latest repository-local verification succeeded, "
-                "so the operational pass should finish."
-            ),
-            expected_outcome="Stop orchestration because the current operational pass is sufficient.",
-            risk_flags=[],
-        )
+        # Guard: for testing tasks, do not force FINISH if test_builder_agent has not
+        # executed yet in this run.  A compile check or type-check after code_change_agent
+        # must not terminate the loop before test files are written.
+        if (
+            request.task_type
+            and request.task_type.lower() in TASK_TYPES_REQUIRING_VERIFICATION
+            and not _test_builder_agent_completed_a_step(resolution_state)
+        ):
+            pass  # fall through — let the orchestrator LLM decide to call test_builder_agent
+        else:
+            return NextActionDecision(
+                decision_type=DECISION_FINISH,
+                rationale=(
+                    "A material repository output exists and the latest repository-local verification "
+                    "succeeded, so the operational pass should finish."
+                ),
+                expected_outcome="Stop orchestration because the current operational pass is sufficient.",
+                risk_flags=[],
+            )
 
     if (
         last_attempted_subagent == "command_runner_agent"

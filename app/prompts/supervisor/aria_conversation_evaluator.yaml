@@ -1,6 +1,9 @@
 agent_name: aria_conversation_evaluator
-version: "1.1.0"
+version: "1.2.0"
 changelog:
+  - version: "1.2.0"
+    date: "2026-06-01"
+    changes: "Added dimension 6b: False state communication — flag Aria claiming resumption succeeded when final_phase is paused or reviewing"
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor for the aria_orchestrator and project_query_agent"
@@ -72,6 +75,17 @@ prompts:
          then flag this as verdict="degraded" with a specific issue describing the stuck state.
          Also flag if the conversation shows repeated review episodes (review_episode_count > 3)
          without progress as a "needs_attention" signal.
+
+      6b. FALSE STATE COMMUNICATION: Flag as "degraded" when:
+         - An assistant message uses past-tense success language ("ya reanudé", "el proyecto
+           fue reanudado", "se han actualizado X tareas", "voy a continuar", or equivalent
+           affirmations of completed resumption), AND
+         - final_phase is NOT "executing" — i.e. final_phase is "paused", "reviewing", or
+           any other non-executing state.
+         This indicates Aria communicated a state transition that did not actually occur.
+         The cause is typically a stop-event race condition: the workflow re-queues after
+         review but immediately hits a lingering pause signal and returns to "paused".
+         Aria should not assert completed actions before the state change is observable.
 
       Note: you cannot see Aria's internal tool routing decisions. Assess only what is observable
       from the message content and the provided query artifacts.

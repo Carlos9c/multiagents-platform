@@ -1,6 +1,22 @@
 agent_name: test_builder_agent_evaluator
-version: "1.2.0"
+version: "1.5.0"
 changelog:
+  - version: "1.5.0"
+    date: "2026-06-04"
+    changes: |
+      Added dimension 7 (code_change_agent context utilisation): in code+test sequences the agent
+      receives implementation files from code_change_agent in this run; flag if produced tests
+      import from incorrect module paths when the correct paths were available as evidence.
+      Added dimension 8 (repair diagnosis accuracy): on repair passes the agent receives the
+      last command failure output; flag wrong repair strategy (infrastructure fix for assertion
+      error, or logic fix for collection/import error) evidenced by the mismatch between prior
+      command failure type and the files produced on the repair pass.
+  - version: "1.4.0"
+    date: "2026-06-02"
+    changes: "Added dimension 6d: inverted infrastructure default anti-pattern — agent answered YES to binary check without positive evidence for all three conditions in workspace_inventory; YES requires active confirmation, not absence of a reason to say NO"
+  - version: "1.3.0"
+    date: "2026-06-01"
+    changes: "Updated dimension 6: infrastructure check is now mandatory binary decision — flag any run where tests import local modules but no infrastructure file appears first in files_written, regardless of whether a collection failure was observed later"
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor evaluator for test_builder_agent behavioral patterns"
@@ -26,8 +42,11 @@ prompts:
           task_id, task_title, task_type, task_objective, acceptance_criteria,
           task_status (ground truth), had_budget_exceeded, and runs[].
           Each run includes: run_id, attempt_number, run_status, failure_type, work_summary,
-          completed_scope, remaining_scope, changed_files (paths only), blockers_found,
-          joint_validation_decision, validator_result.decision/summary (cross-context),
+          completed_scope, remaining_scope, changed_files (paths only, includes all agents),
+          blockers_found, joint_validation_decision, validator_result.decision/summary (cross-context),
+          agent_sequence (ordered list of all agents that ran in this run — use to detect code+test
+          sequences and whether code_change_agent preceded test_builder_agent),
+          command_trace_entries[] (command_runner_agent evidence for cross-referencing failure types),
           and test_builder_trace_entries[]. Each trace entry has: step_id, call_type
           ("materialise" or "needs_dependency"), files_written (list of {path, operation,
           rationale}), needs_dependency (string, when call_type is "needs_dependency"), and
@@ -86,30 +105,89 @@ prompts:
          Flag entries where gaps are vague or where the agent appears to have tested
          observed implementation behavior instead of acceptance_criteria.
 
-      6. Test infrastructure completeness
-         The agent is responsible for the full test infrastructure, not just the test logic files.
-         Use files_written[].path to inspect whether infrastructure files appear alongside test files.
-         Flag the following patterns:
+      6. Test infrastructure completeness (mandatory binary check)
+         The agent must make a binary YES/NO decision before writing any file: CAN the runner
+         discover and execute the tests without path resolution errors, missing fixtures, or
+         missing configuration? If NO, an infrastructure file must appear as the FIRST entry
+         in files_written[], before any test file.
 
-         a) Missing infrastructure on first attempt: test files import from the project's own
-            packages or modules, but no infrastructure file (runner config, shared fixture, path
-            setup) appears in files_written[]. This is a proactive completeness failure.
+         Use files_written[].path to inspect compliance. Flag the following patterns:
+
+         a) Missing infrastructure on first attempt (primary signal): test files import from
+            the project's own packages or modules, but no infrastructure file (runner config,
+            shared fixture, path setup) appears first in files_written[]. The binary check
+            should have caught this BEFORE writing any test file. This is a proactive failure —
+            do not wait for a collection failure to surface it. Flag it even if no failure
+            was observed (some environments may tolerate missing infra, masking the defect).
 
          b) Collection failure loop: a subsequent command_runner_agent call (visible in the run
             sequence via run_status and failure_type) fails with a collection-time error (import
             resolution, module not found, fixture not discoverable) immediately after this agent's
-            materialisation. This is a strong signal the agent produced test files without the
-            infrastructure needed to run them.
+            materialisation. This is a strong signal the agent produced test files without
+            completing the binary infrastructure check.
 
          c) Wrong repair strategy: on attempt_number > 1 following a collection-time failure,
             the agent modified test logic (assertions, test structure) instead of creating or
             fixing an infrastructure file. This indicates misdiagnosis of the repair need.
             The correct repair for a collection error is always infrastructure, not test logic.
 
+         d) Inverted infrastructure default (new in v1.4.0): the agent answered YES to the
+            binary check (no infrastructure file was written) but the workspace_inventory does
+            not show positive evidence for all three required conditions:
+            (1) an existing file that resolves project-local imports for the whole test suite,
+            (2) an existing shared file providing fixtures or test state isolation, and
+            (3) an existing setup file providing pre-test environment/configuration.
+            The agent must answer YES only when ALL three are positively confirmed — not merely
+            because it cannot see a reason to say NO. Flag runs where the agent assumed YES by
+            default and infrastructure turned out to be missing (evidenced by a subsequent
+            collection failure, or by tests importing local modules with no visible import
+            resolver in the workspace_inventory). This is the inverted default anti-pattern:
+            treating absence of evidence as evidence of sufficiency.
+
+      7. Code-change context utilisation (code+test sequences)
+         When agent_sequence shows code_change_agent ran BEFORE test_builder_agent in the same run,
+         the test_builder_agent had access to the actual implementation files written in that run.
+         Use changed_files to identify which module paths code_change_agent created.
+         Then inspect files_written[].rationale and (where visible) the test file import paths.
+
+         Flag the following patterns:
+         a) Import path mismatch: the test files import from a module path that does not match
+            any file code_change_agent wrote, AND a subsequent command_runner_agent call fails
+            with ImportError or ModuleNotFoundError referencing those paths. This is a missed
+            opportunity — the agent had the correct paths available but used incorrect ones.
+         b) Scope narrowing: code_change_agent wrote files covering multiple modules but the
+            test files only cover the files listed in relevant_files, ignoring the additional
+            implementation files. When acceptance_criteria reference behaviour from those extra
+            files, this is a gap the agent should have caught.
+         c) Correct utilisation (positive signal): test files import directly from the module
+            paths code_change_agent wrote, suggesting the agent correctly used the available
+            context.
+
+      8. Repair diagnosis accuracy (repair passes)
+         On attempt_number > 1 after a command_runner_agent failure, cross-reference the prior
+         command failure type (from command_trace_entries[].stdout_preview / stderr_preview)
+         with the files produced in the repair pass (files_written[]).
+
+         Flag the following patterns:
+         a) Infrastructure fix for assertion error: prior command failed with an ASSERTION failure
+            (e.g., "AssertionError: assert 404 == 201") but the repair pass produced an
+            infrastructure file (conftest.py, pytest.ini) and no test logic changes. This is a
+            misdiagnosis — assertion failures require test logic or implementation repair, not
+            infrastructure changes.
+         b) Logic fix for collection error: prior command failed with a COLLECTION/IMPORT failure
+            (e.g., "collected 0 items", "ModuleNotFoundError") but the repair pass modified test
+            assertions or test logic instead of creating/fixing infrastructure. This is the
+            "wrong repair strategy" from dimension 6c; flag it here as well.
+         c) Correct repair (positive signal): collection failure → infrastructure added first;
+            assertion failure → test logic or mock updated; signature error → call signatures
+            updated in tests. This is the expected behaviour.
+
       Cross-context:
          joint_validation_decision and validator_result are provided for reference.
          Use them to detect whether the agent's declared coverage_summary aligns with what
          the validator found in missing_scope and findings[].
+         Use command_trace_entries[] to cross-reference failure types with repair strategies
+         (dimensions 7 and 8).
 
       Note: do NOT assess test quality (assertions, test logic).
       Focus on structure, organisation, scope coverage, infrastructure completeness, and retry adaptation.

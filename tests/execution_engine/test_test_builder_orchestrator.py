@@ -28,7 +28,11 @@ from app.execution_engine.orchestrator import (
     _build_completion_checklist,
     _last_attempted_subagent_name,
     _maybe_build_forced_terminal_decision,
+    _task_explicitly_requests_repo_local_verification,
     _test_builder_agent_completed_a_step,
+    _test_discovery_failure_in_latest_command,
+    _verification_status_label,
+    _verification_would_materially_improve,
 )
 from app.execution_engine.resolution_state import ResolutionState
 from app.execution_engine.state import ExecutionState
@@ -84,8 +88,32 @@ def _add_completed_step(state: ResolutionState, subagent_name: str, n: int = 1) 
     state.completed_steps.append(f"dynamic_call_{n}_{subagent_name}")
 
 
-def _add_changed_file(state: ResolutionState, path: str = "tests/test_user_service.py") -> None:
-    state.evidence.add_changed_file(path=path, change_type="created", producer="test_builder_agent")
+def _add_changed_file(
+    state: ResolutionState,
+    path: str = "tests/test_user_service.py",
+    producer: str = "test_builder_agent",
+) -> None:
+    state.evidence.add_changed_file(path=path, change_type="created", producer=producer)
+
+
+def _add_successful_command(state: ResolutionState) -> None:
+    state.evidence.add_command_execution(
+        command="pytest tests/",
+        producer="command_runner_agent",
+        exit_code=0,
+        stdout="1 passed",
+        stderr="",
+    )
+
+
+def _add_failed_command_no_tests(state: ResolutionState) -> None:
+    state.evidence.add_command_execution(
+        command="pytest tests/",
+        producer="command_runner_agent",
+        exit_code=5,
+        stdout="collected 0 items\n\nno tests ran",
+        stderr="",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +288,234 @@ def test_maybe_build_does_not_force_finish_for_testing_task_before_command():
 
     # Should be None (let orchestrator decide to call command_runner_agent)
     assert decision is None
+
+
+# ---------------------------------------------------------------------------
+# Gap #1: forced FINISH must NOT fire for testing tasks before test_builder runs
+# ---------------------------------------------------------------------------
+
+
+def test_forced_finish_does_not_fire_for_testing_task_when_command_passes_before_test_builder():
+    """
+    Sequence: code_change_agent → command_runner_agent (pass).
+    For task_type="testing", forced FINISH must NOT fire when test_builder_agent
+    has not yet executed — even though command_runner succeeded.
+    """
+    request = _make_request(task_type="testing")
+    state = _make_state(request)
+
+    # code_change_agent ran and wrote a file
+    _add_completed_step(state, "code_change_agent", n=2)
+    _add_changed_file(state, path="app/services/user_service.py", producer="code_change_agent")
+
+    # command_runner_agent succeeded (compile/type check)
+    _add_completed_step(state, "command_runner_agent", n=3)
+    _add_successful_command(state)
+
+    rs = _make_runtime_state(
+        visited=["context_selection_agent", "code_change_agent", "command_runner_agent"]
+    )
+    rs.agent_call_count = 3
+
+    budget = LoopBudget(
+        max_steps=8,
+        max_agent_calls=8,
+        max_tool_calls=12,
+        max_command_runs=4,
+        max_repair_attempts=2,
+    )
+
+    decision = _maybe_build_forced_terminal_decision(
+        request=request,
+        resolution_state=state,
+        runtime_state=rs,
+        budget=budget,
+        consecutive_invalid_decisions=0,
+    )
+
+    # Must NOT force FINISH — test_builder_agent still needs to run
+    assert decision is None
+
+
+def test_forced_finish_fires_for_testing_task_after_test_builder_and_command():
+    """
+    Sequence: test_builder_agent → command_runner_agent (pass).
+    After test_builder ran AND command_runner succeeded, forced FINISH should fire.
+    """
+    request = _make_request(task_type="testing")
+    state = _make_state(request)
+
+    _add_completed_step(state, "test_builder_agent", n=2)
+    _add_changed_file(state)
+
+    _add_completed_step(state, "command_runner_agent", n=3)
+    _add_successful_command(state)
+
+    rs = _make_runtime_state(
+        visited=["context_selection_agent", "test_builder_agent", "command_runner_agent"]
+    )
+    rs.agent_call_count = 3
+
+    budget = LoopBudget(
+        max_steps=8,
+        max_agent_calls=8,
+        max_tool_calls=12,
+        max_command_runs=4,
+        max_repair_attempts=2,
+    )
+
+    decision = _maybe_build_forced_terminal_decision(
+        request=request,
+        resolution_state=state,
+        runtime_state=rs,
+        budget=budget,
+        consecutive_invalid_decisions=0,
+    )
+
+    # test_builder ran AND command passed → forced FINISH is correct
+    assert decision is not None
+    assert decision.decision_type == "finish"
+
+
+# ---------------------------------------------------------------------------
+# Gap #3: _test_discovery_failure_in_latest_command
+# ---------------------------------------------------------------------------
+
+
+def test_test_discovery_failure_detected_on_zero_items_collected():
+    request = _make_request()
+    state = _make_state(request)
+    _add_failed_command_no_tests(state)
+
+    assert _test_discovery_failure_in_latest_command(state) is True
+
+
+def test_test_discovery_failure_not_detected_on_assertion_failure():
+    request = _make_request()
+    state = _make_state(request)
+    state.evidence.add_command_execution(
+        command="pytest tests/",
+        producer="command_runner_agent",
+        exit_code=1,
+        stdout="FAILED tests/test_user.py::test_create - AssertionError: assert 404 == 201",
+        stderr="",
+    )
+
+    assert _test_discovery_failure_in_latest_command(state) is False
+
+
+def test_test_discovery_failure_not_detected_when_no_commands():
+    request = _make_request()
+    state = _make_state(request)
+
+    assert _test_discovery_failure_in_latest_command(state) is False
+
+
+def test_test_discovery_failure_not_detected_when_command_succeeded():
+    request = _make_request()
+    state = _make_state(request)
+    _add_successful_command(state)
+
+    assert _test_discovery_failure_in_latest_command(state) is False
+
+
+def test_operational_state_includes_test_discovery_failure_detected():
+    """operational_state_summary must expose test_discovery_failure_detected."""
+    from app.execution_engine.orchestrator import _build_operational_state_summary
+
+    request = _make_request()
+    state = _make_state(request)
+    _add_failed_command_no_tests(state)
+    rs = _make_runtime_state(visited=["context_selection_agent", "command_runner_agent"])
+    rs.agent_call_count = 2
+
+    summary = _build_operational_state_summary(request, state, rs)
+
+    assert "test_discovery_failure_detected" in summary
+    assert summary["test_discovery_failure_detected"] is True
+
+
+# ---------------------------------------------------------------------------
+# verification_level="deferred" — orchestrator behavior
+# ---------------------------------------------------------------------------
+
+
+def test_verification_would_not_improve_for_deferred_task():
+    request = _make_request(task_type="implementation")
+    request = request.model_copy(update={"verification_level": "deferred"})
+    state = _make_state(request)
+    _add_changed_file(state, path="app/service.py", producer="code_change_agent")
+
+    assert _verification_would_materially_improve(request, state) is False
+
+
+def test_explicit_verification_not_requested_for_deferred_task():
+    request = _make_request(task_type="implementation")
+    request = request.model_copy(update={"verification_level": "deferred"})
+
+    assert _task_explicitly_requests_repo_local_verification(request) is False
+
+
+def test_forced_finish_fires_after_code_change_on_deferred_task():
+    """Deferred task: forced FINISH after code_change_agent — command_runner not needed."""
+    request = _make_request(task_type="implementation")
+    request = request.model_copy(update={"verification_level": "deferred"})
+
+    state = _make_state(request)
+    _add_completed_step(state, "code_change_agent", n=2)
+    _add_changed_file(state, path="app/service.py", producer="code_change_agent")
+
+    rs = _make_runtime_state(visited=["context_selection_agent", "code_change_agent"])
+    rs.agent_call_count = 2
+
+    budget = LoopBudget(
+        max_steps=8,
+        max_agent_calls=8,
+        max_tool_calls=12,
+        max_command_runs=4,
+        max_repair_attempts=2,
+    )
+    decision = _maybe_build_forced_terminal_decision(
+        request=request,
+        resolution_state=state,
+        runtime_state=rs,
+        budget=budget,
+        consecutive_invalid_decisions=0,
+    )
+
+    assert decision is not None
+    assert decision.decision_type == "finish"
+
+
+def test_verification_status_label_not_required_for_deferred():
+    request = _make_request(task_type="implementation")
+    request = request.model_copy(update={"verification_level": "deferred"})
+    checklist = {"local_verification_done_if_material": False}
+
+    assert _verification_status_label(request, checklist) == "not_required"
+
+
+def test_verification_status_label_not_required_for_none():
+    request = _make_request(task_type="implementation")
+    request = request.model_copy(update={"verification_level": "none"})
+    checklist = {"local_verification_done_if_material": False}
+
+    assert _verification_status_label(request, checklist) == "not_required"
+
+
+def test_verification_status_label_yes_when_runtime_and_done():
+    request = _make_request(task_type="testing")
+    # verification_level defaults to "runtime"
+    checklist = {"local_verification_done_if_material": True}
+
+    assert _verification_status_label(request, checklist) == "yes"
+
+
+def test_verification_status_label_no_when_runtime_and_pending():
+    request = _make_request(task_type="testing")
+    checklist = {"local_verification_done_if_material": False}
+
+    assert _verification_status_label(request, checklist) == "no"
 
 
 # ---------------------------------------------------------------------------

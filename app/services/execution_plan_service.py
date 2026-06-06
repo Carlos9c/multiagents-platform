@@ -57,6 +57,25 @@ def _build_project_context(project: Project) -> ProjectExecutionContext:
 _SETUP_TASK_TYPES = frozenset({"configuration"})
 _BUILD_DEPENDENT_TASK_TYPES = frozenset({"implementation", "testing"})
 
+_PHASE_ORDER: dict[str, int] = {
+    "requirements": 1,
+    "design": 1,
+    "planning": 1,
+    "configuration": 2,
+    "implementation": 2,
+    "refactor": 2,
+    "testing": 3,
+    "documentation": 4,
+    "onboarding": 4,
+    "review": 4,
+}
+_DEFAULT_PHASE_ORDER = 2
+
+
+def _compute_phase_orders(tasks: list[Task]) -> dict[int, int]:
+    """Map each task to its development phase (1=design, 2=implementation, 3=testing, 4=documentation)."""
+    return {task.id: _PHASE_ORDER.get(task.task_type or "", _DEFAULT_PHASE_ORDER) for task in tasks}
+
 
 def _compute_ordering_hints(tasks: list[Task]) -> dict[int, str]:
     """Deterministically classify tasks into setup_first / depends_on_setup / standard.
@@ -80,7 +99,10 @@ def _compute_ordering_hints(tasks: list[Task]) -> dict[int, str]:
 
 
 def _build_candidate_atomic_task(
-    task: Task, parent_task: Task | None, ordering_hint: str = "standard"
+    task: Task,
+    parent_task: Task | None,
+    ordering_hint: str = "standard",
+    phase_order: int = _DEFAULT_PHASE_ORDER,
 ) -> CandidateAtomicTask:
     parent_refined_title = None
     parent_high_level_title = None
@@ -116,6 +138,7 @@ def _build_candidate_atomic_task(
         technical_constraints=task.technical_constraints,
         out_of_scope=task.out_of_scope,
         ordering_hint=ordering_hint,
+        phase_order=phase_order,
     )
 
 
@@ -364,9 +387,13 @@ def build_execution_plan_input(
         )
 
     ordering_hints = _compute_ordering_hints(candidate_tasks)
+    phase_orders = _compute_phase_orders(candidate_tasks)
     candidate_atomic_tasks = [
         _build_candidate_atomic_task(
-            task, task.parent_task, ordering_hints.get(task.id, "standard")
+            task,
+            task.parent_task,
+            ordering_hints.get(task.id, "standard"),
+            phase_orders.get(task.id, _DEFAULT_PHASE_ORDER),
         )
         for task in candidate_tasks
     ]

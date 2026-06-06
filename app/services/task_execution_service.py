@@ -64,6 +64,7 @@ from app.services.validation.service import (
     ValidationServiceResult,
     validate_execution_result,
 )
+from app.services.workspace_manifest_service import WorkspaceManifestService
 
 logger = logging.getLogger(__name__)
 
@@ -588,6 +589,41 @@ def _assert_validation_post_conditions(
         )
 
 
+def _update_workspace_manifest(
+    *,
+    task: Task,
+    run_id: int,
+    execution_result,
+) -> None:
+    """
+    Update the workspace manifest with file documentation from the current execution run.
+
+    Called after a successful promotion (completed or partial decision).
+    Never raises — a manifest failure must not abort the task flow.
+    """
+    try:
+        file_documentations = getattr(
+            getattr(execution_result, "evidence", None), "file_documentations", []
+        )
+        if not file_documentations:
+            return
+
+        storage_service = ProjectStorageService()
+        paths = storage_service.get_project_paths(task.project_id)
+        WorkspaceManifestService().upsert_entries(
+            paths.project_meta_dir,
+            file_documentations,
+            task_id=task.id,
+            run_id=run_id,
+        )
+    except Exception:
+        logger.exception(
+            "workspace_manifest_update_failed task_id=%s run_id=%s",
+            task.id,
+            run_id,
+        )
+
+
 def _validate_after_execution(
     db: Session,
     *,
@@ -670,6 +706,11 @@ def _validate_after_execution(
                 run_id=run_id,
             )
             workspace_promoted_to_source = True
+            _update_workspace_manifest(
+                task=refreshed_task_for_promotion,
+                run_id=run_id,
+                execution_result=execution_result,
+            )
 
         elif decision == "partial":
             refreshed_task_for_promotion = _get_task_or_raise(db, task.id)
@@ -678,6 +719,11 @@ def _validate_after_execution(
                 run_id=run_id,
             )
             workspace_promoted_to_source = True
+            _update_workspace_manifest(
+                task=refreshed_task_for_promotion,
+                run_id=run_id,
+                execution_result=execution_result,
+            )
 
         final_task_status = _resolve_final_task_status(
             validation_decision=decision,

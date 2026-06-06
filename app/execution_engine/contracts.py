@@ -166,6 +166,16 @@ class EvidenceItem(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class FileDocumentationEntry(BaseModel):
+    """Carries file documentation from a subagent write to the workspace manifest at promotion."""
+
+    path: str
+    documentation: str
+    change_summary: str
+    agent: str
+    operation: str  # "create" | "modify"
+
+
 class ExecutionEvidence(BaseModel):
     """
     Accumulated execution evidence across all subagents involved in one execution run.
@@ -190,6 +200,7 @@ class ExecutionEvidence(BaseModel):
     notes: list[NoteEvidence] = Field(default_factory=list)
     artifacts_created: list[ArtifactCreatedEvidence] = Field(default_factory=list)
     observations: list[EvidenceItem] = Field(default_factory=list)
+    file_documentations: list[FileDocumentationEntry] = Field(default_factory=list)
 
     def add_changed_file(
         self,
@@ -222,6 +233,27 @@ class ExecutionEvidence(BaseModel):
                 path=path,
                 producer=producer,
                 source=source,
+            )
+        )
+
+    def add_file_documentation(
+        self,
+        *,
+        path: str,
+        documentation: str,
+        change_summary: str,
+        agent: str,
+        operation: str,
+    ) -> None:
+        """Upsert file documentation — last write wins for the same path."""
+        self.file_documentations = [e for e in self.file_documentations if e.path != path]
+        self.file_documentations.append(
+            FileDocumentationEntry(
+                path=path,
+                documentation=documentation,
+                change_summary=change_summary,
+                agent=agent,
+                operation=operation,
             )
         )
 

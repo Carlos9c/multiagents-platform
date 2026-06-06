@@ -156,12 +156,52 @@ class CommandVerificationPlan(BaseModel):
         return self
 
 
-def _build_run_tree_inventory(run_dir: Path, *, max_files: int = 500) -> list[str]:
-    return list_workspace_files(str(run_dir), max_files=max_files)
+def _build_run_tree_inventory(run_dir: Path, *, max_files: int = 500) -> tuple[list[str], bool]:
+    """Return (inventory, was_truncated).
+
+    was_truncated is True when the project has more files than max_files and
+    the returned list is therefore incomplete.  Callers should propagate this
+    flag so the LLM knows the inventory does not represent the full project.
+    """
+    files = list_workspace_files(str(run_dir), max_files=max_files)
+    was_truncated = len(files) == max_files
+    return files, was_truncated
 
 
 def _dedupe_preserve_order(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
+
+
+def _format_inventory_text(inventory: list[str], *, truncated: bool = False) -> str:
+    """Format the run-tree inventory as a bullet list for prompt injection.
+
+    When truncated=True a warning line is appended so the LLM knows there are
+    more files in the project beyond what is shown.
+    """
+    if not inventory:
+        return "[empty]"
+    text = "\n".join(f"- {path}" for path in inventory)
+    if truncated:
+        text += (
+            "\n[WARNING: inventory truncated at 500 files — "
+            "additional files exist in the project beyond this list]"
+        )
+    return text
+
+
+def _truncate_output_preview(text: str, *, max_chars: int = 1500) -> str:
+    """Return a head+tail preview of *text* capped at *max_chars* characters.
+
+    The head captures setup/configuration lines; the tail captures the error
+    message or final result, which is typically what matters most for diagnosis.
+    Uses a 1/3 – 2/3 split so the tail (where errors usually appear) gets more
+    space than the header.
+    """
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 3
+    tail = max_chars - head
+    return text[:head] + "\n…[truncated]…\n" + text[-tail:]
 
 
 _DISALLOWED_SHELL_OPERATORS = frozenset({"&&", "||", "|", ">", ">>", "<", ";"})
@@ -191,8 +231,9 @@ def _build_file_selection_prompt(
     state: ResolutionState,
     run_dir: Path,
     inventory: list[str],
+    inventory_truncated: bool = False,
 ) -> str:
-    inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
+    inventory_text = _format_inventory_text(inventory, truncated=inventory_truncated)
 
     changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
     commands = [item.model_dump(mode="json") for item in state.evidence.commands]
@@ -358,14 +399,29 @@ def _build_command_planning_prompt(
     inventory: list[str],
     inspection_plan: CommandInspectionPlan,
     inspected_files: list[dict],
+    inventory_truncated: bool = False,
 ) -> str:
-    inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
+    inventory_text = _format_inventory_text(inventory, truncated=inventory_truncated)
 
     changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
     files_read = [item.model_dump(mode="json") for item in state.evidence.files_read]
     commands = [item.model_dump(mode="json") for item in state.evidence.commands]
     notes = [item.message for item in state.evidence.notes if item.message]
     runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
+
+    # Detect which writing agents applied changes in this run — distinguish
+    # implementation repair (code_change_agent) from test repair (test_builder_agent).
+    # This matters for retry adaptation: assertion failures are fixed by implementation
+    # repair but may NOT be fixed by test-only repair.
+    _code_writing_agents = frozenset({"code_change_agent", "document_writer_agent"})
+    _test_writing_agents = frozenset({"test_builder_agent"})
+    implementation_repair_applied = any(
+        cf.producer in _code_writing_agents for cf in state.evidence.changed_files
+    )
+    test_repair_applied = any(
+        cf.producer in _test_writing_agents for cf in state.evidence.changed_files
+    )
+    code_repair_applied = implementation_repair_applied or test_repair_applied
 
     prompt_loader.validate_builder_inputs(
         "command_runner_agent",
@@ -396,6 +452,10 @@ def _build_command_planning_prompt(
             "evidence_notes": notes,
             "risk_flags": state.risk_flags,
             "step_notes": state.step_notes,
+            "relevant_files": request.context.relevant_files,
+            "code_repair_applied_in_this_run": code_repair_applied,
+            "implementation_repair_applied_in_this_run": implementation_repair_applied,
+            "test_repair_applied_in_this_run": test_repair_applied,
         },
     )
     return f"""
@@ -439,6 +499,10 @@ Accumulated execution evidence so far:
 - notes: {notes}
 - risk_flags: {state.risk_flags}
 - step_notes: {state.step_notes}
+- relevant_files: {request.context.relevant_files}
+- code_repair_applied_in_this_run: {code_repair_applied}
+- implementation_repair_applied_in_this_run: {implementation_repair_applied}
+- test_repair_applied_in_this_run: {test_repair_applied}
 
 Planning instructions:
 - First decide whether repository-local executable verification is meaningfully applicable now.
@@ -448,6 +512,7 @@ Planning instructions:
 - If you choose a command, it must help external validation verify the task without re-running commands later.
 - Choose the working directory relative to the candidate run tree.
 - Ground the decision strictly in the provided run-tree inventory, inspected file contents, task context, and accumulated evidence.
+- Use relevant_files as an authoritative list of the files most important to the task — prefer commands that exercise or validate these files.
 - Prefer the smallest useful verification command.
 - Prefer repository-supported executable paths over generic guesses.
 - If the inventory contains test or spec files under a subdirectory (e.g., tests/, spec/, __tests__/), you MUST pass that subdirectory explicitly to the test runner. Bare runner invocations without path arguments (e.g., "python -m unittest" with no args) discover zero tests when the test directory is not the project root, which makes the command useless. Always construct the command so it will find the tests you can see in the inventory.
@@ -458,60 +523,46 @@ def _build_file_selection_retry_prompt(
     *,
     request: ExecutionRequest,
     step: ExecutionStep,
-    state: ResolutionState,
-    run_dir: Path,
     inventory: list[str],
     validation_error: str,
+    inventory_truncated: bool = False,
 ) -> str:
-    inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
-    changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
-    commands = [item.model_dump(mode="json") for item in state.evidence.commands]
-    notes = [item.message for item in state.evidence.notes if item.message]
-    runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
+    """Compact correction-only prompt for the file-selection retry call.
+
+    Intentionally excludes the full task description, runtime spec, and
+    accumulated evidence — the LLM just saw all of that on the first call.
+    Only the inventory is repeated because the most common error is selecting
+    paths that are not present in it.
+    """
+    inventory_text = _format_inventory_text(inventory, truncated=inventory_truncated)
     prompt_loader.validate_builder_inputs(
         "command_runner_agent",
         "file_selection_retry",
         {
             "task_id": request.task_id,
             "task_title": request.task_title,
-            "task_description": request.task_description,
-            "objective": request.objective,
-            "acceptance_criteria": request.acceptance_criteria,
-            "technical_constraints": request.technical_constraints,
-            "out_of_scope": request.out_of_scope,
-            "tests_required": request.tests_required,
-            "executor_type": request.executor_type,
-            "runtime_spec_context": runtime_spec_context,
             "step_id": step.id,
-            "step_instructions": step.instructions,
-            "step_target_paths": step.target_paths,
-            "run_dir_path": str(run_dir),
             "run_tree_inventory": inventory_text,
-            "changed_files": changed_files,
-            "prior_commands": commands,
-            "evidence_notes": notes,
-            "risk_flags": state.risk_flags,
-            "step_notes": state.step_notes,
-            "relevant_files": request.context.relevant_files,
             "validation_error": validation_error,
         },
-    )
-    base = _build_file_selection_prompt(
-        request=request, step=step, state=state, run_dir=run_dir, inventory=inventory
     )
     return f"""Your previous output was invalid.
 
 Validation error:
 {validation_error}
 
-You must correct your output and return valid JSON matching the schema.
+You must correct your output and return valid JSON matching the CommandInspectionPlan schema.
 
 Key corrections:
-- selected_paths must only contain paths present in the candidate run-tree inventory
+- selected_paths must only contain paths present in the run-tree inventory below
 - Do not include paths that are not listed in the inventory
 - selection_rationale and verification_hypothesis must not be empty
 
-{base}""".strip()
+Task: {request.task_title} (task_id={request.task_id})
+Step: {step.id}
+
+Run tree inventory ({len(inventory)} files):
+{inventory_text}""".strip()
 
 
 def _build_command_planning_retry_prompt(
@@ -519,65 +570,42 @@ def _build_command_planning_retry_prompt(
     request: ExecutionRequest,
     step: ExecutionStep,
     state: ResolutionState,
-    run_dir: Path,
     inventory: list[str],
     inspection_plan: "CommandInspectionPlan",
-    inspected_files: list[dict],
     validation_error: str,
+    inventory_truncated: bool = False,
 ) -> str:
-    inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
-    changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
-    files_read = [item.model_dump(mode="json") for item in state.evidence.files_read]
+    """Compact correction-only prompt for the command-planning validation-error retry.
+
+    Omits the full task description, inspected file contents, runtime spec and
+    evidence details — the LLM just saw all of that.  Only the inventory and
+    minimal task facts are repeated so the LLM can produce a corrected command
+    without re-processing several thousand tokens of unchanged context.
+    """
+    inventory_text = _format_inventory_text(inventory, truncated=inventory_truncated)
     commands = [item.model_dump(mode="json") for item in state.evidence.commands]
-    notes = [item.message for item in state.evidence.notes if item.message]
-    runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
     prompt_loader.validate_builder_inputs(
         "command_runner_agent",
         "main_retry",
         {
             "task_id": request.task_id,
             "task_title": request.task_title,
-            "task_description": request.task_description,
-            "objective": request.objective,
             "acceptance_criteria": request.acceptance_criteria,
-            "technical_constraints": request.technical_constraints,
-            "out_of_scope": request.out_of_scope,
-            "tests_required": request.tests_required,
-            "executor_type": request.executor_type,
-            "runtime_spec_context": runtime_spec_context,
             "step_id": step.id,
             "step_instructions": step.instructions,
-            "step_target_paths": step.target_paths,
-            "run_dir_path": str(run_dir),
             "run_tree_inventory": inventory_text,
-            "inspection_selected_paths": inspection_plan.selected_paths,
-            "inspection_selection_rationale": inspection_plan.selection_rationale,
-            "inspection_verification_hypothesis": inspection_plan.verification_hypothesis,
-            "inspected_files": inspected_files,
-            "changed_files": changed_files,
-            "files_read": files_read,
             "prior_commands": commands,
-            "evidence_notes": notes,
-            "risk_flags": state.risk_flags,
-            "step_notes": state.step_notes,
+            "inspection_selected_paths": inspection_plan.selected_paths,
+            "inspection_verification_hypothesis": inspection_plan.verification_hypothesis,
             "validation_error": validation_error,
         },
-    )
-    base = _build_command_planning_prompt(
-        request=request,
-        step=step,
-        state=state,
-        run_dir=run_dir,
-        inventory=inventory,
-        inspection_plan=inspection_plan,
-        inspected_files=inspected_files,
     )
     return f"""Your previous output was invalid.
 
 Validation error:
 {validation_error}
 
-You must correct your output and return valid JSON matching the schema.
+You must correct your output and return valid JSON matching the CommandVerificationPlan schema.
 
 Key corrections:
 - decision must be exactly "run_command" or "verification_not_applicable"
@@ -586,7 +614,16 @@ Key corrections:
 - verification_goal and rationale must not be empty
 - Do not use shell chaining, pipes, or redirection in the command
 
-{base}""".strip()
+Task: {request.task_title} (task_id={request.task_id})
+acceptance_criteria: {request.acceptance_criteria}
+Step: {step.id} — {step.instructions}
+
+Run tree inventory ({len(inventory)} files):
+{inventory_text}
+
+Inspection: selected_paths={inspection_plan.selected_paths}, hypothesis={inspection_plan.verification_hypothesis}
+
+Prior commands: {commands}""".strip()
 
 
 def _build_command_planning_constraint_retry_prompt(
@@ -594,58 +631,34 @@ def _build_command_planning_constraint_retry_prompt(
     request: ExecutionRequest,
     step: ExecutionStep,
     state: ResolutionState,
-    run_dir: Path,
     inventory: list[str],
     inspection_plan: "CommandInspectionPlan",
-    inspected_files: list[dict],
     constraint_error: str,
+    inventory_truncated: bool = False,
 ) -> str:
-    inventory_text = "\n".join(f"- {path}" for path in inventory) if inventory else "[empty]"
-    changed_files = [item.model_dump(mode="json") for item in state.evidence.changed_files]
-    files_read = [item.model_dump(mode="json") for item in state.evidence.files_read]
+    """Compact correction-only prompt for the constraint-violation retry.
+
+    Omits inspected file contents and most evidence fields — the LLM just
+    planned a command and only needs to know which constraint it violated and
+    what alternatives are available in the run tree.
+    """
+    inventory_text = _format_inventory_text(inventory, truncated=inventory_truncated)
     commands = [item.model_dump(mode="json") for item in state.evidence.commands]
-    notes = [item.message for item in state.evidence.notes if item.message]
-    runtime_spec_context = _format_runtime_spec_for_prompt(request.context.runtime_spec)
     prompt_loader.validate_builder_inputs(
         "command_runner_agent",
         "main_constraint_retry",
         {
             "task_id": request.task_id,
             "task_title": request.task_title,
-            "task_description": request.task_description,
-            "objective": request.objective,
             "acceptance_criteria": request.acceptance_criteria,
-            "technical_constraints": request.technical_constraints,
-            "out_of_scope": request.out_of_scope,
-            "tests_required": request.tests_required,
-            "executor_type": request.executor_type,
-            "runtime_spec_context": runtime_spec_context,
             "step_id": step.id,
             "step_instructions": step.instructions,
-            "step_target_paths": step.target_paths,
-            "run_dir_path": str(run_dir),
             "run_tree_inventory": inventory_text,
-            "inspection_selected_paths": inspection_plan.selected_paths,
-            "inspection_selection_rationale": inspection_plan.selection_rationale,
-            "inspection_verification_hypothesis": inspection_plan.verification_hypothesis,
-            "inspected_files": inspected_files,
-            "changed_files": changed_files,
-            "files_read": files_read,
             "prior_commands": commands,
-            "evidence_notes": notes,
-            "risk_flags": state.risk_flags,
-            "step_notes": state.step_notes,
+            "inspection_selected_paths": inspection_plan.selected_paths,
+            "inspection_verification_hypothesis": inspection_plan.verification_hypothesis,
             "constraint_error": constraint_error,
         },
-    )
-    base = _build_command_planning_prompt(
-        request=request,
-        step=step,
-        state=state,
-        run_dir=run_dir,
-        inventory=inventory,
-        inspection_plan=inspection_plan,
-        inspected_files=inspected_files,
     )
     return (
         f"""Your previous command plan was rejected because it violated a hard execution constraint.
@@ -661,7 +674,16 @@ Correction rules:
 - If no single allowed command can provide meaningful verification, choose verification_not_applicable.
 - Prefer narrow commands that are already supported by the repository layout (e.g. a test runner, a compiler check, a lint tool invocation).
 
-{base}""".strip()
+Task: {request.task_title} (task_id={request.task_id})
+acceptance_criteria: {request.acceptance_criteria}
+Step: {step.id} — {step.instructions}
+
+Run tree inventory ({len(inventory)} files):
+{inventory_text}
+
+Inspection: selected_paths={inspection_plan.selected_paths}, hypothesis={inspection_plan.verification_hypothesis}
+
+Prior commands: {commands}""".strip()
     )
 
 
@@ -835,8 +857,8 @@ def _write_command_runner_trace(
                 "exit_code": exit_code,
                 "success": success,
                 "timed_out": timed_out,
-                "stdout_preview": stdout_preview[:200],
-                "stderr_preview": stderr_preview[:200],
+                "stdout_preview": _truncate_output_preview(stdout_preview),
+                "stderr_preview": _truncate_output_preview(stderr_preview),
                 "verification_goal": verification_goal,
             }
         ]
@@ -868,9 +890,15 @@ class CommandRunnerAgent(BaseSubagent):
         state: ResolutionState,
         run_dir: Path,
         inventory: list[str],
+        inventory_truncated: bool = False,
     ) -> CommandInspectionPlan:
         user_prompt = _build_file_selection_prompt(
-            request=request, step=step, state=state, run_dir=run_dir, inventory=inventory
+            request=request,
+            step=step,
+            state=state,
+            run_dir=run_dir,
+            inventory=inventory,
+            inventory_truncated=inventory_truncated,
         )
         raw = self.runtime.generate_structured(
             system_prompt=COMMAND_FILE_SELECTION_SYSTEM_PROMPT,
@@ -892,10 +920,9 @@ class CommandRunnerAgent(BaseSubagent):
                 user_prompt=_build_file_selection_retry_prompt(
                     request=request,
                     step=step,
-                    state=state,
-                    run_dir=run_dir,
                     inventory=inventory,
                     validation_error=str(exc),
+                    inventory_truncated=inventory_truncated,
                 ),
                 schema_name="execution_engine_command_file_selection",
                 json_schema=CommandInspectionPlan.model_json_schema(),
@@ -934,6 +961,7 @@ class CommandRunnerAgent(BaseSubagent):
         inventory: list[str],
         inspection_plan: CommandInspectionPlan,
         inspected_files: list[dict],
+        inventory_truncated: bool = False,
     ) -> CommandVerificationPlan:
         user_prompt = _build_command_planning_prompt(
             request=request,
@@ -943,6 +971,7 @@ class CommandRunnerAgent(BaseSubagent):
             inventory=inventory,
             inspection_plan=inspection_plan,
             inspected_files=inspected_files,
+            inventory_truncated=inventory_truncated,
         )
         raw = self.runtime.generate_structured(
             system_prompt=COMMAND_RUNNER_AGENT_SYSTEM_PROMPT,
@@ -965,11 +994,10 @@ class CommandRunnerAgent(BaseSubagent):
                     request=request,
                     step=step,
                     state=state,
-                    run_dir=run_dir,
                     inventory=inventory,
                     inspection_plan=inspection_plan,
-                    inspected_files=inspected_files,
                     validation_error=str(exc),
+                    inventory_truncated=inventory_truncated,
                 ),
                 schema_name="execution_engine_command_verification_plan",
                 json_schema=CommandVerificationPlan.model_json_schema(),
@@ -995,11 +1023,10 @@ class CommandRunnerAgent(BaseSubagent):
                     request=request,
                     step=step,
                     state=state,
-                    run_dir=run_dir,
                     inventory=inventory,
                     inspection_plan=inspection_plan,
-                    inspected_files=inspected_files,
                     constraint_error=str(constraint_exc),
+                    inventory_truncated=inventory_truncated,
                 ),
                 schema_name="execution_engine_command_verification_plan",
                 json_schema=CommandVerificationPlan.model_json_schema(),
@@ -1046,6 +1073,7 @@ class CommandRunnerAgent(BaseSubagent):
 
         run_dir: Path | None = None
         inventory: list[str] = []
+        inventory_truncated: bool = False
         inspection_plan: CommandInspectionPlan | None = None
         inspected_files: list[dict] = []
         plan: CommandVerificationPlan | None = None
@@ -1067,7 +1095,13 @@ class CommandRunnerAgent(BaseSubagent):
                 str(run_dir),
             )
 
-            inventory = _build_run_tree_inventory(run_dir)
+            inventory, inventory_truncated = _build_run_tree_inventory(run_dir)
+            if inventory_truncated:
+                logger.info(
+                    "command_runner_agent_inventory_truncated task_id=%s run_dir=%s",
+                    request.task_id,
+                    str(run_dir),
+                )
 
             inspection_plan = self._select_files_for_inspection(
                 request=request,
@@ -1075,6 +1109,7 @@ class CommandRunnerAgent(BaseSubagent):
                 state=state,
                 run_dir=run_dir,
                 inventory=inventory,
+                inventory_truncated=inventory_truncated,
             )
 
             inspected_files = _read_selected_files(
@@ -1099,6 +1134,7 @@ class CommandRunnerAgent(BaseSubagent):
                     inventory=inventory,
                     inspection_plan=inspection_plan,
                     inspected_files=inspected_files,
+                    inventory_truncated=inventory_truncated,
                 )
             except SubagentRejectedStepError as exc:
                 state.evidence.add_note(

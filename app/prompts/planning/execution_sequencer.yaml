@@ -1,6 +1,18 @@
 agent_name: execution_sequencer
-version: "1.2.0"
+version: "1.6.0"
 changelog:
+  - version: "1.6.0"
+    date: "2026-06-02"
+    changes: "Hardened depends_on_task_titles rule: HARD CONSTRAINT language with explicit violation examples; guardrail enforced programmatically — retry triggered on violations"
+  - version: "1.5.0"
+    date: "2026-06-01"
+    changes: "Added phase ordering rule: deterministic 4-phase ordering (design→implementation→testing→documentation) via phase_order field on CandidateAtomicTask"
+  - version: "1.4.0"
+    date: "2026-06-01"
+    changes: "Added implementation enforcement ordering rule: validation/error-handling/consistency tasks must be sequenced after the base implementation they enforce, even when depends_on_task_titles is empty"
+  - version: "1.3.0"
+    date: "2026-06-01"
+    changes: "Added testing task sequencing rule: runtime testing tasks must be placed after ALL implementation, configuration, design, and refactor tasks, not just their declared prerequisites"
   - version: "1.2.0"
     date: "2026-05-31"
     changes: "Added guidance for estimated_complexity (batch load balancing) and depends_on_task_titles (pre-declared sequencing ground-truth) fields on CandidateAtomicTask"
@@ -55,6 +67,25 @@ prompts:
       - Mark blocked tasks explicitly when they should not yet be executed.
       - ready_task_ids should only include tasks that are safe to begin immediately.
 
+      Phase ordering rule (phase_order field):
+      - Each candidate task carries a phase_order integer that classifies it into one of four
+        development phases:
+          1 = design / requirements / planning  (architectural decisions and specifications)
+          2 = implementation / configuration / refactor  (core functionality and infrastructure)
+          3 = testing  (verification and quality assurance)
+          4 = documentation / onboarding / review  (finalization artifacts)
+      - Tasks with lower phase_order MUST be placed in earlier batches than tasks with higher
+        phase_order. This is a hard constraint, not a sequencing preference.
+      - NEVER place a task with phase_order=N in the same batch as, or in an earlier batch than,
+        a task with phase_order < N.
+      - When all candidate tasks share the same phase_order, this rule has no effect — sequence
+        normally using the other rules.
+      - This rule is independent of ordering_hint. A configuration task has phase_order=2 and
+        ordering_hint="setup_first": both constraints apply simultaneously.
+      - Exception: if a pre-declared depends_on_task_titles creates a direct cross-phase
+        dependency that cannot be resolved within the phase ordering, the depends_on_task_titles
+        constraint takes precedence and the conflict must be surfaced in uncertainties[].
+
       Hard ordering rule for setup_first tasks:
       - Each candidate task carries an ordering_hint field: "setup_first", "depends_on_setup", or "standard".
       - Tasks with ordering_hint="setup_first" establish project infrastructure (build system, scaffold, tooling). They MUST be placed in earlier batches than any task with ordering_hint="depends_on_setup".
@@ -64,10 +95,45 @@ prompts:
       Pre-declared dependency rule (depends_on_task_titles):
       - Each candidate task carries a depends_on_task_titles field: a list of sibling task titles that must complete before this task begins.
       - These declarations come from the atomic task generator and represent ground-truth sequencing knowledge about execution prerequisites.
-      - Treat each entry as a hard dependency: the declaring task MUST be placed in a later batch than any task whose title appears in its depends_on_task_titles.
+      - HARD CONSTRAINT — programmatically enforced: the declaring task MUST be placed in a
+        STRICTLY LATER batch (higher batch_index) than every task whose title appears in its
+        depends_on_task_titles. Placing them in the same batch is a violation even if they
+        appear to be independently executable at first glance.
+      - Violation example (WRONG): task A has depends_on_task_titles=["B"]. Both A and B
+        are placed in batch 2. → INVALID. The guardrail will trigger a retry.
+      - Correct example: B is in batch 2, A is in batch 3 or later. ✓
       - Translate title references to task_ids when building inferred_dependencies (match by exact title against the candidate task list).
       - If a title in depends_on_task_titles does not match any candidate task, skip it silently.
       - Pre-declared dependencies take precedence over your own inferred dependencies when there is a conflict.
+
+      Implementation enforcement ordering rule:
+      - Some implementation tasks scope to enforcement, validation, error handling, or
+        consistency over a system or API that another implementation task builds. Recognisable
+        signals: title or description contains words like "validaciones", "errores de negocio",
+        "consistencia transaccional", "error mapping", "business rules", "enforcement",
+        "constraints", "edge cases", or "ensure/asegurar" in the context of an existing feature.
+      - These tasks CANNOT execute correctly before the base implementation they enforce exists.
+        Even when depends_on_task_titles is empty, infer the dependency: enforcement follows
+        implementation. Place enforcement tasks in a later batch than the base implementation
+        tasks for the same system or API.
+      - If task A adds a feature (endpoints, models, services) and task B validates or enforces
+        rules on that feature, B must be sequenced after A — even if B did not declare A as a
+        prerequisite. Sequencing B before A creates an invalid intermediate state where the
+        enforcement runs against code that does not yet exist.
+
+      Testing task sequencing rule:
+      - Tasks with task_type="testing" and verification_level="runtime" (tests must execute
+        and pass) MUST be placed in a batch AFTER all implementation, configuration, design,
+        and refactor tasks that belong to the same project phase or that produce the code
+        being tested.
+      - A runtime testing task cannot execute before the code it tests exists. Even when
+        depends_on_task_titles only declares one or two specific prerequisites, apply your
+        judgment: a test suite for a system or API implicitly depends on ALL implementation
+        tasks for that system being complete — not just the ones explicitly declared.
+      - Do not place a testing task in the same batch as implementation tasks it tests.
+      - When in doubt, place testing tasks in the last batch before a stage-closure checkpoint.
+      - Exception: a testing task with verification_level="none" (test files only, no
+        execution expected) may be placed alongside or before implementation tasks.
 
       Complexity-aware batch balancing rule (estimated_complexity):
       - Each candidate task carries an estimated_complexity field: XS, S, M, L, or XL.

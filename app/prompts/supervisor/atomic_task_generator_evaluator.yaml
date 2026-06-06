@@ -1,12 +1,25 @@
 agent_name: atomic_task_generator_evaluator
-version: "1.3.0"
+version: "1.6.0"
 changelog:
-  - version: "1.2.0"
-    date: "2026-05-31"
-    changes: "Added evaluation criteria for estimated_complexity calibration and depends_on_task_titles justification; atomic task context now includes these fields"
+  - version: "1.6.0"
+    date: "2026-06-05"
+    changes: |
+      Added verification_level calibration criterion: flag incorrect use of "runtime" for
+      pure coding tasks (causes unnecessary command_runner calls), incorrect use of "deferred"
+      for tasks that need their own execution gate, and incorrect use of "deferred" for
+      testing tasks (which always own their own verification).
+  - version: "1.5.0"
+    date: "2026-06-02"
+    changes: "Added design-vs-documentation misclassification defect: specification/contract artifacts should be design not documentation"
+  - version: "1.4.0"
+    date: "2026-06-02"
+    changes: "Added testing task origin rule violation: testing subtasks from non-implementation/non-testing parents are a defect"
   - version: "1.3.0"
     date: "2026-06-01"
     changes: "Added forbidden observable AC patterns as defects; added storage+domain split as a missed-split signal; added testing task scope dimension"
+  - version: "1.2.0"
+    date: "2026-05-31"
+    changes: "Added evaluation criteria for estimated_complexity calibration and depends_on_task_titles justification; atomic task context now includes these fields"
   - version: "1.1.0"
     date: "2026-05-31"
     changes: "Updated: acceptance_criteria is now list[str]; each criterion must be a verifiable observable; generic criteria (tests pass, works correctly) are defects"
@@ -67,7 +80,34 @@ prompts:
       - Justified depends_on_task_titles: declared inter-task dependencies must be genuine execution prerequisites (the depending task needs the other's outputs or created state). Flag missing obvious dependencies and unjustified declarations (title exists but tasks are actually independent)
       - Clear generation_summary: the reasoning field in the trace explains WHY this particular decomposition was chosen, referencing the parent task's scope and constraints
       - Proper separation: implementation tasks do not write test files; testing tasks are distinct when applicable
+      - Testing task origin compliance: a task_type="testing" subtask is only valid when the parent task's
+        type is "implementation" or "testing". Flag any testing subtask generated from a parent of type
+        requirements, design, documentation, configuration, planning, review, onboarding, or refactor —
+        this is a mis-routing of test scope that creates spurious testing tasks unanchored to any
+        implementation deliverable
+      - Design vs documentation accuracy: specification artifacts (functional contracts, interface contracts,
+        ADRs, behavioral specs, domain rule documents) must be task_type="design", not "documentation".
+        Flag tasks where the deliverable DEFINES what the system does but is classified as documentation.
+        The decisive test: if the artifact defines behavior (contract, spec, ADR) → design;
+        if it explains behavior for consumption (guide, reference, tutorial) → documentation
       - No non-executable work: atomic tasks assigned to the execution engine have concrete repository deliverables, not open-ended investigation
+      - Correct verification_level assignment: the three values have distinct meanings that must
+        match the task's actual acceptance gate.
+        Flag "runtime" over-assignment: a pure implementation or refactor task in an interpreted
+        language (Python, JS, Ruby) whose acceptance_criteria describe code behavior but not a
+        specific runtime outcome should be "deferred", not "runtime". Assigning "runtime" here
+        causes the execution engine to call command_runner_agent unnecessarily, burning budget
+        on trivial import or syntax checks that do not verify the acceptance criteria.
+        Flag "deferred" misuse:
+        * A testing task assigned "deferred" — testing tasks always own their own verification
+          (they must run tests and pass); use "runtime".
+        * A task in a compiled language where "build succeeds" or "compiles without errors" is
+          an acceptance criterion — the compilation run IS the verification gate; use "runtime".
+        * A migration or script task where the script must execute without errors — the run IS
+          the verification gate; use "runtime".
+        Flag "none" over-assignment: any task that could break existing behavior if the code is
+        wrong should not be "none". Use "deferred" if it is a coding task without its own
+        execution gate, or "runtime" if it has one.
 
       Failure context:
       - For atomic tasks that are not in "completed" status, you are given failure information from the execution run (failure_type, remaining_scope, blockers_found, validation_notes summary).

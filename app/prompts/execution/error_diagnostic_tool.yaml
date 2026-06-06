@@ -1,5 +1,5 @@
 agent_name: error_diagnostic_tool
-version: "1.1.0"
+version: "1.2.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-28"
@@ -7,6 +7,9 @@ changelog:
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.2.0"
+    date: "2026-06-01"
+    changes: "Clarified local-module vs external-package distinction: No module named 'app' is fault_side=test/configuration_error, not environment/missing_dependency"
 prompts:
   trace_extraction:
     description: "Parses raw command output to extract file references and error signal"
@@ -98,6 +101,10 @@ prompts:
       Classification rules:
 
       overall_error_class: the dominant error category for this failure.
+        Special case: use "configuration_error" (NOT "missing_dependency") when the test
+        runner cannot import a LOCAL project module during collection — e.g.,
+        `ModuleNotFoundError: No module named 'app'`. This is a pythonpath/conftest
+        configuration issue, not a missing pip package.
 
       fault_side: which side of the codebase is responsible for the failure.
         Use the recent_changed_files list to help determine this.
@@ -106,18 +113,31 @@ prompts:
           Indicators: the error points to a non-test file; the test ran but the assertion on
           business logic failed because the implementation is wrong; a function, class, API
           handler, model, or service is producing incorrect results.
-        - "test": the failure is caused by a defect in the test file itself. The test logic
-          is incorrect, the test expectations are stale, or the test is testing wrong behavior.
-          Indicators: the error is inside a test_*.py, *_test.py, *.spec.*, or similar file;
-          the assertion fails because the test expectation does not match the current correct
-          behavior of the implementation (not because the implementation is wrong).
+        - "test": the failure is caused by a defect in the test file itself, test
+          configuration, or test infrastructure (conftest.py, pytest.ini, path setup).
+          Indicators:
+          * The error is inside a test_*.py, *_test.py, *.spec.*, or similar file; the
+            assertion fails because the test expectation does not match the current correct
+            behavior of the implementation (not because the implementation is wrong).
+          * ModuleNotFoundError or ImportError for a LOCAL project module (e.g.,
+            `No module named 'app'`, `No module named 'src'`, or any first-party package
+            whose name matches a directory in the workspace root) during test COLLECTION
+            (before any test function executed). This is a test infrastructure path
+            configuration issue — the fix is `pythonpath = .` in pytest.ini or sys.path
+            setup in conftest.py, NOT pip install. Classify as
+            overall_error_class="configuration_error" for this case.
         - "both": defects exist in BOTH implementation and test files simultaneously. Use only
           when there is clear evidence of errors in files of both categories.
-        - "environment": the failure is caused by a missing package, wrong runtime version,
-          system dependency, or environment configuration — not by code logic.
-          Indicators: ImportError/ModuleNotFoundError for an installed package (not a local
-          module), command not found (tool not installed), missing system library, version
-          incompatibility between packages.
+        - "environment": the failure is caused by a missing EXTERNAL package, wrong runtime
+          version, system dependency, or non-project environment configuration.
+          Indicators: ImportError/ModuleNotFoundError where the missing module name is a
+          known third-party library (e.g., requests, httpx, flask, django, fastapi,
+          sqlalchemy, pytest, pydantic); command not found (tool not installed); missing
+          system library; version incompatibility between external packages.
+          CRITICAL: do NOT classify as "environment" when the missing module is the
+          project's own source tree (e.g., `No module named 'app'`, `No module named 'src'`,
+          `No module named 'myproject'`). A local module missing during test collection is
+          always fault_side="test" with overall_error_class="configuration_error".
         - "uncertain": you cannot determine which side is responsible from the available
           evidence. Use only when the error could plausibly come from multiple sources and
           you genuinely cannot decide.
@@ -136,6 +156,10 @@ prompts:
         across multiple files. Use null when not applicable.
       repair_directive: a concrete imperative description of what must change to fix the
         error. This is a plain description of the required change — not a subagent instruction.
+        For local-module path failures (fault_side="test", overall_error_class="configuration_error"):
+        describe the missing pytest.ini pythonpath entry or conftest.py sys.path setup,
+        e.g. "Add `pythonpath = .` under [pytest] in pytest.ini so pytest can resolve the
+        project root as a package import path."
       newly_discovered_files: ALL repository-relative file paths that any repair agent
         would need to read to understand and fix the error. Include every file implicated
         by the error chain. Err on the side of inclusion.

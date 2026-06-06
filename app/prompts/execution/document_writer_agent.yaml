@@ -1,12 +1,18 @@
 agent_name: document_writer_agent
-version: "1.1.0"
+version: "1.3.0"
 changelog:
-  - version: "1.0.0"
-    date: "2026-05-28"
-    changes: "Initial migration from Python constant DOCUMENT_WRITER_AGENT_SYSTEM_PROMPT"
+  - version: "1.3.0"
+    date: "2026-06-02"
+    changes: "Added workspace_manifest_context optional input and file_documentation field on files_written — agent now receives {path:description} index for precise command/import derivation and must document each file it produces"
+  - version: "1.2.0"
+    date: "2026-06-02"
+    changes: "Added file_documentation requirement to MaterializedFile output — every file produced must be accompanied by its functional documentation"
   - version: "1.1.0"
     date: "2026-05-29"
     changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constant DOCUMENT_WRITER_AGENT_SYSTEM_PROMPT"
 prompts:
   main:
     description: "Produces documentation, design artifacts, and specification deliverables"
@@ -74,6 +80,13 @@ prompts:
       - name: related_file_context
         description: "Contents of existing documentation files for style reference and avoiding duplication"
         required: false
+      - name: workspace_manifest_context
+        description: >
+          Optional dict mapping file path → description of what the file does, derived from the
+          workspace manifest. Use this as the primary source for accurate file paths, import
+          locations, package names, installed dependencies, and command derivation. Prefer specific
+          file knowledge over generic conventions when this index is available.
+        required: false
     content: |-
       You are a senior documentation and design agent.
 
@@ -107,6 +120,9 @@ prompts:
       - Do not produce compiled or binary outputs.
       - Every document must stand on its own: a reader unfamiliar with the task should
         find the content complete and self-explanatory within its stated scope.
+      - For every file you produce, populate the file_documentation field with a thorough description
+        of the document: its purpose, what it covers, who its audience is, and how it fits the project.
+        This is used to build a project-wide index so future agents know what each file contains.
 
       Operation integrity rules:
       - Use modify for files that already exist in the project candidate baseline.

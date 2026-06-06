@@ -46,6 +46,7 @@ class CandidateAtomicTask(BaseModel):
     technical_constraints: str | None = None
     out_of_scope: str | None = None
     ordering_hint: OrderingHint = "standard"
+    phase_order: int = 2
 
     @model_validator(mode="after")
     def validate_atomic_level(self):

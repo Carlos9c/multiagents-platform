@@ -79,6 +79,7 @@ class MaterializedFile(BaseModel):
     operation: Literal["create", "modify"]
     content: str
     rationale: str
+    file_documentation: str = ""
 
 
 class FileMaterializationResult(BaseModel):

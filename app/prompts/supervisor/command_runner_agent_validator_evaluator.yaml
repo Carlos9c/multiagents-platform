@@ -1,6 +1,32 @@
 agent_name: command_runner_agent_validator_evaluator
-version: "1.0.0"
+version: "1.4.0"
 changelog:
+  - version: "1.4.0"
+    date: "2026-06-05"
+    changes: |
+      Added dimension 6: verification_level routing calibration — flag over-approval of
+      command_runner evidence on "deferred" tasks (those tasks should not have called
+      command_runner at all; the validator approving such evidence is a calibration defect).
+  - version: "1.3.0"
+    date: "2026-06-04"
+    changes: |
+      Dimension 1 (Calibration): refined repair context — distinguish implementation repair
+      (code_change_agent) from test repair (test_builder_agent). Validator "partial" for prior
+      assertion failures is over-strictness only when implementation was repaired; it is
+      CORRECT calibration when only test_builder_agent ran and the assertion failure reflects
+      a real implementation gap. Added test-discovery routing signal — validator over-approving
+      after "collected 0 items + test_builder repair + terminal pass" is a calibration defect.
+  - version: "1.2.0"
+    date: "2026-06-02"
+    changes: |
+      Dimension 1 (Calibration): added code_repair_context guidance — resolved_intermediate_failure
+      combined with writing-agent changes is a strong positive signal; validator keeping "partial"
+      in this case should be flagged as potential over-strictness.
+      Dimension 3 (Partial annotation actionability): added relevant_files guidance — annotations
+      should reference relevant_files when the command output shows a gap there.
+  - version: "1.1.0"
+    date: "2026-06-01"
+    changes: "Added dimension 5b: evidence sufficiency — flag over-approval when startup/import-only evidence is accepted for behavioral acceptance criteria"
   - version: "1.0.0"
     date: "2026-05-30"
     changes: "Initial supervisor evaluator for command_runner_agent_validator calibration and findings quality"
@@ -52,6 +78,30 @@ prompts:
          Does the validator's decision match the task outcome?
          Flag over-approval (passed work that later failed) or over-strictness.
 
+         Repair context calibration — distinguish by which agent repaired:
+
+         Case A: Implementation repair (code_change_agent in agent_sequence before terminal command):
+         - The implementation itself was changed. All prior failures (assertions, imports, collection)
+           reflect the old state.
+         - Terminal command succeeds + implementation was repaired: validator "completed" → correct.
+         - Validator "partial" citing ONLY intermediate pre-repair failures → flag as over-strictness.
+           The terminal-success-supersedes rule should have applied.
+
+         Case B: Test-only repair (ONLY test_builder_agent in agent_sequence, no code_change_agent):
+         - The implementation was NOT changed. Only test infrastructure/logic was updated.
+         - Terminal command succeeds + prior failure was a COLLECTION error (0 items, import error):
+           test infrastructure was fixed → validator "completed" → correct.
+           Validator "partial" citing only the pre-repair collection failure → flag as over-strictness.
+         - Terminal command succeeds + prior failure was an ASSERTION error:
+           The implementation is unchanged. The terminal pass may hide a genuine implementation gap.
+           Validator "partial" citing the assertion content → may be CORRECT calibration (not over-strictness).
+           Validator "completed" without checking whether the terminal command actually exercises
+           the acceptance criteria → flag as potential over-approval.
+         - Test-only repair does NOT guarantee assertion failures are pre-repair evidence.
+
+         Case C: No repair (no writing agent before terminal command):
+         - All failures are direct evidence about the current state. No pre-repair discount applies.
+
       2. Command-grounded findings
          Are findings[] specific to the commands that were executed?
          Good findings reference the command name, exit code, and what the output showed.
@@ -63,6 +113,10 @@ prompts:
          step failed and what must be done to fix it?
          "Run pytest tests/test_users.py — 2 test failures in test_create_user" is actionable.
          "Tests may need fixing" is not.
+         When the task has relevant_files, actionable annotations should reference those files
+         when the command output shows a gap specifically in them (e.g., test failure traceback
+         pointing to a relevant_file path). Annotations that describe generic gaps without
+         naming the concrete failing file or criterion are low quality.
 
       4. Evidence utilisation
          Are unconsumed_evidence_ids[] consistently high?
@@ -70,6 +124,28 @@ prompts:
 
       5. Consistency across retries
          On multi-run tasks, does the validator apply consistent criteria?
+
+      5b. Evidence sufficiency (critical)
+         When acceptance_criteria specify HTTP status codes, business rules, data invariants,
+         or specific behavioral outcomes, the validator must require evidence that the command
+         actually exercised those behaviors — not merely that the project started or imported.
+         Flag as a calibration defect (over-approval) any case where:
+         - The only successful command was a startup/import/connectivity check
+           (e.g., `python -c "import app.main"`, `SELECT 1`, health endpoint returning 200).
+         - The acceptance criteria require verification of specific HTTP codes, business logic,
+           or data state that such a command cannot demonstrate.
+         - The validator marked "completed" despite this insufficiency.
+         The correct decision in this case is "partial" with an annotation naming which
+         behavioral criteria were not verified and what command would cover them.
+
+      6. verification_level routing calibration
+         verification_level="deferred" tasks should never produce command_runner_agent evidence —
+         the orchestrator should have finished after code writing without calling command_runner.
+         If a "deferred" task somehow has command_runner evidence and the validator approved it:
+         - Flag as a calibration defect (over-approval of evidence from a task that should not
+           have run command_runner at all).
+         If a "deferred" task has no command_runner evidence and the validator correctly approved
+         the code-only output — that is correct calibration (no flag needed).
 
       Cross-context: command_trace_entries[] from the executor are provided.
       Use them to verify that the validator's findings are grounded in actual command results.

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # Documentation agent
     documentation_agent_provider: str = "openai"
     documentation_agent_model: str = "gpt-5.2"
+    # Execution sequencer agent
+    sequencer_provider: str = "openai"
+    sequencer_model: str = "gpt-5.2"
     # Test-builder subagent (overrides code_agent_* when set)
     test_agent_provider: str | None = None
     test_agent_model: str | None = None

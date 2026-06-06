@@ -25,8 +25,10 @@ from app.execution_engine.tools.context_builder_tool import (
 )
 from app.models.project import Project
 from app.models.task import Task
+from app.services.project_storage import ProjectStorageService
 from app.services.prompt_loader import prompt_loader
 from app.services.supervisor.trace_writer import append_execution_trace
+from app.services.workspace_manifest_service import WorkspaceManifestService
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,7 @@ def _build_historical_task_selection_base_prompt(
     project_description: str,
     project_context_excerpt: str | None = None,
     codebase_analysis_excerpt: str | None = None,
+    workspace_file_index: dict[str, str] | None = None,
 ) -> str:
     rules = [
         {
@@ -117,12 +120,20 @@ def _build_historical_task_selection_base_prompt(
         else "Codebase structure: No static analysis available."
     )
 
+    file_index_section = ""
+    if workspace_file_index:
+        file_index_section = (
+            "\nWorkspace file index (path → what the file does):\n"
+            + json.dumps(workspace_file_index, ensure_ascii=False, indent=2)
+            + "\n"
+        )
+
     return f"""
 Project name: {project_name}
 Project description: {project_description}
 
 {codebase_section}
-
+{file_index_section}
 Current atomic task:
 {json.dumps(_task_to_prompt_payload(current_task), ensure_ascii=False, indent=2)}
 
@@ -165,6 +176,7 @@ def _build_historical_task_selection_user_prompt(
     project_description: str,
     project_context_excerpt: str | None = None,
     codebase_analysis_excerpt: str | None = None,
+    workspace_file_index: dict[str, str] | None = None,
 ) -> str:
     prompt_loader.validate_builder_inputs(
         "context_selection_agent",
@@ -176,6 +188,7 @@ def _build_historical_task_selection_user_prompt(
             "project_description": project_description,
             "project_context_excerpt": project_context_excerpt,
             "codebase_analysis_excerpt": codebase_analysis_excerpt,
+            "workspace_file_index": workspace_file_index,
         },
     )
     return _build_historical_task_selection_base_prompt(
@@ -185,6 +198,7 @@ def _build_historical_task_selection_user_prompt(
         project_description=project_description,
         project_context_excerpt=project_context_excerpt,
         codebase_analysis_excerpt=codebase_analysis_excerpt,
+        workspace_file_index=workspace_file_index,
     )
 
 
@@ -342,6 +356,7 @@ class ContextSelectionAgent(BaseSubagent):
         current_task: Task,
         project: Project,
         context_input: ContextBuilderResult,
+        workspace_file_index: dict[str, str] | None = None,
     ) -> HistoricalTaskSelectionResult:
         first_user_prompt = _build_historical_task_selection_user_prompt(
             current_task=current_task,
@@ -350,6 +365,7 @@ class ContextSelectionAgent(BaseSubagent):
             project_description=project.description or project.name,
             project_context_excerpt=context_input.project_context_excerpt,
             codebase_analysis_excerpt=context_input.codebase_analysis_excerpt,
+            workspace_file_index=workspace_file_index,
         )
 
         raw = self.runtime.generate_structured(
@@ -442,6 +458,23 @@ class ContextSelectionAgent(BaseSubagent):
             current_task=current_task,
         )
 
+        # Load workspace file index from the manifest (non-fatal — empty dict on failure)
+        workspace_file_index: dict[str, str] = {}
+        try:
+            project_meta_dir = (
+                ProjectStorageService()
+                .get_project_paths(current_request.project_id)
+                .project_meta_dir
+            )
+            workspace_file_index = WorkspaceManifestService().get_path_descriptions(
+                project_meta_dir
+            )
+        except Exception:
+            logger.warning(
+                "context_selection_agent_manifest_load_failed task_id=%s",
+                current_request.task_id,
+            )
+
         if not context_input.should_invoke_context_selection_agent:
             logger.info(
                 "context_selection_agent_skipped task_id=%s reason=no_completed_historical_tasks",
@@ -477,6 +510,7 @@ class ContextSelectionAgent(BaseSubagent):
             current_task=current_task,
             project=project,
             context_input=context_input,
+            workspace_file_index=workspace_file_index or None,
         )
         state.set_historical_task_selection(selection_result)
 

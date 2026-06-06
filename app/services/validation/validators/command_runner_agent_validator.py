@@ -179,6 +179,31 @@ def _collect_context_paths(validation_input: TaskValidationInput) -> list[str]:
     return ordered
 
 
+# Writing agents whose changed_files entries signal that code repairs were applied.
+_WRITING_AGENTS = frozenset({"code_change_agent", "test_builder_agent", "document_writer_agent"})
+
+
+def _build_code_repair_context(validation_input: TaskValidationInput) -> str:
+    """Summarise which writing agents applied file changes in this execution run.
+
+    This gives the validator a concrete signal about whether prior command
+    failures reflect pre-repair state.  When writing agents appear here with a
+    non-zero file count, prior assertion failures may have been superseded by
+    the applied repairs.
+    """
+    by_agent: dict[str, int] = {}
+    for cf in validation_input.execution_result.evidence.changed_files:
+        if cf.producer in _WRITING_AGENTS:
+            by_agent[cf.producer] = by_agent.get(cf.producer, 0) + 1
+
+    if not by_agent:
+        return "- no writing-agent changes recorded in this run"
+
+    return "\n".join(
+        f"- {agent}: {count} file(s) changed" for agent, count in sorted(by_agent.items())
+    )
+
+
 def _collect_evidence_paths(validation_input: TaskValidationInput) -> list[str]:
     producer_view = build_producer_evidence_view(
         validation_input.execution_result.evidence,
@@ -412,6 +437,7 @@ def _build_user_prompt(
 ) -> str:
     request = validation_input.execution_request
     result = validation_input.execution_result
+    code_repair_context = _build_code_repair_context(validation_input)
 
     prompt_loader.validate_builder_inputs(
         "command_runner_agent_validator",
@@ -426,6 +452,7 @@ def _build_user_prompt(
             "command_history": command_history,
             "context_files": context_resources,
             "evidence_files": evidence_resources,
+            "code_repair_context": code_repair_context,
         },
     )
     latest_command = command_history[-1] if command_history else None
@@ -486,6 +513,9 @@ Command history summary:
 - terminal_verification_clean: {_is_terminal_verification_clean(_get_command_evidence_items(validation_input))}
 - resolved_intermediate_failure: {_has_resolved_intermediate_failure(_get_command_evidence_items(validation_input))}
 
+Code repair context (writing agents that applied changes in this run):
+{code_repair_context}
+
 Context files to read and use:
 {_render_text_resources(context_resources)}
 
@@ -496,8 +526,10 @@ Instructions:
 - Evaluate only the correctness and sufficiency of the command_runner_agent contribution.
 - Use the task objective, acceptance criteria, context files, evidence files, and execution evidence concretely.
 - Focus especially on whether the operational verification step was meaningful, relevant, and properly evidenced.
+- Use relevant_files as an authoritative hint about which files matter most for the task. If the terminal command passes but does not appear to exercise any of the relevant_files either directly or through a broader test suite, note this as a potential partial_annotation rather than a full "completed".
 - Treat the latest successful command evidence as the terminal verification state when it clearly supersedes earlier failed attempts.
 - Do not keep the result as partial merely because an intermediate verification attempt failed, if a later successful verification materially covers the same task objective.
+- When code_repair_context shows that writing agents (code_change_agent, test_builder_agent, document_writer_agent) applied changes in this run AND resolved_intermediate_failure is True, the prior command failures are likely pre-repair. In this case the terminal successful verification should be treated as post-repair evidence and classified as "completed" unless a specific acceptance criterion remains demonstrably unverified.
 - Do not suggest improvements.
 - Do not propose future work.
 - Do not act as a reviewer proposing better commands.

@@ -14,6 +14,8 @@ Covers:
 
 from __future__ import annotations
 
+import pytest
+
 from app.execution_engine.contracts import (
     CHANGE_TYPE_CREATED,
     OBSERVATION_TYPE_TEST_COVERAGE,
@@ -26,6 +28,7 @@ from app.execution_engine.contracts import (
 from app.services.validation.contracts import TaskValidationInput
 from app.services.validation.validators.test_builder_agent_validator import (
     TestBuilderAgentValidator,
+    TestBuilderAgentValidatorError,
 )
 
 # ---------------------------------------------------------------------------
@@ -567,3 +570,69 @@ def test_validator_and_producer_keys():
     v = TestBuilderAgentValidator()
     assert v.validator_key == "test_builder_agent_validator"
     assert v.producer_key == "test_builder_agent"
+
+
+# ---------------------------------------------------------------------------
+# Retry on invalid LLM output
+# ---------------------------------------------------------------------------
+
+
+def test_validator_retries_once_on_invalid_llm_output(tmp_path, monkeypatch):
+    """First response invalid → retry → second response valid → decision returned."""
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    workspace.mkdir()
+    source.mkdir()
+
+    validation_input = _make_validation_input(
+        workspace_path=str(workspace),
+        source_path=str(source),
+    )
+
+    invalid_raw = {"not_a_valid_field": "oops"}
+    valid_payload = _llm_payload(decision="completed")
+    responses = [invalid_raw, valid_payload]
+    calls: list[dict] = []
+
+    class _RetryProvider:
+        def generate_structured(self, **kwargs):
+            calls.append(kwargs)
+            return responses.pop(0)
+
+    monkeypatch.setattr(
+        "app.services.validation.validators.test_builder_agent_validator.get_llm_provider",
+        lambda **_kw: _RetryProvider(),
+    )
+
+    result = TestBuilderAgentValidator().validate(validation_input)
+
+    assert result.decision == "completed"
+    # Two calls: first (failed) + retry (succeeded)
+    assert len(calls) == 2
+
+
+def test_validator_raises_after_two_invalid_outputs(tmp_path, monkeypatch):
+    """Both primary and retry responses are invalid → TestBuilderAgentValidatorError raised."""
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "source"
+    workspace.mkdir()
+    source.mkdir()
+
+    validation_input = _make_validation_input(
+        workspace_path=str(workspace),
+        source_path=str(source),
+    )
+
+    invalid_raw = {"not_a_valid_field": "oops"}
+
+    class _AlwaysBadProvider:
+        def generate_structured(self, **kwargs):
+            return invalid_raw
+
+    monkeypatch.setattr(
+        "app.services.validation.validators.test_builder_agent_validator.get_llm_provider",
+        lambda **_kw: _AlwaysBadProvider(),
+    )
+
+    with pytest.raises(TestBuilderAgentValidatorError):
+        TestBuilderAgentValidator().validate(validation_input)

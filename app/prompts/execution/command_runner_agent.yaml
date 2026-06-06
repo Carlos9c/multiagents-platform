@@ -1,6 +1,20 @@
 agent_name: command_runner_agent
-version: "1.2.0"
+version: "1.4.0"
 changelog:
+  - version: "1.4.0"
+    date: "2026-06-04"
+    changes: |
+      Added implementation_repair_applied_in_this_run and test_repair_applied_in_this_run
+      to user_prompt_inputs — distinguishes code_change_agent repair from test_builder_agent
+      repair. Updated retry adaptation rule: assertion failures are reliably pre-repair only
+      when implementation_repair was applied; test-only repair does NOT supersede assertion
+      failures from the implementation (only collection/import failures are superseded).
+  - version: "1.3.0"
+    date: "2026-06-02"
+    changes: |
+      main prompt: added relevant_files and code_repair_applied_in_this_run to user_prompt_inputs and planning instructions.
+      main prompt: updated retry adaptation rule to respect code_repair_applied_in_this_run — prior assertion failures do not suppress verification when repairs have been applied.
+      file_selection_retry / main_retry / main_constraint_retry: reduced to minimal inputs matching the new compact differential prompt builders (no longer repeat full context).
   - version: "1.0.0"
     date: "2026-05-28"
     changes: "Initial migration from Python constants COMMAND_FILE_SELECTION_SYSTEM_PROMPT and COMMAND_RUNNER_AGENT_SYSTEM_PROMPT"
@@ -177,6 +191,18 @@ prompts:
       - name: step_notes
         description: "Notes accumulated across steps"
         required: false
+      - name: relevant_files
+        description: "Files declared as relevant to this task in the execution context — authoritative list of the most important files to verify"
+        required: false
+      - name: code_repair_applied_in_this_run
+        description: "True when any writing agent (code_change_agent, test_builder_agent, document_writer_agent) has applied changes in this run — combined signal; see the split fields below for precise routing"
+        required: false
+      - name: implementation_repair_applied_in_this_run
+        description: "True when code_change_agent or document_writer_agent wrote files in this run — prior assertion failures are likely pre-repair and fresh verification is warranted"
+        required: false
+      - name: test_repair_applied_in_this_run
+        description: "True when test_builder_agent wrote files in this run — prior collection/import failures are likely pre-repair, but assertion failures may still indicate an implementation gap"
+        required: false
     content: |-
       You are a repository-local verification planner.
 
@@ -215,19 +241,36 @@ prompts:
         explicit command that passes the known test file paths directly as arguments, rather
         than relying on auto-discovery.
       - If a prior command failed because assertions did not pass (the runner launched, tests
-        ran, some assertions failed): this is a code or test issue, not a runner issue.
-        Choose verification_not_applicable — repeating the command will produce the same
-        result. The repair subagent must address the underlying issue first.
+        ran, some assertions failed): use the split repair signals to decide:
+        * If implementation_repair_applied_in_this_run is TRUE: the prior assertion failure
+          likely reflects pre-repair state. code_change_agent has since modified the
+          implementation — attempt fresh verification. Do NOT choose verification_not_applicable
+          solely because of an earlier assertion failure that predates the repair.
+        * If ONLY test_repair_applied_in_this_run is TRUE (and implementation_repair is FALSE):
+          test_builder_agent fixed test infrastructure (imports, fixtures, path setup) but did
+          NOT fix the implementation. A prior assertion failure is still likely valid — the
+          implementation is unchanged. Choose verification_not_applicable unless the command
+          previously failed for a collection/import reason (not an assertion reason), in which
+          case the test infrastructure fix may have resolved it and fresh verification is appropriate.
+        * If code_repair_applied_in_this_run is FALSE: no repair has been applied. Choose
+          verification_not_applicable — repeating will produce the same result.
       - If two prior commands failed with the same error class (the runner returned non-zero
-        for the same structural reason each time): choose verification_not_applicable rather
-        than a third attempt. The pattern is structural, not transient.
+        for the same structural reason each time) AND code_repair_applied_in_this_run is
+        FALSE: choose verification_not_applicable rather than a third attempt. The pattern
+        is structural, not transient.
+      - If code_repair_applied_in_this_run is TRUE and prior commands all failed for the
+        same structural reason, but those failures occurred before any repair was applied,
+        treat the current situation as a fresh start and attempt the most appropriate
+        verification command.
 
       Planning policy:
       - Base your command decision on the actual candidate run-tree inventory and the inspected file contents.
       - Prefer commands supported by the files and configuration actually present in the run tree.
+      - Use relevant_files as an authoritative hint about which files matter most for this task.
+        Prefer commands that directly exercise or validate those files when applicable.
       - If the executable verification path is ambiguous, choose verification_not_applicable rather than guessing.
   file_selection_retry:
-    description: "Retry file selection when the LLM output failed schema validation"
+    description: "Compact correction-only retry when the file-selection LLM output failed schema validation. Only includes the inventory and minimal task facts — the LLM just saw the full context."
     user_prompt_inputs:
       - name: task_id
         description: "Unique identifier of the task"
@@ -235,68 +278,17 @@ prompts:
       - name: task_title
         description: "Short title of the task"
         required: true
-      - name: task_description
-        description: "Full description of the task"
-        required: true
-      - name: objective
-        description: "Specific outcome expected from the task"
-        required: false
-      - name: acceptance_criteria
-        description: "Conditions that must be met for the task to be considered complete"
-        required: false
-      - name: technical_constraints
-        description: "Technical limitations and requirements for the task"
-        required: false
-      - name: out_of_scope
-        description: "Work explicitly excluded from the task"
-        required: false
-      - name: tests_required
-        description: "List of test types required by the task"
-        required: false
-      - name: executor_type
-        description: "The executor assigned to this task"
-        required: false
-      - name: runtime_spec_context
-        description: "Docker runtime spec context when an environment session is active"
-        required: false
       - name: step_id
         description: "Unique identifier of the current orchestration step"
         required: true
-      - name: step_instructions
-        description: "Instructions provided by the orchestrator for this step"
-        required: false
-      - name: step_target_paths
-        description: "File paths targeted by the current step"
-        required: false
-      - name: run_dir_path
-        description: "Absolute path to the ephemeral candidate run tree"
-        required: true
       - name: run_tree_inventory
-        description: "Full listing of files in the candidate run tree"
+        description: "Full listing of files in the candidate run tree (repeated so the LLM can pick valid paths)"
         required: true
-      - name: changed_files
-        description: "Files modified in the workspace overlay during this execution run"
-        required: false
-      - name: prior_commands
-        description: "Commands already executed in previous steps of this run"
-        required: false
-      - name: evidence_notes
-        description: "Accumulated evidence notes from prior steps"
-        required: false
-      - name: risk_flags
-        description: "Risk flags raised by the orchestrator or prior subagents"
-        required: false
-      - name: step_notes
-        description: "Orchestrator notes for the current step"
-        required: false
-      - name: relevant_files
-        description: "Files identified as relevant by prior context or the task definition"
-        required: false
       - name: validation_error
         description: "Pydantic validation error message from the failed attempt"
         required: true
   main_retry:
-    description: "Retry command planning when the LLM output failed schema validation"
+    description: "Compact correction-only retry when the command-planning LLM output failed schema validation. Omits runtime spec, full task description, and inspected file contents — the LLM just saw those."
     user_prompt_inputs:
       - name: task_id
         description: "Unique identifier of the task"
@@ -304,29 +296,8 @@ prompts:
       - name: task_title
         description: "Short title of the task"
         required: true
-      - name: task_description
-        description: "Full description of the task"
-        required: true
-      - name: objective
-        description: "Specific outcome expected from the task"
-        required: false
       - name: acceptance_criteria
         description: "Conditions that must be met for the task to be considered complete"
-        required: false
-      - name: technical_constraints
-        description: "Technical limitations and requirements for the task"
-        required: false
-      - name: out_of_scope
-        description: "Work explicitly excluded from the task"
-        required: false
-      - name: tests_required
-        description: "List of test types required by the task"
-        required: false
-      - name: executor_type
-        description: "The executor assigned to this task"
-        required: false
-      - name: runtime_spec_context
-        description: "Docker runtime spec context when an environment session is active"
         required: false
       - name: step_id
         description: "Unique identifier of the current orchestration step"
@@ -334,50 +305,23 @@ prompts:
       - name: step_instructions
         description: "Instructions provided by the orchestrator for this step"
         required: false
-      - name: step_target_paths
-        description: "File paths targeted by the current step"
-        required: false
-      - name: run_dir_path
-        description: "Absolute path to the ephemeral candidate run tree"
-        required: true
       - name: run_tree_inventory
-        description: "Full listing of files in the candidate run tree"
+        description: "Listing of files in the candidate run tree (repeated so the LLM can pick a valid command)"
         required: true
-      - name: inspection_selected_paths
-        description: "File paths selected by the file selection step for content inspection"
-        required: false
-      - name: inspection_selection_rationale
-        description: "Rationale provided by the file selection step for its path choices"
-        required: false
-      - name: inspection_verification_hypothesis
-        description: "Verification hypothesis stated by the file selection step"
-        required: false
-      - name: inspected_files
-        description: "Contents of files inspected in the file selection step"
-        required: false
-      - name: changed_files
-        description: "Files modified in the workspace overlay during this execution run"
-        required: false
-      - name: files_read
-        description: "Files read as evidence during prior steps"
-        required: false
       - name: prior_commands
         description: "Commands already executed in previous steps of this run"
         required: false
-      - name: evidence_notes
-        description: "Accumulated evidence notes from prior steps"
+      - name: inspection_selected_paths
+        description: "File paths selected by the file selection step"
         required: false
-      - name: risk_flags
-        description: "Risk flags raised by the orchestrator or prior subagents"
-        required: false
-      - name: step_notes
-        description: "Orchestrator notes for the current step"
+      - name: inspection_verification_hypothesis
+        description: "Verification hypothesis stated by the file selection step"
         required: false
       - name: validation_error
         description: "Pydantic validation error message from the failed attempt"
         required: true
   main_constraint_retry:
-    description: "Retry command planning after a hard constraint violation (shell chaining, pipes, redirection)"
+    description: "Compact correction-only retry after a hard constraint violation (shell chaining, pipes, redirection). Omits inspected file contents and most evidence — the LLM just saw those and only needs to pick an alternative command."
     user_prompt_inputs:
       - name: task_id
         description: "Unique identifier of the task"
@@ -385,29 +329,8 @@ prompts:
       - name: task_title
         description: "Short title of the task"
         required: true
-      - name: task_description
-        description: "Full description of the task"
-        required: true
-      - name: objective
-        description: "Specific outcome expected from the task"
-        required: false
       - name: acceptance_criteria
         description: "Conditions that must be met for the task to be considered complete"
-        required: false
-      - name: technical_constraints
-        description: "Technical limitations and requirements for the task"
-        required: false
-      - name: out_of_scope
-        description: "Work explicitly excluded from the task"
-        required: false
-      - name: tests_required
-        description: "List of test types required by the task"
-        required: false
-      - name: executor_type
-        description: "The executor assigned to this task"
-        required: false
-      - name: runtime_spec_context
-        description: "Docker runtime spec context when an environment session is active"
         required: false
       - name: step_id
         description: "Unique identifier of the current orchestration step"
@@ -415,44 +338,17 @@ prompts:
       - name: step_instructions
         description: "Instructions provided by the orchestrator for this step"
         required: false
-      - name: step_target_paths
-        description: "File paths targeted by the current step"
-        required: false
-      - name: run_dir_path
-        description: "Absolute path to the ephemeral candidate run tree"
-        required: true
       - name: run_tree_inventory
-        description: "Full listing of files in the candidate run tree"
+        description: "Full listing of files in the candidate run tree (needed to pick a valid alternative command)"
         required: true
-      - name: inspection_selected_paths
-        description: "File paths selected by the file selection step for content inspection"
-        required: false
-      - name: inspection_selection_rationale
-        description: "Rationale provided by the file selection step for its path choices"
-        required: false
-      - name: inspection_verification_hypothesis
-        description: "Verification hypothesis stated by the file selection step"
-        required: false
-      - name: inspected_files
-        description: "Contents of files inspected in the file selection step"
-        required: false
-      - name: changed_files
-        description: "Files modified in the workspace overlay during this execution run"
-        required: false
-      - name: files_read
-        description: "Files read as evidence during prior steps"
-        required: false
       - name: prior_commands
         description: "Commands already executed in previous steps of this run"
         required: false
-      - name: evidence_notes
-        description: "Accumulated evidence notes from prior steps"
+      - name: inspection_selected_paths
+        description: "File paths selected by the file selection step"
         required: false
-      - name: risk_flags
-        description: "Risk flags raised by the orchestrator or prior subagents"
-        required: false
-      - name: step_notes
-        description: "Orchestrator notes for the current step"
+      - name: inspection_verification_hypothesis
+        description: "Verification hypothesis stated by the file selection step"
         required: false
       - name: constraint_error
         description: "Description of the hard constraint violation (e.g. use of &&, pipes, redirection)"

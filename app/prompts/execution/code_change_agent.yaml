@@ -1,15 +1,18 @@
 agent_name: code_change_agent
-version: "1.2.0"
+version: "1.3.0"
 changelog:
-  - version: "1.0.0"
-    date: "2026-05-28"
-    changes: "Initial migration from Python constant CODE_CHANGE_AGENT_SYSTEM_PROMPT"
-  - version: "1.1.0"
-    date: "2026-05-29"
-    changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.3.0"
+    date: "2026-06-02"
+    changes: "Added file_documentation field to MaterializedFile output — every file produced must include a thorough functional description for the project-wide workspace manifest"
   - version: "1.2.0"
     date: "2026-06-01"
     changes: "Added repair pass scope restriction: when called after a verification failure, restrict to the minimum fix that closes the identified gap"
+  - version: "1.1.0"
+    date: "2026-05-29"
+    changes: "Expanded user_prompt_inputs to individual per-variable declarations"
+  - version: "1.0.0"
+    date: "2026-05-28"
+    changes: "Initial migration from Python constant CODE_CHANGE_AGENT_SYSTEM_PROMPT"
 prompts:
   main:
     description: "Materializes source code and configuration file changes for an atomic task"
@@ -117,6 +120,10 @@ prompts:
       - For operation=create, return the full final artifact content.
       - For operation=modify, return the full updated artifact content.
       - Use repository-relative paths only.
+      - For every file you produce, populate the file_documentation field with a thorough description
+        of what the file does: its purpose, what classes/functions/modules it contains, what it exposes
+        publicly, what it depends on, and what role it plays in the project. This description is used
+        to build a project-wide index so future agents and documentation tasks know what each file contains.
       - Respect existing repository structure when it is the natural fit.
       - Create new files when necessary.
       - Do not invent broad unrelated refactors.

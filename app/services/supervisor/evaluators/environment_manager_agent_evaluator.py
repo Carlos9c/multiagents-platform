@@ -129,7 +129,7 @@ class EnvironmentManagerAgentEvaluator:
         system_versions = get_system_versions_for_runs(db, run_ids)
         runs = [serialize_run_for_evaluator(r, t) for r, t in selected]
         system_prompt = resolve_system_prompt(
-            "environment_manager_agent", system_version=system_version
+            "environment_manager_agent", "package_extraction", system_version=system_version
         )
         provider = get_llm_provider()
 

@@ -1,12 +1,15 @@
 agent_name: test_builder_agent_validator_evaluator
-version: "1.1.0"
+version: "1.2.0"
 changelog:
-  - version: "1.0.0"
-    date: "2026-05-30"
-    changes: "Initial supervisor evaluator for test_builder_agent_validator calibration and findings quality"
+  - version: "1.2.0"
+    date: "2026-06-02"
+    changes: "Added dimension 7: relevant files coverage consistency — flag over-strictness when validator lowers decision for relevant_files not individually named, and flag over-approval when all relevant_files are absent from test imports"
   - version: "1.1.0"
     date: "2026-06-01"
     changes: "Added dimension 6: infrastructure gap detection — flagging over-approval of suites that cannot be collected due to missing path setup or runner configuration"
+  - version: "1.0.0"
+    date: "2026-05-30"
+    changes: "Initial supervisor evaluator for test_builder_agent_validator calibration and findings quality"
 prompts:
   main:
     description: "Evaluates the test_builder_agent_validator's calibration accuracy and findings quality"
@@ -91,6 +94,18 @@ prompts:
          A validator that systematically misses infrastructure gaps forces the orchestrator into
          unnecessary repair loops where test logic is modified instead of infrastructure being created.
          This is a calibration defect with direct cost implications.
+
+      7. Relevant files coverage consistency
+         relevant_files are the authoritative list of files most important for this task.
+         Flag over-strictness when:
+         - The validator lowered the decision to partial or failed because a relevant_file was not
+           individually named in every test function, when the test suite as a whole clearly exercises
+           it (imports its module path, tests its behaviour).
+         Flag under-strictness (over-approval) when:
+         - ALL relevant_files are completely absent from the test files' imports and module references,
+           yet the validator gave decision=completed with no annotation about the gap.
+         Apply the same standard as the command_runner_agent_validator relevant_files rule:
+         broad or indirect coverage is acceptable; only concrete total absence warrants annotation.
 
       Executor cross-context (work_summary, changed_files paths) is provided for reference.
 
