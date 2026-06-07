@@ -83,10 +83,18 @@ Review episodes recorded ({len(episodes)} episodes):
 Each episode contains: episode_index, is_project_level, blocked_task_id, blocked_task_title,
 review_attempts, proposed_plan, outcome ("confirmed" | "abandoned" | "disruptive_restart"),
 impact_scope ("narrow" | "moderate" | "disruptive" | null), tasks_modified_count,
-tasks_added_count, tasks_superseded_count, impact_reasoning.
+tasks_added_count, tasks_eliminated_count, tasks_superseded_count, impact_reasoning.
+
+Field semantics:
+- tasks_modified_count: existing tasks updated (description, criteria, dependencies)
+- tasks_added_count: new atomic tasks created via the atomizer (new work blocks)
+- tasks_eliminated_count: tasks cancelled by user decision, including cascade-cancelled parents
+- tasks_superseded_count: tasks replaced by a full disruptive replan (ProjectStartService)
 
 Assess review efficiency (review_attempts), abandonment rate, impact_scope calibration
-vs tasks_modified/added/superseded counts, and impact_reasoning quality.
+vs tasks_modified/added/eliminated/superseded counts, and impact_reasoning quality.
+A well-calibrated moderate scope should have non-zero modifications, additions, or eliminations.
+A narrow scope should have zero tasks_modified, zero tasks_added, and zero tasks_eliminated.
 Reference specific artifact_id and episode_index values when raising issues.
 """.strip()
 

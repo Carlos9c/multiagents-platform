@@ -15,6 +15,7 @@ from app.models.project import Project
 from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
     PLANNING_LEVEL_HIGH_LEVEL,
+    TASK_STATUS_CANCELLED,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_REATOMIZED,
@@ -162,8 +163,108 @@ def test_compute_task_stats_returns_correct_counts(
     hl = stats["high_level_tasks"][0]
     assert hl["atomic_tasks_count"] == 3
     assert hl["completed_count"] == 1
+    assert hl["cancelled_count"] == 0
     assert hl["reatomize_events"] == 1
+    # No cancelled tasks → denominator is 3, completion_rate = 1/3
     assert hl["completion_rate"] == round(1 / 3, 2)
+
+
+def test_compute_task_stats_excludes_cancelled_from_completion_rate(
+    db_session: Session,
+    make_project,
+    make_task,
+):
+    """Cancelled tasks (user decisions) must not count against completion_rate.
+
+    Scenario: 1 completed, 1 failed, 2 cancelled.
+    completion_rate = completed / (total - cancelled) = 1 / (4 - 2) = 0.5.
+    If cancelled were included: 1/4 = 0.25 — misleadingly low.
+    """
+    proj = make_project(name="Cancelled stats test")
+    parent = make_task(
+        project_id=proj.id,
+        title="Feature module",
+        planning_level=PLANNING_LEVEL_HIGH_LEVEL,
+        parent_task_id=None,
+    )
+    make_task(
+        project_id=proj.id,
+        title="Core impl",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        parent_task_id=parent.id,
+        status=TASK_STATUS_COMPLETED,
+    )
+    make_task(
+        project_id=proj.id,
+        title="Broken task",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        parent_task_id=parent.id,
+        status=TASK_STATUS_FAILED,
+    )
+    make_task(
+        project_id=proj.id,
+        title="Cancelled A",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        parent_task_id=parent.id,
+        status=TASK_STATUS_CANCELLED,
+    )
+    make_task(
+        project_id=proj.id,
+        title="Cancelled B",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        parent_task_id=parent.id,
+        status=TASK_STATUS_CANCELLED,
+    )
+
+    stats = _compute_task_stats(db_session, proj.id)
+
+    hl = stats["high_level_tasks"][0]
+    assert hl["atomic_tasks_count"] == 4
+    assert hl["cancelled_count"] == 2
+    assert hl["completed_count"] == 1
+    # denominator = 4 - 2 = 2 (excludes cancelled)
+    assert hl["completion_rate"] == 0.5
+
+    # Global stats also correct
+    assert stats["total_atomic_tasks"] == 4
+    assert stats["total_cancelled_tasks"] == 2
+    assert stats["overall_completion_rate"] == 0.5
+
+
+def test_compute_task_stats_all_cancelled_gives_none_rate(
+    db_session: Session,
+    make_project,
+    make_task,
+):
+    """When all tasks are cancelled, executable_total=0 → completion_rate=None."""
+    proj = make_project(name="All cancelled")
+    parent = make_task(
+        project_id=proj.id,
+        title="Module",
+        planning_level=PLANNING_LEVEL_HIGH_LEVEL,
+        parent_task_id=None,
+    )
+    make_task(
+        project_id=proj.id,
+        title="Cancelled 1",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        parent_task_id=parent.id,
+        status=TASK_STATUS_CANCELLED,
+    )
+    make_task(
+        project_id=proj.id,
+        title="Cancelled 2",
+        planning_level=PLANNING_LEVEL_ATOMIC,
+        parent_task_id=parent.id,
+        status=TASK_STATUS_CANCELLED,
+    )
+
+    stats = _compute_task_stats(db_session, proj.id)
+
+    hl = stats["high_level_tasks"][0]
+    assert hl["cancelled_count"] == 2
+    assert hl["completion_rate"] is None  # executable_total = 0
+    assert stats["overall_completion_rate"] is None
 
 
 def test_compute_task_stats_handles_no_children(

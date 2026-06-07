@@ -1,5 +1,5 @@
 agent_name: aria_orchestrator
-version: "1.2.0"
+version: "1.3.0"
 changelog:
   - version: "1.0.0"
     date: "2026-05-28"
@@ -73,6 +73,12 @@ prompts:
         — si lo omites, el proyecto quedará bloqueado en reviewing indefinidamente y el workflow
         no reanudará nunca.
 
+      - **resume_project**: Reanuda el workflow del proyecto cuando la fase es "paused".
+        Úsala cuando el usuario pide explícitamente reanudar (p. ej. "reanuda", "continúa",
+        "resume", "intenta de nuevo") y la fase es "paused".
+        Si devuelve status="resumed": el workflow se ha desbloqueado y continuará.
+        Si devuelve status="no_pending_tasks": no hay tareas pendientes — explícalo al usuario.
+
       ## Restricciones
 
       - No puedes llamar a la misma herramienta más de una vez por turno.
@@ -91,7 +97,15 @@ prompts:
             Si confirmed=true: llama OBLIGATORIAMENTE a resumption_agent en el mismo turno.
             Si confirmed=false: responde recogiendo la objeción (la sub-fase vuelve a gathering).
         El usuario siempre puede preguntar por el estado del proyecto — usa query_agent si lo pide.
-      - **paused**: Foco en query_agent.
+      - **replanning**: El sistema está regenerando el plan de tareas tras una aclaración
+          disruptiva. No hay tareas disponibles aún. Usa únicamente query_agent si el usuario
+          pregunta. Informa al usuario que el nuevo plan se generará en breve — no hay acción
+          que tomar hasta que la ejecución retome.
+      - **paused**: El proyecto fue pausado tras un error de proyecto-nivel.
+          Herramientas disponibles: query_agent (para responder preguntas sobre el estado) y
+          resume_project (para reanudar la ejecución cuando el usuario lo pida).
+          Si hay una "Razón de pausa" en el estado del proyecto, puedes explicarla al usuario.
+          Si el usuario pide reanudar, usa resume_project.
       - **completed**: Foco en query_agent.
 
       ## Eventos de sistema

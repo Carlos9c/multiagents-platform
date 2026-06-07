@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
+    TASK_STATUS_CANCELLED,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_REATOMIZED,
     Task,
@@ -85,28 +86,38 @@ def _compute_task_stats(db: Session, project_id: int) -> dict:
         total = len(children)
         completed = sum(1 for t in children if t.status == TASK_STATUS_COMPLETED)
         reatomized = sum(1 for t in children if t.status == TASK_STATUS_REATOMIZED)
+        # Cancelled tasks were removed by user decision — exclude from the denominator
+        # so completion_rate reflects only executable work, not cancelled tasks.
+        cancelled = sum(1 for t in children if t.status == TASK_STATUS_CANCELLED)
+        executable_total = total - cancelled
         stats.append(
             {
                 "task_id": hl_task.id,
                 "title": hl_task.title,
                 "atomic_tasks_count": total,
                 "completed_count": completed,
+                "cancelled_count": cancelled,
                 "reatomize_events": reatomized,
-                "completion_rate": round(completed / total, 2) if total > 0 else None,
+                # completion_rate denominator excludes cancelled tasks (user decisions,
+                # not execution failures) to avoid artificially deflating the metric.
+                "completion_rate": (
+                    round(completed / executable_total, 2) if executable_total > 0 else None
+                ),
             }
         )
 
+    total_atomic = sum(s["atomic_tasks_count"] for s in stats)
+    total_cancelled = sum(s["cancelled_count"] for s in stats)
+    total_completed = sum(s["completed_count"] for s in stats)
+    total_executable = total_atomic - total_cancelled
+
     return {
         "high_level_tasks": stats,
-        "total_atomic_tasks": sum(s["atomic_tasks_count"] for s in stats),
+        "total_atomic_tasks": total_atomic,
+        "total_cancelled_tasks": total_cancelled,
+        # overall_completion_rate excludes cancelled tasks from the denominator.
         "overall_completion_rate": (
-            round(
-                sum(s["completed_count"] for s in stats)
-                / sum(s["atomic_tasks_count"] for s in stats),
-                2,
-            )
-            if sum(s["atomic_tasks_count"] for s in stats) > 0
-            else None
+            round(total_completed / total_executable, 2) if total_executable > 0 else None
         ),
     }
 

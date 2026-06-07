@@ -23,6 +23,7 @@ class TaskRevision:
     acceptance_criteria: str | None = None
     technical_constraints: str | None = None
     out_of_scope: str | None = None
+    depends_on_task_titles: list[str] | None = None
 
 
 @dataclass
@@ -99,3 +100,5 @@ def _apply_fields(task: Task, revision: TaskRevision) -> None:
         task.technical_constraints = revision.technical_constraints
     if revision.out_of_scope is not None:
         task.out_of_scope = revision.out_of_scope
+    if revision.depends_on_task_titles is not None:
+        task.depends_on_task_titles = revision.depends_on_task_titles

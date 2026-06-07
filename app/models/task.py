@@ -19,6 +19,9 @@ TASK_STATUS_FAILED = "failed"
 TASK_STATUS_REATOMIZED = "reatomized"
 TASK_STATUS_FOLLOWED_UP = "followed_up"
 TASK_STATUS_SUPERSEDED = "superseded"
+# Explicitly cancelled by user decision during a manual_review episode.
+# Distinct from FAILED (execution error) and SUPERSEDED (plan replacement).
+TASK_STATUS_CANCELLED = "cancelled"
 
 TERMINAL_TASK_STATUSES = {
     TASK_STATUS_PARTIAL,
@@ -27,6 +30,7 @@ TERMINAL_TASK_STATUSES = {
     TASK_STATUS_REATOMIZED,
     TASK_STATUS_FOLLOWED_UP,
     TASK_STATUS_SUPERSEDED,
+    TASK_STATUS_CANCELLED,
 }
 
 # executor_type sigue existiendo como contrato de dominio de alto nivel.
@@ -58,6 +62,7 @@ VALID_TASK_STATUSES = {
     TASK_STATUS_REATOMIZED,
     TASK_STATUS_FOLLOWED_UP,
     TASK_STATUS_SUPERSEDED,
+    TASK_STATUS_CANCELLED,
 }
 
 VALID_EXECUTOR_TYPES = {
@@ -208,6 +213,11 @@ class Task(Base):
         nullable=False,
         default=0,
     )
+
+    # Structured list of user clarifications appended during review episodes.
+    # Each entry: {"text": str, "created_at": ISO-8601 str, "episode_index": int}.
+    # Additive alongside task.description (backward compat with execution engine).
+    clarifications: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     project = relationship("Project", backref="tasks")
     parent_task = relationship("Task", remote_side=[id], backref="child_tasks")

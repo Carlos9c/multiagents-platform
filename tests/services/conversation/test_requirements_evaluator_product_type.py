@@ -446,3 +446,75 @@ class TestLanguageInjectionInPrompt:
         lang_pos = user_prompt.index("OUTPUT LANGUAGE")
         name_pos = user_prompt.index("Mi Proyecto")
         assert lang_pos < name_pos
+
+
+# ── VALID_PRODUCT_TYPES validation ────────────────────────────────────────────
+
+
+def test_invalid_product_type_discarded_by_evaluator():
+    """LLM returning an unknown product_type string results in None."""
+    raw = _raw_sufficient(product_type="webapp")  # typo — not in VALID_PRODUCT_TYPES
+    with _patch_llm(raw):
+        result = evaluate_requirements(_make_input())
+
+    assert result.product_type is None
+
+
+def test_invalid_product_type_not_written_to_project_on_sufficient(
+    db_session: Session, make_project
+):
+    """An unknown product_type from the LLM must not be persisted to project."""
+    from app.services.conversation.aria.contracts import AriaStep, ToolResult
+    from app.services.conversation.aria.orchestrator import _apply_phase_transitions
+
+    project = make_project()
+    conv = _make_conversation(db_session, project.id)
+    db_session.commit()
+
+    aria_step = AriaStep(action="respond", response="Done.", reasoning="Complete.")
+    tool_results = [
+        ToolResult(
+            tool_name=ToolName.REQUIREMENTS,
+            data={
+                "status": "sufficient",
+                "updated_draft": "The system must...",
+                "reasoning": "Complete.",
+                "product_type": "my_custom_type",  # unknown value
+            },
+        )
+    ]
+
+    _apply_phase_transitions(db_session, conv, aria_step, tool_results)
+    db_session.flush()
+    db_session.refresh(project)
+
+    assert project.product_type is None
+
+
+def test_valid_product_types_constant_contains_all_expected_values():
+    """VALID_PRODUCT_TYPES must include all 12 canonical values."""
+    from app.services.conversation.requirements_evaluator import VALID_PRODUCT_TYPES
+
+    expected = {
+        "web_app",
+        "rest_api",
+        "graphql_api",
+        "cli_tool",
+        "mobile_android",
+        "library",
+        "desktop_app",
+        "written_content",
+        "music",
+        "visual_content",
+        "data_product",
+        "game_assets",
+    }
+    assert expected == VALID_PRODUCT_TYPES
+
+
+def test_qa_eligible_types_are_subset_of_valid_product_types():
+    """Every QA-eligible type must appear in VALID_PRODUCT_TYPES."""
+    from app.services.conversation.requirements_evaluator import VALID_PRODUCT_TYPES
+    from app.services.qa.strategy_selector import QA_ELIGIBLE_PRODUCT_TYPES
+
+    assert QA_ELIGIBLE_PRODUCT_TYPES.issubset(VALID_PRODUCT_TYPES)

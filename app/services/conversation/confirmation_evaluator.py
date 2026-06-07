@@ -8,7 +8,8 @@ additional clarification/modifications that require further discussion.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 
@@ -22,9 +23,17 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ConversationTurn:
+    role: Literal["user", "assistant", "system"]
+    content: str
+
+
+@dataclass
 class ConfirmationEvaluatorInput:
     action_summary: str  # The plan Aria proposed
     user_response: str  # Latest user message
+    episode_history: list[ConversationTurn] = field(default_factory=list)
+    language: str | None = None
 
 
 class ConfirmationEvaluatorLLMOutput(BaseModel):
@@ -49,6 +58,13 @@ class ConfirmationEvaluatorError(Exception):
 _SYSTEM_PROMPT = prompt_loader.get("confirmation_evaluator")
 
 
+def _render_episode_history(history: list[ConversationTurn]) -> str:
+    if not history:
+        return "(no prior episode context)"
+    labels = {"user": "User", "assistant": "Aria", "system": "System"}
+    return "\n".join(f"{labels.get(t.role, t.role)}: {t.content}" for t in history)
+
+
 def _build_user_prompt(inp: ConfirmationEvaluatorInput) -> str:
     from app.services.prompt_loader import prompt_loader
 
@@ -58,9 +74,16 @@ def _build_user_prompt(inp: ConfirmationEvaluatorInput) -> str:
         {
             "action_summary": inp.action_summary,
             "user_response": inp.user_response,
+            "episode_history": inp.episode_history,
+            "language": inp.language,
         },
     )
-    return f"""ACTION PLAN ARIA PROPOSED:
+    lang_prefix = f"OUTPUT LANGUAGE: {inp.language}.\n\n" if inp.language else ""
+    history_block = _render_episode_history(inp.episode_history)
+    return f"""{lang_prefix}EPISODE HISTORY (conversation that led to this plan):
+{history_block}
+
+ACTION PLAN ARIA PROPOSED:
 {inp.action_summary}
 
 USER RESPONSE:

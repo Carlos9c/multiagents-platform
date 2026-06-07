@@ -11,7 +11,11 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.models.conversation import CONVERSATION_PHASE_REVIEWING, Conversation
+from app.models.conversation import (
+    CONVERSATION_PHASE_REPLANNING,
+    CONVERSATION_PHASE_REVIEWING,
+    Conversation,
+)
 from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
     TASK_STATUS_AWAITING_REVIEW,
@@ -53,6 +57,8 @@ class ProjectSnapshot:
     # "gathering_clarification" — no plan yet; collecting info via review_agent.
     # "awaiting_confirmation"   — plan proposed (proposed_plan set); waiting for user yes/no.
     review_subphase: str | None = None
+    # Present only when phase == "paused" — explains why execution was paused.
+    paused_reason: str | None = None
 
     def format_for_prompt(self) -> str:
         """Serialise the snapshot into a compact text block for the LLM prompt."""
@@ -99,6 +105,20 @@ class ProjectSnapshot:
                     f"Review activo: error de proyecto ({ctx.failure_type}). "
                     f"Razón: {ctx.failure_reason[:200]}"
                 )
+
+        if self.paused_reason:
+            lines.append(f"Razón de pausa: {self.paused_reason[:300]}")
+
+        if self.phase == CONVERSATION_PHASE_REPLANNING:
+            lines.append(
+                "Estado: regenerando el plan de tareas — en unos momentos continuará la ejecución"
+            )
+
+        if self.requirements_draft:
+            draft = self.requirements_draft[:500]
+            if len(self.requirements_draft) > 500:
+                draft += "…"
+            lines.append(f"Borrador de requisitos: {draft}")
 
         return "\n".join(lines)
 
@@ -165,4 +185,5 @@ def build_snapshot(
         task_counts=counts,
         requirements_draft=conversation.requirements_draft,
         review_subphase=review_subphase,
+        paused_reason=getattr(conversation, "paused_reason", None),
     )

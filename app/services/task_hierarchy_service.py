@@ -56,13 +56,18 @@ def _derive_parent_status_from_children(children: list[Task]) -> str | None:
     """
     Deterministic parent status resolution.
 
-    Rules:
-    - If parent has no children, do not change it.
-    - If any child is non-terminal -> parent = pending
-    - Else if all children are completed -> parent = completed
-    - Else if any child failed -> parent = failed
-    - Else if any child is partial -> parent = partial
-    - Else -> parent = pending
+    Rules (evaluated in order):
+    - If parent has no children → do not change it.
+    - If any child is non-terminal → parent = pending
+    - If any child is failed → parent = failed
+    - If any child is partial → parent = partial
+    - If any child has productive terminal status (completed / reatomized / followed_up)
+      → parent = completed.  Remaining children may be cancelled or superseded — those
+      represent work the user explicitly discarded, not execution failures, so they do
+      not block the parent from being recognised as complete.
+    - Else → parent = pending  (all children are cancelled / superseded; the cascade
+      logic in _cancel_tasks_and_cascade() normally sets the parent directly in this
+      case, so this branch is a safety fallthrough).
 
     Important semantic rule:
     'failed' and 'partial' are aggregate terminal states of the parent and must
@@ -73,21 +78,27 @@ def _derive_parent_status_from_children(children: list[Task]) -> str | None:
 
     child_statuses = [child.status for child in children]
 
+    # 1. Any non-terminal child — parent is still in progress
     if any(not _is_terminal_status(status) for status in child_statuses):
         return TASK_STATUS_PENDING
 
-    if all(
-        status in {TASK_STATUS_COMPLETED, TASK_STATUS_REATOMIZED, TASK_STATUS_FOLLOWED_UP}
-        for status in child_statuses
-    ):
-        return TASK_STATUS_COMPLETED
-
+    # 2. Execution failures override everything
     if any(status == TASK_STATUS_FAILED for status in child_statuses):
         return TASK_STATUS_FAILED
 
+    # 3. Partial execution — work started but incomplete
     if any(status == TASK_STATUS_PARTIAL for status in child_statuses):
         return TASK_STATUS_PARTIAL
 
+    # 4. At least one child has productive terminal status.
+    #    Cancelled / superseded siblings do not block parent completion — they
+    #    represent user decisions (cancelled) or plan replacements (superseded).
+    _PRODUCTIVE_TERMINAL = {TASK_STATUS_COMPLETED, TASK_STATUS_REATOMIZED, TASK_STATUS_FOLLOWED_UP}
+    if any(status in _PRODUCTIVE_TERMINAL for status in child_statuses):
+        return TASK_STATUS_COMPLETED
+
+    # 5. All children are cancelled / superseded — safety fallthrough.
+    #    _cancel_tasks_and_cascade() already sets the parent in this case.
     return TASK_STATUS_PENDING
 
 

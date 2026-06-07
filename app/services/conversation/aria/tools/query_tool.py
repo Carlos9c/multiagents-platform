@@ -8,14 +8,17 @@ from sqlalchemy.orm import Session
 
 from app.models.artifact import Artifact
 from app.models.conversation import Conversation
+from app.models.execution_run import ExecutionRun
 from app.models.task import (
     PLANNING_LEVEL_ATOMIC,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
+    TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
     Task,
 )
 from app.services.conversation.aria.contracts import ToolName, ToolResult
+from app.services.conversation.language_utils import detect_language_from_text
 from app.services.conversation.project_query_agent import ProjectQueryError, answer_project_query
 
 _ARTIFACT_TYPE = "project_query"
@@ -51,6 +54,12 @@ class QueryTool:
 
         task_counts = self._count_tasks(db, project_id)
 
+        # Fetch error summaries for failed / partial tasks so QueryAgent can explain failures
+        error_summaries = self._get_error_summaries(db, project_id)
+
+        # Detect language from the question text
+        detected_language = detect_language_from_text(question)
+
         try:
             answer = answer_project_query(
                 db,
@@ -59,6 +68,8 @@ class QueryTool:
                 project_goal=project_goal,
                 user_question=question,
                 conversation_phase=conversation.phase,
+                error_summaries=error_summaries,
+                language=detected_language,
             )
             self._save_artifact(db, project_id, question, answer, conversation.phase, task_counts)
             return ToolResult(
@@ -74,6 +85,44 @@ class QueryTool:
     # ------------------------------------------------------------------
     # Supervisor instrumentation
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_error_summaries(db: Session, project_id: int) -> dict[int, str]:
+        """Return a {task_id: error_summary} map for failed/partial atomic tasks.
+
+        Uses the latest ExecutionRun per task, combining validation_notes + blockers_found
+        + error_message (same pattern as resumption_service._get_validation_notes).
+        Only queries failed/partial tasks to keep the token budget manageable.
+        """
+        failed_task_ids: list[int] = [
+            row[0]
+            for row in db.query(Task.id)
+            .filter(
+                Task.project_id == project_id,
+                Task.planning_level == PLANNING_LEVEL_ATOMIC,
+                Task.status.in_([TASK_STATUS_FAILED, TASK_STATUS_PARTIAL]),
+            )
+            .all()
+        ]
+        result: dict[int, str] = {}
+        for task_id in failed_task_ids:
+            last_run = (
+                db.query(ExecutionRun)
+                .filter(ExecutionRun.task_id == task_id)
+                .order_by(ExecutionRun.id.desc())
+                .first()
+            )
+            if last_run is None:
+                continue
+            parts = [
+                last_run.validation_notes,
+                last_run.blockers_found,
+                last_run.error_message,
+            ]
+            combined = " | ".join(p for p in parts if p)
+            if combined:
+                result[task_id] = combined
+        return result
 
     @staticmethod
     def _count_tasks(db: Session, project_id: int) -> dict:

@@ -225,6 +225,11 @@ def load_aria_conversation_context(
 
     requirements_draft_preview = (conversation.requirements_draft or "")[:300] or None
 
+    # paused_reason is only present when final_phase == "paused" and the pause was caused
+    # by a project-level review abandonment. Helps the evaluator detect whether Aria
+    # communicated the reason clearly during the paused episode.
+    paused_reason = getattr(conversation, "paused_reason", None)
+
     return {
         "conversation_id": conversation.id,
         "final_phase": conversation.phase,
@@ -233,4 +238,5 @@ def load_aria_conversation_context(
         "message_count": len(messages),
         "messages": messages,
         "project_queries": query_artifacts,
+        "paused_reason": paused_reason,
     }

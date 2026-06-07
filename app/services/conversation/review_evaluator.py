@@ -15,6 +15,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 
+from app.services.conversation.impact_assessment_agent import TaskContextForReview
 from app.services.conversation.requirements_evaluator import ConversationTurn
 from app.services.llm.factory import get_llm_provider
 from app.services.prompt_loader import prompt_loader
@@ -43,6 +44,16 @@ class ReviewEvaluatorInput:
     # infrastructure/configuration failure (no real task exists). The evaluator must
     # focus on infrastructure recovery options rather than code-task clarification.
     is_project_level_error: bool = False
+    # Detected output language — if provided, injected as OUTPUT LANGUAGE prefix.
+    language: str | None = None
+    # Full pending task tree with hierarchy and dependency information.
+    # Enables cascade-aware responses: when a user wants to eliminate a task,
+    # Aria can surface which dependents would also be affected and propose alternatives.
+    full_task_tree: list[TaskContextForReview] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.full_task_tree is None:
+            self.full_task_tree = []
 
 
 # ── LLM output schema ─────────────────────────────────────────────────────────
@@ -77,6 +88,20 @@ class ReviewEvaluatorError(Exception):
 _SYSTEM_PROMPT = prompt_loader.get("review_evaluator")
 
 
+def _render_task_tree(tasks: list[TaskContextForReview]) -> str:
+    if not tasks:
+        return "(none)"
+    lines = []
+    for t in tasks:
+        parent_info = f" [parent: {t.parent_title}]" if t.parent_title else ""
+        deps = ", ".join(t.depends_on_task_titles) if t.depends_on_task_titles else "none"
+        order = t.sequence_order if t.sequence_order is not None else "?"
+        lines.append(f"  - [{t.task_id}] (order={order}, level={t.planning_level}){parent_info}")
+        lines.append(f"    title: {t.title}")
+        lines.append(f"    status: {t.status} | depends_on: {deps}")
+    return "\n".join(lines)
+
+
 def _render_episode(history: list[ConversationTurn]) -> str:
     if not history:
         return "(episode just started — no exchanges yet)"
@@ -99,8 +124,11 @@ def _build_user_prompt(inp: ReviewEvaluatorInput) -> str:
             "project_task_summary": inp.project_task_summary,
             "episode_history": inp.episode_history,
             "is_project_level_error": inp.is_project_level_error,
+            "language": inp.language,
+            "full_task_tree": inp.full_task_tree,
         },
     )
+    lang_prefix = f"OUTPUT LANGUAGE: {inp.language}.\n\n" if inp.language else ""
     t = inp.blocked_task
 
     task_progress_section = ""
@@ -133,10 +161,17 @@ BLOCKED TASK:
 - reason it was paused: {t.validation_notes or '(not provided)'}
 """
 
-    return f"""
-PROJECT GOAL:
+    task_tree_section = ""
+    if inp.full_task_tree:
+        task_tree_section = f"""
+
+PENDING TASK TREE:
+{_render_task_tree(inp.full_task_tree)}
+"""
+
+    return f"""{lang_prefix}PROJECT GOAL:
 {inp.project_goal}
-{task_progress_section}{blocked_section}
+{task_progress_section}{blocked_section}{task_tree_section}
 REVIEW EPISODE CONVERSATION:
 {_render_episode(inp.episode_history)}
 

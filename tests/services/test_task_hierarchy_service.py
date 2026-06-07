@@ -3,12 +3,14 @@ import pytest
 from pydantic import ValidationError
 
 from app.models.task import (
+    TASK_STATUS_CANCELLED,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_FAILED,
     TASK_STATUS_FOLLOWED_UP,
     TASK_STATUS_PARTIAL,
     TASK_STATUS_PENDING,
     TASK_STATUS_REATOMIZED,
+    TASK_STATUS_SUPERSEDED,
 )
 from app.schemas.recovery import RecoveryDecision
 from app.services.recovery_service import (
@@ -340,3 +342,249 @@ def test_parent_stays_pending_when_one_child_is_followed_up_and_another_is_pendi
     db_session.refresh(parent)
     assert parent.status == TASK_STATUS_PENDING
     assert parent.id not in result.changed_task_ids
+
+
+# ── CANCELLED children — parent completion recognition ────────────────────────
+
+
+def test_parent_completes_when_some_children_cancelled_and_rest_completed(
+    db_session,
+    make_project,
+    make_task,
+):
+    """Cancelled children (user decision) don't block parent completion.
+
+    Scenario: 3 children — 1 completed by execution, 2 cancelled by user.
+    The parent should become COMPLETED because productive work was done.
+    """
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Feature module",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Core implementation",
+        planning_level="atomic",
+        status=TASK_STATUS_COMPLETED,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Optional caching layer",
+        planning_level="atomic",
+        status=TASK_STATUS_CANCELLED,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Optional analytics integration",
+        planning_level="atomic",
+        status=TASK_STATUS_CANCELLED,
+    )
+
+    result = consolidate_parent_task_statuses(
+        db=db_session,
+        parent_task_id=parent.id,
+    )
+
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_COMPLETED
+    assert parent.id in result.changed_task_ids
+
+
+def test_parent_completes_when_reatomized_and_cancelled_mixed(
+    db_session,
+    make_project,
+    make_task,
+):
+    """REATOMIZED + CANCELLED → parent = COMPLETED (reatomized counts as productive)."""
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Parent",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Reatomized child",
+        planning_level="atomic",
+        status=TASK_STATUS_REATOMIZED,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Cancelled child",
+        planning_level="atomic",
+        status=TASK_STATUS_CANCELLED,
+    )
+
+    result = consolidate_parent_task_statuses(
+        db=db_session,
+        parent_task_id=parent.id,
+    )
+
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_COMPLETED
+    assert parent.id in result.changed_task_ids
+
+
+def test_parent_stays_failed_when_failed_and_cancelled_mixed(
+    db_session,
+    make_project,
+    make_task,
+):
+    """FAILED takes priority over CANCELLED — parent = FAILED."""
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Parent",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Failed child",
+        planning_level="atomic",
+        status=TASK_STATUS_FAILED,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Cancelled child",
+        planning_level="atomic",
+        status=TASK_STATUS_CANCELLED,
+    )
+
+    result = consolidate_parent_task_statuses(
+        db=db_session,
+        parent_task_id=parent.id,
+    )
+
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_FAILED
+    assert parent.id in result.changed_task_ids
+
+
+def test_parent_stays_partial_when_partial_and_cancelled_mixed(
+    db_session,
+    make_project,
+    make_task,
+):
+    """PARTIAL takes priority over CANCELLED — parent = PARTIAL."""
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Parent",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Partial child",
+        planning_level="atomic",
+        status=TASK_STATUS_PARTIAL,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Cancelled child",
+        planning_level="atomic",
+        status=TASK_STATUS_CANCELLED,
+    )
+
+    result = consolidate_parent_task_statuses(
+        db=db_session,
+        parent_task_id=parent.id,
+    )
+
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_PARTIAL
+    assert parent.id in result.changed_task_ids
+
+
+def test_parent_stays_pending_when_all_children_cancelled(
+    db_session,
+    make_project,
+    make_task,
+):
+    """All children CANCELLED → no productive work → parent stays PENDING.
+
+    In practice, _cancel_tasks_and_cascade() already sets the parent to CANCELLED
+    before this function is ever called. This test verifies the fallthrough path.
+    """
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Parent",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Cancelled 1",
+        planning_level="atomic",
+        status=TASK_STATUS_CANCELLED,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Cancelled 2",
+        planning_level="atomic",
+        status=TASK_STATUS_CANCELLED,
+    )
+
+    consolidate_parent_task_statuses(
+        db=db_session,
+        parent_task_id=parent.id,
+    )
+
+    db_session.refresh(parent)
+    # No productive work → fallthrough to PENDING (cascade handles the "all cancelled" case)
+    assert parent.status == TASK_STATUS_PENDING
+
+
+def test_parent_completes_with_superseded_and_completed_mix(
+    db_session,
+    make_project,
+    make_task,
+):
+    """SUPERSEDED children (plan replacements) also don't block parent completion."""
+    project = make_project()
+    parent = make_task(
+        project_id=project.id,
+        title="Parent",
+        planning_level="high_level",
+        status=TASK_STATUS_PENDING,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Completed child",
+        planning_level="atomic",
+        status=TASK_STATUS_COMPLETED,
+    )
+    make_task(
+        project_id=project.id,
+        parent_task_id=parent.id,
+        title="Superseded child",
+        planning_level="atomic",
+        status=TASK_STATUS_SUPERSEDED,
+    )
+
+    result = consolidate_parent_task_statuses(
+        db=db_session,
+        parent_task_id=parent.id,
+    )
+
+    db_session.refresh(parent)
+    assert parent.status == TASK_STATUS_COMPLETED
+    assert parent.id in result.changed_task_ids

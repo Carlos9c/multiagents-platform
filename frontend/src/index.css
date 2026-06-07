@@ -829,6 +829,7 @@ body {
 .status-dot.reatomized       { background: var(--purple); }
 .status-dot.followed_up      { background: var(--purple); }
 .status-dot.superseded       { background: var(--text-muted); }
+.status-dot.cancelled        { background: var(--slate); opacity: 0.5; }
 
 .task-seq {
   font-size: 11px;
@@ -851,6 +852,12 @@ body {
   color: var(--text-muted);
 }
 
+.task-row.status-cancelled .task-title {
+  text-decoration: line-through;
+  color: var(--slate);
+  opacity: 0.6;
+}
+
 .status-badge {
   font-size: 10.5px;
   font-weight: 600;
@@ -871,6 +878,7 @@ body {
 .status-badge.reatomized       { background: rgba(192,132,252,0.12); color: var(--purple); }
 .status-badge.followed_up      { background: rgba(192,132,252,0.12); color: var(--purple); }
 .status-badge.superseded       { background: rgba(74,85,104,0.15); color: var(--text-muted); }
+.status-badge.cancelled        { background: rgba(100,116,139,0.10); color: var(--slate); opacity: 0.7; }
 
 /* ── Buttons ───────────────────────────────────────────────── */
 .btn {

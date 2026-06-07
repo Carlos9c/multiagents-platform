@@ -110,6 +110,7 @@ class ResumptionTool:
             impact_scope=result.scope,
             tasks_modified_count=result.tasks_modified,
             tasks_added_count=result.tasks_added,
+            tasks_eliminated_count=result.tasks_eliminated,
             tasks_superseded_count=result.tasks_superseded,
             impact_reasoning=result.reasoning,
         )
@@ -163,6 +164,7 @@ class ResumptionTool:
             impact_scope=None,
             tasks_modified_count=0,
             tasks_added_count=0,
+            tasks_eliminated_count=0,
             tasks_superseded_count=0,
             impact_reasoning=None,
         )
@@ -209,6 +211,7 @@ class ResumptionTool:
         impact_scope: str | None,
         tasks_modified_count: int,
         tasks_added_count: int,
+        tasks_eliminated_count: int,
         tasks_superseded_count: int,
         impact_reasoning: str | None,
     ) -> None:
@@ -233,6 +236,7 @@ class ResumptionTool:
                 "impact_scope": impact_scope,
                 "tasks_modified_count": tasks_modified_count,
                 "tasks_added_count": tasks_added_count,
+                "tasks_eliminated_count": tasks_eliminated_count,
                 "tasks_superseded_count": tasks_superseded_count,
                 "impact_reasoning": impact_reasoning,
             }

@@ -1,15 +1,21 @@
 agent_name: aria_conversation_evaluator
-version: "1.2.0"
+version: "1.4.0"
 changelog:
+  - version: "1.4.0"
+    date: "2026-06-06"
+    changes: "Added replanning phase guidance to dimension 4 and clarified dimension 6b exclusion for replanning state"
+  - version: "1.3.0"
+    date: "2026-06-06"
+    changes: "Added paused_reason to context; enriched dimension 4 (paused phase clarity) and dimension 6b (resume false-state) to leverage paused_reason when available"
   - version: "1.2.0"
     date: "2026-06-01"
     changes: "Added dimension 6b: False state communication — flag Aria claiming resumption succeeded when final_phase is paused or reviewing"
-  - version: "1.0.0"
-    date: "2026-05-30"
-    changes: "Initial supervisor for the aria_orchestrator and project_query_agent"
   - version: "1.1.0"
     date: "2026-06-01"
     changes: "Added dimension 6: Review flow completion — flag conversations stuck in reviewing at project end"
+  - version: "1.0.0"
+    date: "2026-05-30"
+    changes: "Initial supervisor for the aria_orchestrator and project_query_agent"
 prompts:
   main:
     description: "Evaluates conversational quality of Aria's orchestration and project query responses"
@@ -25,10 +31,14 @@ prompts:
         required: true
       - name: conversation_context
         description: >
-          Combined context dict with: conversation_id, final_phase, review_episode_count,
-          requirements_draft_preview, message_count, messages (list of role/content pairs),
-          and project_queries (list of project_query artifacts with user_question, aria_response,
-          and task_counts ground truth for factual accuracy verification).
+          Combined context dict with: conversation_id, final_phase (one of:
+          gathering_requirements, executing, reviewing, replanning, paused, completed,
+          qa_running), review_episode_count, requirements_draft_preview, message_count,
+          messages (list of role/content pairs), project_queries (list of project_query
+          artifacts with user_question, aria_response, and task_counts ground truth for
+          factual accuracy verification), and paused_reason (non-null only when
+          final_phase == "paused" — the infrastructure or project-level failure that caused
+          the pause, stored when the user abandoned a project-level review).
         required: true
       - name: total_message_count
         description: "Total number of conversation messages in the context window"
@@ -61,6 +71,15 @@ prompts:
          project is running and explain that interaction is limited. During paused/completed,
          messages should be informative and answer-oriented. Review messages should guide the
          user clearly toward resolving the blocked task.
+         When final_phase == "paused" AND paused_reason is non-null: check whether Aria
+         communicated the paused_reason to the user in at least one assistant message. If the
+         conversation shows messages exchanged after the pause began but paused_reason is
+         never mentioned or paraphrased, flag this as "needs_attention".
+         When final_phase == "replanning": this is a transient state indicating that a new task
+         plan is being generated after a disruptive user clarification. Aria should inform the
+         user that the plan is being regenerated and will resume shortly. If final_phase is
+         "replanning" at project end (i.e. execution never resumed after replanning), treat
+         this as "needs_attention" — it may indicate a crashed replanning cycle.
 
       5. LANGUAGE CONSISTENCY: Aria responds in the user's language (primarily Spanish). Flag
          responses that switch language unexpectedly.
@@ -80,12 +99,18 @@ prompts:
          - An assistant message uses past-tense success language ("ya reanudé", "el proyecto
            fue reanudado", "se han actualizado X tareas", "voy a continuar", or equivalent
            affirmations of completed resumption), AND
-         - final_phase is NOT "executing" — i.e. final_phase is "paused", "reviewing", or
-           any other non-executing state.
+         - final_phase is NOT "executing" AND NOT "replanning" — i.e. final_phase is "paused",
+           "reviewing", or any other non-executing/non-replanning state.
+         NOTE: final_phase == "replanning" is legitimate — it means a disruptive clarification
+         was confirmed and the system is actively generating a new plan. Do NOT flag this phase
+         as false-state. Only flag if final_phase is "paused" or "reviewing" after success language.
          This indicates Aria communicated a state transition that did not actually occur.
          The cause is typically a stop-event race condition: the workflow re-queues after
          review but immediately hits a lingering pause signal and returns to "paused".
          Aria should not assert completed actions before the state change is observable.
+         When paused_reason is present and final_phase == "paused", cross-check whether
+         Aria's last assistant message acknowledged the unresolved failure (paused_reason)
+         rather than asserting successful resumption.
 
       Note: you cannot see Aria's internal tool routing decisions. Assess only what is observable
       from the message content and the provided query artifacts.

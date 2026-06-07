@@ -226,3 +226,126 @@ class TestReviewSubphase:
         snapshot = build_snapshot(db_session, project.id, conv)
         prompt_text = snapshot.format_for_prompt()
         assert "Sub-fase" not in prompt_text
+
+
+# ── Tests: requirements_draft in format_for_prompt ────────────────────────────
+
+
+class TestRequirementsDraftInPrompt:
+    def test_short_draft_appears_verbatim(self, db_session: Session, make_project):
+        project = make_project()
+        draft = "REST API with JWT auth and PostgreSQL"
+        conv = _make_conversation(db_session, project.id, requirements_draft=draft)
+        snapshot = build_snapshot(db_session, project.id, conv)
+        prompt = snapshot.format_for_prompt()
+        assert "Borrador de requisitos" in prompt
+        assert draft in prompt
+
+    def test_long_draft_truncated_to_500_chars(self, db_session: Session, make_project):
+        project = make_project()
+        draft = "A" * 600
+        conv = _make_conversation(db_session, project.id, requirements_draft=draft)
+        snapshot = build_snapshot(db_session, project.id, conv)
+        prompt = snapshot.format_for_prompt()
+        assert "Borrador de requisitos" in prompt
+        # Exactly 500 'A' chars + ellipsis
+        assert "A" * 500 in prompt
+        assert "…" in prompt
+        # The full 600 chars should NOT appear
+        assert "A" * 501 not in prompt
+
+    def test_none_draft_produces_no_borrador_line(self, db_session: Session, make_project):
+        project = make_project()
+        conv = _make_conversation(db_session, project.id, requirements_draft=None)
+        snapshot = build_snapshot(db_session, project.id, conv)
+        prompt = snapshot.format_for_prompt()
+        assert "Borrador" not in prompt
+
+    def test_empty_string_draft_produces_no_borrador_line(self, db_session: Session, make_project):
+        project = make_project()
+        conv = _make_conversation(db_session, project.id, requirements_draft="")
+        snapshot = build_snapshot(db_session, project.id, conv)
+        prompt = snapshot.format_for_prompt()
+        assert "Borrador" not in prompt
+
+
+# ── Tests: tiered history ─────��───────────────────────────────────────────────
+
+
+class TestTieredHistory:
+    """Tests for the _load_recent_history tiered strategy."""
+
+    def _add_msg(self, db: Session, conv_id: int, role: str, content: str):
+        from app.models.conversation import ConversationMessage
+
+        msg = ConversationMessage(conversation_id=conv_id, role=role, content=content)
+        db.add(msg)
+        db.flush()
+        return msg
+
+    def test_system_messages_always_included(self, db_session: Session, make_project):
+        from app.services.conversation.aria.orchestrator import _load_recent_history
+
+        project = make_project()
+        conv = _make_conversation(db_session, project.id)
+
+        # Add messages: 3 system + many user/assistant beyond HISTORY_LIMIT
+        self._add_msg(db_session, conv.id, "system", "Review opened: task A")
+        self._add_msg(db_session, conv.id, "system", "Review opened: task B")
+        self._add_msg(db_session, conv.id, "system", "Workflow completed")
+
+        for i in range(45):
+            self._add_msg(db_session, conv.id, "user", f"User message {i}")
+            self._add_msg(db_session, conv.id, "assistant", f"Aria reply {i}")
+
+        db_session.refresh(conv)
+        history = _load_recent_history(conv)
+
+        system_entries = [h for h in history if h["role"] == "system"]
+        assert len(system_entries) == 3
+        assert any("Review opened: task A" in h["content"] for h in system_entries)
+        assert any("Workflow completed" in h["content"] for h in system_entries)
+
+    def test_total_does_not_exceed_history_limit(self, db_session: Session, make_project):
+        from app.services.conversation.aria.orchestrator import _HISTORY_LIMIT, _load_recent_history
+
+        project = make_project()
+        conv = _make_conversation(db_session, project.id)
+
+        self._add_msg(db_session, conv.id, "system", "Sys 1")
+        self._add_msg(db_session, conv.id, "system", "Sys 2")
+        for i in range(50):
+            self._add_msg(db_session, conv.id, "user", f"U{i}")
+            self._add_msg(db_session, conv.id, "assistant", f"A{i}")
+
+        db_session.refresh(conv)
+        history = _load_recent_history(conv)
+
+        assert len(history) <= _HISTORY_LIMIT
+
+    def test_chronological_order_preserved(self, db_session: Session, make_project):
+        from app.services.conversation.aria.orchestrator import _load_recent_history
+
+        project = make_project()
+        conv = _make_conversation(db_session, project.id)
+
+        self._add_msg(db_session, conv.id, "system", "First system")
+        self._add_msg(db_session, conv.id, "user", "User says hi")
+        self._add_msg(db_session, conv.id, "assistant", "Aria replies")
+        self._add_msg(db_session, conv.id, "system", "Second system")
+
+        db_session.refresh(conv)
+        history = _load_recent_history(conv)
+
+        contents = [h["content"] for h in history]
+        assert contents.index("First system") < contents.index("User says hi")
+        assert contents.index("User says hi") < contents.index("Aria replies")
+        assert contents.index("Aria replies") < contents.index("Second system")
+
+    def test_empty_conversation_returns_empty_list(self, db_session: Session, make_project):
+        from app.services.conversation.aria.orchestrator import _load_recent_history
+
+        project = make_project()
+        conv = _make_conversation(db_session, project.id)
+        db_session.refresh(conv)
+        assert _load_recent_history(conv) == []

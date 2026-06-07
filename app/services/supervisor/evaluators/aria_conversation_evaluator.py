@@ -68,11 +68,14 @@ Conversation context ({total_message_count} messages, {total_query_count} query 
 {json.dumps(conversation_context, ensure_ascii=False, indent=2)}
 
 The conversation_context contains: final_phase, review_episode_count,
-requirements_draft_preview, messages (role/content pairs), and project_queries
-(structured records with user_question, aria_response, and task_counts ground truth).
+requirements_draft_preview, messages (role/content pairs), project_queries
+(structured records with user_question, aria_response, and task_counts ground truth),
+and paused_reason (non-null only when final_phase == "paused", stores the infrastructure
+or project-level failure that caused the pause).
 
 Assess response quality, query factual accuracy against task_counts, conversational
 coherence, phase-appropriate behavior, and language consistency.
+When paused_reason is present, also assess whether Aria communicated it clearly.
 Reference specific message roles and query_index values when raising issues.
 """.strip()
 

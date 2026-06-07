@@ -13,12 +13,32 @@ from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 
+from app.services.conversation.language_utils import detect_language as _detect_language_shared
 from app.services.llm.factory import get_llm_provider
 from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
 REVIEW_ATTEMPTS_LIMIT = 3
+
+VALID_PRODUCT_TYPES: frozenset[str] = frozenset(
+    {
+        # QA-eligible
+        "web_app",
+        "rest_api",
+        "graphql_api",
+        "cli_tool",
+        "mobile_android",
+        "library",
+        "desktop_app",
+        # Non-QA
+        "written_content",
+        "music",
+        "visual_content",
+        "data_product",
+        "game_assets",
+    }
+)
 
 # ── Input ─────────────────────────────────────────────────────────────────────
 
@@ -84,20 +104,19 @@ def _render_history(history: list[ConversationTurn]) -> str:
     return "\n".join(lines)
 
 
-_SPANISH_CHARS = frozenset("áéíóúñüÁÉÍÓÚÑÜ¿¡")
-
-
 def _detect_language(history: list[ConversationTurn]) -> str:
-    """Return the dominant language of user messages based on character heuristics.
+    """Return the dominant language of user messages using the shared heuristic.
 
-    Scans user turns from most recent to oldest. Returns 'Spanish' if Spanish-specific
-    characters are found, otherwise 'English' as the default.
+    Delegates to language_utils.detect_language which covers Spanish, Portuguese,
+    German, French, Italian, and English (in that detection order).
     """
-    for turn in reversed(history):
-        if turn.role == "user" and turn.content:
-            if any(c in _SPANISH_CHARS for c in turn.content):
-                return "Spanish"
-    return "English"
+    # Convert to language_utils.ConversationTurn if needed (structurally identical)
+    from app.services.conversation.language_utils import (
+        ConversationTurn as _LUTurn,  # noqa: PLC0415
+    )
+
+    turns = [_LUTurn(role=t.role, content=t.content) for t in history]  # type: ignore[arg-type]
+    return _detect_language_shared(turns)
 
 
 def _build_user_prompt(inp: RequirementsEvaluatorInput) -> str:
@@ -159,10 +178,19 @@ def evaluate_requirements(
             f"RequirementsEvaluator returned invalid structured output: {exc}"
         ) from exc
 
+    product_type = output.product_type
+    if product_type is not None and product_type not in VALID_PRODUCT_TYPES:
+        logger.warning(
+            "requirements_evaluator: unknown product_type=%r — discarding",
+            product_type,
+        )
+        product_type = None
+
     logger.info(
-        "requirements_evaluation_complete status=%s draft_len=%s",
+        "requirements_evaluation_complete status=%s draft_len=%s product_type=%s",
         output.status,
         len(output.updated_draft or ""),
+        product_type,
     )
 
     return RequirementsEvaluatorResult(
@@ -170,5 +198,5 @@ def evaluate_requirements(
         next_question=output.next_question,
         updated_draft=output.updated_draft,
         reasoning=output.reasoning,
-        product_type=output.product_type,
+        product_type=product_type,
     )

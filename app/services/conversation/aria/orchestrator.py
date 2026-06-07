@@ -57,6 +57,7 @@ from app.services.conversation.aria.tools import (
     QATool,
     QueryTool,
     RequirementsTool,
+    ResumeProjectTool,
     ResumptionTool,
     ReviewTool,
     StartProjectTool,
@@ -67,7 +68,7 @@ from app.services.prompt_loader import prompt_loader
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = 4
+MAX_STEPS = 6
 _HISTORY_LIMIT = 40  # messages sent to Aria's prompt
 
 
@@ -275,13 +276,18 @@ def _apply_phase_transitions(
                 conversation.requirements_ready = True
                 if data.get("updated_draft"):
                     conversation.requirements_draft = data["updated_draft"]
-                if data.get("product_type"):
+                pt = data.get("product_type")
+                if pt is not None:
                     from app.models.project import Project
+                    from app.services.conversation.requirements_evaluator import (
+                        VALID_PRODUCT_TYPES,
+                    )
 
-                    project = db.get(Project, conversation.project_id)
-                    if project is not None:
-                        project.product_type = data["product_type"]
-                        db.add(project)
+                    if pt in VALID_PRODUCT_TYPES:
+                        project = db.get(Project, conversation.project_id)
+                        if project is not None:
+                            project.product_type = pt
+                            db.add(project)
             elif data.get("updated_draft"):
                 conversation.requirements_draft = data["updated_draft"]
 
@@ -310,6 +316,7 @@ def _apply_phase_transitions(
                 conversation.proposed_plan = None
                 conversation.review_context = None
                 conversation.review_episode_attempts = 0
+                conversation.review_episode_start_message_id = None
                 conversation.phase = CONVERSATION_PHASE_EXECUTING
 
         elif result.tool_name == ToolName.QA:
@@ -324,6 +331,11 @@ def _apply_phase_transitions(
                 conversation.phase = CONVERSATION_PHASE_EXECUTING
             elif status == "remediation_declined":
                 conversation.pending_qa_report = None
+
+        elif result.tool_name == ToolName.RESUME_PROJECT:
+            if data.get("status") == "resumed":
+                conversation.phase = CONVERSATION_PHASE_EXECUTING
+                conversation.paused_reason = None
 
     # Apply transitions from system events
     _apply_system_event_transitions(db, conversation, tool_results)
@@ -374,9 +386,19 @@ def _handle_review_abandoned(
         blocked_task_title=blocked_task_title,
     )
 
+    # Preserve the failure reason so Aria can explain it while the project is paused.
+    if is_project_level and conversation.review_context:
+        try:
+            ctx = review_context_from_json(conversation.review_context)
+            if isinstance(ctx, ProjectReviewContext):
+                conversation.paused_reason = ctx.failure_reason
+        except Exception:
+            pass
+
     conversation.proposed_plan = None
     conversation.review_context = None
     conversation.review_episode_attempts = 0
+    conversation.review_episode_start_message_id = None
 
     if is_project_level:
         # Project-level abandonment → pause (infra problem likely persists)
@@ -420,6 +442,7 @@ def _save_abandoned_episode_artifact(
             "impact_scope": None,
             "tasks_modified_count": 0,
             "tasks_added_count": 0,
+            "tasks_eliminated_count": 0,
             "tasks_superseded_count": 0,
             "impact_reasoning": None,
         }
@@ -544,7 +567,14 @@ def process_with_pre_transitions(
         _append_message(db, conversation.id, MESSAGE_ROLE_USER, aria_input.user_message)
     elif aria_input.source == "system" and aria_input.system_event:
         system_text = _format_system_event(aria_input)
-        _append_message(db, conversation.id, MESSAGE_ROLE_SYSTEM, system_text)
+        msg = _append_message(db, conversation.id, MESSAGE_ROLE_SYSTEM, system_text)
+        # Anchor the review episode to this message so ReviewTool has a reliable boundary.
+        if aria_input.system_event.event_type in (
+            SystemEventType.MANUAL_REVIEW_REQUIRED,
+            SystemEventType.WORKFLOW_ERROR,
+        ):
+            conversation.review_episode_start_message_id = msg.id
+            db.flush()
 
     return _run_loop(db, conversation, snapshot, aria_input)
 
@@ -616,11 +646,11 @@ def _build_user_prompt(
     # Project context snapshot
     parts.append("## Estado del proyecto\n" + snapshot.format_for_prompt())
 
-    # Recent conversation history
+    # Recent conversation history (tiered: all system msgs + recent user/assistant)
     history = _load_recent_history(conversation)
     if history:
         parts.append("## Historial reciente")
-        for msg in history[-_HISTORY_LIMIT:]:
+        for msg in history:
             role_label = {"user": "Usuario", "assistant": "Aria", "system": "Sistema"}.get(
                 msg["role"], msg["role"]
             )
@@ -652,11 +682,33 @@ def _build_user_prompt(
 
 
 def _load_recent_history(conversation: Conversation) -> list[dict[str, str]]:
-    """Return the in-memory messages from the conversation relationship (already loaded)."""
+    """Return a tiered selection of messages for Aria's prompt.
+
+    Strategy:
+    - Always include ALL system messages (review openings, workflow events) — they are brief
+      and anchor episode context. There are normally ≤ 5 per project.
+    - Fill remaining slots up to _HISTORY_LIMIT with the most recent user/assistant messages.
+    - Recombine in original chronological order (by message id).
+
+    This ensures that gathering-phase context (carried by system events) is never silently
+    dropped even when the conversation is very long.
+    """
     if not conversation.messages:
         return []
-    recent = list(conversation.messages)[-_HISTORY_LIMIT:]
-    return [{"role": m.role, "content": m.content} for m in recent]
+
+    all_messages = list(conversation.messages)
+
+    system_msgs = [m for m in all_messages if m.role == "system"]
+    user_assistant_msgs = [m for m in all_messages if m.role in ("user", "assistant")]
+
+    remaining_slots = max(0, _HISTORY_LIMIT - len(system_msgs))
+    selected_ua = user_assistant_msgs[-remaining_slots:] if remaining_slots > 0 else []
+
+    # Recombine preserving chronological order (messages are ordered by id asc via relationship)
+    selected_ids = {m.id for m in system_msgs} | {m.id for m in selected_ua}
+    combined = [m for m in all_messages if m.id in selected_ids]
+
+    return [{"role": m.role, "content": m.content} for m in combined]
 
 
 # ── Response finalisation ─────────────────────────────────────────────────────
@@ -743,6 +795,12 @@ def _determine_event(
                 return "requirements_ready"
         if result.tool_name == ToolName.QUERY:
             return "project_query_answered"
+        if result.tool_name == ToolName.RESUME_PROJECT:
+            status = data.get("status")
+            if status == "resumed":
+                return "workflow_resumed"
+            if status == "no_pending_tasks":
+                return "project_query_answered"
 
     # ── No tool results — derive from phase or system event ───────────────────
     if conversation is not None:
@@ -790,6 +848,7 @@ def _build_tool_registry() -> dict[
         ToolName.START_PROJECT: StartProjectTool(),
         ToolName.RESUMPTION: ResumptionTool(),
         ToolName.QA: QATool(),
+        ToolName.RESUME_PROJECT: ResumeProjectTool(),
     }
 
 

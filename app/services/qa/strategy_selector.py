@@ -13,6 +13,23 @@ from app.services.qa.strategies.registry import all_eligible_product_types, get_
 QA_ELIGIBLE_PRODUCT_TYPES: frozenset[str] = all_eligible_product_types()
 
 
+# Sanity check: every QA-eligible type must be in VALID_PRODUCT_TYPES.
+# If a QA strategy is added for a type that isn't in the canonical set, this fires at import time.
+def _assert_qa_types_are_canonical() -> None:
+    from app.services.conversation.requirements_evaluator import (
+        VALID_PRODUCT_TYPES,  # noqa: PLC0415
+    )
+
+    unknown = QA_ELIGIBLE_PRODUCT_TYPES - VALID_PRODUCT_TYPES
+    if unknown:
+        raise AssertionError(
+            f"QA strategy registry contains type(s) not in VALID_PRODUCT_TYPES: {unknown}"
+        )
+
+
+_assert_qa_types_are_canonical()
+
+
 def select(product_type: str) -> QAStrategy:
     """Return the QAStrategy for the given product_type.
 

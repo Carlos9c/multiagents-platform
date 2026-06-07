@@ -38,6 +38,40 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Cambios recientes significativos
 
+- **Eliminación de tareas durante revisión manual con propagación en cascada (2026-06-07)**:
+
+  Nueva capacidad del sistema de revisión: el usuario puede solicitar la cancelación de tareas pendientes durante un episodio de `AWAITING_REVIEW`. El `ImpactAssessmentAgent` evalúa el alcance de los cambios, y el `ResumptionService` ejecuta el pipeline completo de eliminación + reintegración del plan.
+
+  **Pipeline de eliminación (Fases 1-8):**
+
+  - **(Fase 1 — Contratos)** Nuevo estado `TASK_STATUS_CANCELLED = "cancelled"` añadido a `TERMINAL_TASK_STATUSES`. Nuevo bloque `TaskRevisionSpec` (modificaciones a tareas existentes) y `NewWorkBlock` (nuevo trabajo a añadir con `planning_level: "high_level" | "atomic"`) en los contratos del `ImpactAssessmentAgent`. La salida `ImpactAssessmentLLMOutput` incluye `tasks_to_eliminate: list[int]` (IDs de tareas a cancelar) y `new_work_blocks: list[NewWorkBlock]` (trabajo de reemplazo).
+
+  - **(Fase 2 — ReviewEvaluator)** El evaluador de revisión recibe `full_task_tree` con todas las tareas no-terminales de la jerarquía, incluyendo `parent_task_id` y `depends_on_task_titles`, para que el LLM pueda razonar sobre qué eliminar sin perder el contexto de dependencias.
+
+  - **(Fase 3 — ImpactAssessmentAgent)** El agente recibe el árbol completo de tareas pendientes (`full_task_tree: list[TaskContextForReview]`) junto con el resumen de tareas completadas (`completed_tasks`). Emite `tasks_to_eliminate`, `tasks_to_modify` y `new_work_blocks` en un único output estructurado.
+
+  - **(Fase 4 — Cancelación en cascada)** `_cancel_tasks_and_cascade(db, project_id, task_ids_to_cancel)`: marca tareas como `CANCELLED` y recorre la jerarquía hacia arriba. Un padre sólo se cancela si **todos** sus hijos están en estado `CANCELLED` **y** el padre nunca produjo trabajo completado (`COMPLETED`/`PARTIAL`). Implementa el principio "anula lo que aún no se hizo; preserva lo que ya se entregó".
+
+  - **(Fase 5 — Creación de nuevo trabajo)** `_create_work_from_blocks(db, project, new_work_blocks)`: dos paths distintos:
+    - `planning_level="high_level"` → crea nueva tarea padre en BD y llama a `generate_atomic_tasks()` para descomponer (path idéntico al inicio de proyecto)
+    - `planning_level="atomic"` → llama directamente a `call_atomic_task_generator_model()` con los parámetros del bloque (`call_type="scope_change"` para trazabilidad en el Supervisor)
+    - `_build_sibling_atomic_summary()` previene que el atomizador genere títulos duplicados de tareas ya existentes.
+
+  - **(Fase 6 — Reintegración del plan)** `_reintegrate_plan()` enruta según qué cambió:
+    - Si hay nuevas tareas atómicas → `_resequence_with_sequencer()`: llama a `call_execution_sequencer_model(call_type="resequence")` con todos los pendientes como `CandidateAtomicTask`; aplica el nuevo orden via `sync_sequence_order_from_plan()`
+    - Si sólo hay cancelaciones o cambios de dependencia → resequenciación mecánica (`_resequence_pending_tasks()`) + flush
+    - Si nada cambió → no-op
+
+  - **(Fase 7 — Tests de integración)** `tests/services/conversation/test_resumption_reintegration.py` con 17 tests cubriendo: routing de reintegración, integración con el secuenciador, construcción de candidatos, y pipelines end-to-end (cancel+create, cascade+create, solo-modificaciones, preservación de scope).
+
+  - **(Fase 8 — Alineación supervisores)** Cuatro cambios en la capa de supervisión:
+    1. **Artefacto `review_episode`**: nuevo campo `tasks_eliminated_count` en los payloads generados por `ResumptionTool._save_episode_artifact()` y el episodio abandonado en `orchestrator.py`. Ambos paths (confirmed, disruptive_restart, abandoned) son ahora homogéneos.
+    2. **`review_episode_evaluator`**: descripción del prompt actualizada con semántica de los cuatro contadores (`tasks_modified`, `tasks_added`, `tasks_eliminated`, `tasks_superseded`) y reglas de calibración de scope.
+    3. **`planner_evaluator`**: `_compute_task_stats()` añade `cancelled_count` por parent y calcula `completion_rate = completed / (total − cancelled)` — las tareas canceladas por decisión del usuario no penalizan la tasa de éxito del planificador.
+    4. **`task_hierarchy_service`**: `_derive_parent_status_from_children()` rediseñado — la nueva lógica prioriza `FAILED` y `PARTIAL` como bloqueantes, y reconoce al padre como `COMPLETED` cuando tiene trabajo productivo (`completed`/`reatomized`/`followed_up`) aunque el resto de sus hijos sean `CANCELLED` o `SUPERSEDED`.
+
+  **Frontend:** nuevo estado `cancelled` con badge "CANCELADO" en gris-slate (`--slate` con opacidad reducida) y título tachado en la fila de tarea — misma convención visual que `superseded` pero con color ligeramente más claro para distinguir "decisión del usuario" vs. "reemplazado por el sistema".
+
 - **Correcciones de bugs y endurecimiento de prompts (2026-06-01)**:
 
   *Bugs corregidos:*
@@ -91,7 +125,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Números actuales
 
-- **1554 tests unitarios** — todos passing
+- **1773 tests unitarios** — todos passing
 - **12 tests de integración** (Docker) — se ejecutan con `-m integration`
 - **0 failures** en CI
 
@@ -941,9 +975,25 @@ pending → running → awaiting_validation → completed
                                         → failed        → (recovery)
                   → reatomized   (terminal: recovery con reatomize)
                   → followed_up  (terminal: recovery con insert_followup)
+                  → superseded   (terminal: reemplazado por replan disruptivo)
+pending → cancelled (terminal: eliminado por decisión del usuario durante revisión)
+            └─ cascada hacia padres: padre → cancelled sólo si TODOS sus hijos
+               son cancelled y el padre nunca produjo trabajo completado
 ```
 
-`TERMINAL_TASK_STATUSES = {partial, completed, failed, reatomized, followed_up}`
+`TERMINAL_TASK_STATUSES = {partial, completed, failed, reatomized, followed_up, superseded, cancelled}`
+
+**Semántica de estados terminales:**
+
+| Estado | Significado | `completion_rate` |
+|---|---|---|
+| `completed` | Tarea ejecutada y validada con éxito | ✅ Cuenta como éxito |
+| `partial` | Tarea ejecutada con resultado incompleto | ❌ No cuenta |
+| `failed` | Tarea ejecutada con fallo | ❌ No cuenta |
+| `reatomized` | Tarea reemplazada por sub-tareas (recovery) | ✅ Cuenta como éxito |
+| `followed_up` | Tarea seguida por tareas adicionales (recovery) | ✅ Cuenta como éxito |
+| `superseded` | Tarea reemplazada por replan disruptivo completo | — Excluida del denominador |
+| `cancelled` | Tarea eliminada por decisión del usuario | — Excluida del denominador |
 
 ### Tipos de artifacts
 
@@ -959,6 +1009,7 @@ pending → running → awaiting_validation → completed
 | `evaluation_decision` | `evaluation_service` |
 | `post_batch_result` | `post_batch_service` |
 | `workflow_batch_trace` | `project_workflow_service` |
+| `review_episode` | `resumption_tool` / `aria_orchestrator` — episodio completo de revisión manual con scope, contadores de mutación y outcome |
 
 ---
 
@@ -1082,7 +1133,7 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**1554 tests unitarios + 12 tests de integración — todos passing.**
+**1773 tests unitarios + 12 tests de integración — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
@@ -1122,6 +1173,10 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 | Mejoras de generación — estimated_complexity + depends_on_task_titles (Fases 5B/5C) | `test_phase5bc_complexity_and_deps.py` |
 | Mejoras de generación — sibling accumulator (Fase 2) | `test_sibling_atomic_accumulator.py` |
 | Mejoras de generación — runtime context injection (Fase 1) | `test_runtime_context_injection.py` |
+| Eliminación de tareas — cancelación en cascada | `conversation/test_resumption_service.py` (casos de cascada) |
+| Eliminación de tareas — reintegración del plan (Fases 6-7) | `conversation/test_resumption_reintegration.py` |
+| Task hierarchy — CANCELLED en consolidación de padres | `test_task_hierarchy_service.py` (casos de cancelled) |
+| Supervisor — planner con cancelled_count | `supervisor/test_planner_evaluator.py` (casos de cancelled) |
 
 ---
 
@@ -1129,63 +1184,70 @@ SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clav
 
 ### Alta prioridad
 
-**1. Frontend para el Motor QA — visualización de hallazgos**
-Las sesiones QA y sus hallazgos se persisten en BD pero no hay ninguna vista en el frontend para consultarlos. Añadir una pestaña "Calidad" al panel de proyecto que muestre: veredicto de la última sesión con badge de color (passed/partial/failed/blocked), resumen de hallazgos por severidad (`{critical: 0, high: 2, …}`), lista de hallazgos con filtro por severidad/categoría/agente, y botón para lanzar una nueva sesión QA. Los endpoints ya existen (`GET /qa/{id}/sessions`, `GET /qa/{id}/sessions/{sid}`).
+**1. Mejoras de calidad al agente conversacional Aria**
+Seis mejoras de prioridad media-alta ya diseñadas, ordenadas de menor a mayor riesgo:
 
-**2. Frontend para el Supervisor — visualización de informes de salud**
-Los informes del Supervisor se generan y persisten en BD pero no hay endpoint `GET` ni vista en el frontend. Añadir: `GET /supervisor/projects/{project_id}/reports` y `GET /supervisor/reports/{report_id}`. En el frontend, pestaña "Salud del sistema" con veredicto global, síntesis narrativa y evaluaciones por agente. Las evaluaciones `not_supervised` deben distinguirse visualmente de las `healthy`.
+- **(P1) Subir `MAX_STEPS` de 4 a 6** — el camino crítico REVIEW→CONFIRMATION→RESUMPTION→RESPOND consume 4 pasos; si el usuario lanza una pregunta a la vez, el loop se agota. Cambio de 1 línea en `orchestrator.py`.
+- **(P2) `requirements_draft` en el snapshot + historial tiered** — el borrador de requisitos de GATHERING desaparece del prompt cuando el historial supera 40 mensajes. Los mensajes de sistema (review openings) nunca deben caer por truncado; sólo los mensajes user/assistant son candidatos al recorte.
+- **(P3) `QueryAgent` con detalles de error en tareas fallidas** — cuando el usuario pregunta "¿por qué falló X?", Aria no puede dar más que "falló". `ExecutionRun` tiene `validation_notes`, `blockers_found` y `error_message`; basta pasarlos al `QueryAgent`.
+- **(P4) `ConfirmationEvaluator` con historial del episodio** — si el usuario dice "sí, pero cambia lo del endpoint que mencionaste", el evaluador no puede resolver la referencia sin ver el historial del episodio de revisión.
+- **(P5) Detección de idioma centralizada** — tres mecanismos dispares hoy: heurístico Python en `RequirementsEvaluator`, auto-detección en los demás evaluadores, "responde en el idioma del último mensaje" en Aria. Centralizar en `language_utils.py` y propagar a todos los evaluadores con `OUTPUT LANGUAGE: {language}`.
+- **(P6) Fase transitoria `REPLANNING`** — durante el replan disruptivo, `conversation.phase` sigue siendo `reviewing`, por lo que un segundo mensaje concurrente puede re-ejecutar `review_agent` sobre un contexto stale. Añadir `CONVERSATION_PHASE_REPLANNING` y hacer pre-commit antes de invocar `ProjectStartService`.
 
-**3. Respuestas en el idioma del usuario**
-Los evaluadores LLM (`RequirementsEvaluator`, `ReviewEvaluator`, `ConfirmationEvaluator`, `ProjectQueryAgent`) y el planificador producen contenido en inglés independientemente del idioma del usuario, lo que provoca que tareas, borradores y mensajes aparezcan en inglés en la UI aunque el usuario escriba en español. Añadir una instrucción de idioma en los system prompts de cada evaluador tomando como referencia el idioma del último mensaje del usuario. Aria ya tiene acceso al historial sin llamada LLM adicional.
+**2. Frontend para el Motor QA — visualización de hallazgos**
+Las sesiones QA y sus hallazgos se persisten en BD pero no hay ninguna vista en el frontend. Añadir una pestaña "Calidad" con: veredicto badge (passed/partial/failed/blocked), resumen por severidad, lista de hallazgos con filtros, y botón para nueva sesión. Los endpoints ya existen (`GET /qa/{id}/sessions`, `GET /qa/{id}/sessions/{sid}`).
+
+**3. Frontend para el Supervisor — visualización de informes de salud**
+Los informes del Supervisor se generan y persisten en BD pero no hay endpoint `GET` ni vista. Añadir: `GET /supervisor/projects/{project_id}/reports` y `GET /supervisor/reports/{report_id}`. Pestaña "Salud del sistema" con veredicto global, síntesis narrativa, y evaluaciones por agente (los `not_supervised` deben distinguirse visualmente de los `healthy`).
 
 **4. Ejecución paralela de los evaluadores del Supervisor**
-El `supervisor_runner.py` ejecuta todos los evaluadores secuencialmente. Dado que cada evaluador es independiente, pueden ejecutarse en paralelo con `ThreadPoolExecutor`. Reduciría el tiempo de N × latencia_LLM a ~1 × latencia_LLM. El runner ya gestiona errores por evaluador de forma aislada.
+El `supervisor_runner.py` ejecuta los 22 evaluadores secuencialmente. Todos son independientes → `ThreadPoolExecutor` reduciría el tiempo de N × latencia_LLM a ~1 × latencia_LLM. El runner ya gestiona errores por evaluador de forma aislada.
 
 **5. Soporte multi-stage**
-El sistema ejecuta un único stage por proyecto. Para proyectos reales con múltiples stages secuenciales (ej. "backend" → "frontend" → "integración"), el `ProjectWorkflowService` necesita un loop externo que cierre el stage actual, genere el siguiente y reutilice el contexto acumulado. Las bases ya están: `project_stage_closed`, `stage_goal` y `ProjectOperationalContext` son stage-aware.
+El sistema ejecuta un único stage por proyecto. Para proyectos con múltiples stages secuenciales ("backend" → "frontend" → "integración"), el `ProjectWorkflowService` necesita un loop externo que cierre el stage actual, genere el siguiente y reutilice el contexto acumulado. Las bases ya están: `project_stage_closed`, `stage_goal` y `ProjectOperationalContext` son stage-aware.
 
-**6. Validación E2E post-sesión de supervisión**
-Los cambios de prompt realizados en esta sesión (convergencia, AC prohibidos, repair pass, retry adaptation, calibración de confianza) deben validarse empíricamente con proyectos reales. Diseñar un protocolo de comparación: ejecutar 3–5 proyectos equivalentes con los prompts anteriores y los nuevos, comparar los informes del Supervisor, y confirmar que los nuevos patrones reducen las ocurrencias de los comportamientos degradados detectados.
+**6. Validación E2E de cambios de prompt**
+Los cambios de prompt de convergencia, AC prohibidos, repair pass, retry adaptation y calibración de confianza deben validarse empíricamente. Protocolo: ejecutar 3–5 proyectos equivalentes con prompts anteriores vs. nuevos, comparar informes del Supervisor, confirmar reducción de comportamientos degradados.
 
 ### Media prioridad
 
 **7. Trigger automático del QA tras `PROJECT_COMPLETED`**
-Actualmente el QA requiere que el usuario lo acepte explícitamente mediante la oferta de Aria. Para proyectos configurados con `auto_qa=True`, el runner podría dispararse automáticamente al recibir el evento `PROJECT_COMPLETED`, sin intervención del usuario. Añadir el campo `auto_qa` al modelo `Project` y la lógica de disparo en el manejador de `PROJECT_COMPLETED` de Aria.
+Para proyectos con `auto_qa=True`, el runner podría dispararse automáticamente al recibir el evento `PROJECT_COMPLETED`. Añadir el campo `auto_qa` al modelo `Project` y la lógica de disparo en el manejador de Aria.
 
-**8. Remediación automática sin confirmación del usuario**
-Cuando todos los hallazgos tienen `auto_remediable=True`, el `QATool` podría crear las Tasks de remediación directamente sin pasar por la oferta de confirmación. Añadir la lógica de cortocircuito en `_summarize_qa_result()`: si `has_remediation and all_auto_remediable`, devolver `status="remediation_auto_confirmed"` y crear las Tasks sin esperar respuesta.
+**8. Remediación QA automática sin confirmación del usuario**
+Cuando todos los hallazgos tienen `auto_remediable=True`, el `QATool` podría crear las Tasks directamente sin la oferta de confirmación. Cortocircuito en `_summarize_qa_result()` con `status="remediation_auto_confirmed"`.
 
 **9. Pre-fetch de dependencias en el bootstrapper para ecosistemas compilados**
-Cuando `code_change_agent` escribe archivos de manifiesto (`pom.xml`, `Cargo.toml`, `go.mod`, `.csproj`, `pubspec.yaml`), el bootstrapper del siguiente run no ejecuta pre-fetch. Añadir una fase opcional en `bootstrapper.py` que detecte estos archivos y ejecute el comando de descarga antes del smoke test. Reduciría el tiempo de primera compilación y daría feedback temprano sobre manifests rotos.
+Cuando `code_change_agent` escribe manifests (`pom.xml`, `Cargo.toml`, `go.mod`, `.csproj`, `pubspec.yaml`), el bootstrapper del siguiente run no ejecuta pre-fetch. Añadir una fase opcional en `bootstrapper.py` para descargar dependencias antes del smoke test.
 
 **10. Routing de modelo para Aria, evaluadores conversacionales y agentes QA**
-Los LLM calls del orquestador Aria, evaluadores conversacionales y agentes QA usan el provider por defecto. Añadir variables de configuración (`ARIA_MODEL`, `ARIA_PROVIDER`, `QA_AGENT_MODEL`, `QA_AGENT_PROVIDER`) para enrutar capas a modelos distintos del motor de ejecución, igual que ya existe `VALIDATOR_MODEL`.
+Añadir variables `ARIA_MODEL`, `ARIA_PROVIDER`, `QA_AGENT_MODEL`, `QA_AGENT_PROVIDER` para enrutar capas a modelos distintos del motor de ejecución, igual que ya existe `VALIDATOR_MODEL`.
 
 **11. Precisión del validador en decisiones parciales**
-El `command_runner_agent_validator` puede declarar `partial` incluso cuando los tests pasan. Ampliar la lista de markers en `_task_looks_like_executable_implementation` (persistence, storage, data) o relajar el criterio de normalización para tareas con `exit_code=0`.
+El `command_runner_agent_validator` puede declarar `partial` incluso cuando los tests pasan. Ampliar la lista de markers en `_task_looks_like_executable_implementation` o relajar el criterio de normalización para tareas con `exit_code=0`.
 
 **12. Observabilidad estructurada del pipeline completo**
-Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`, `aria_tool_called`, `qa_verdict`, `qa_findings_count`) en todo el pipeline. Incluir telemetría del loop de Aria y del orquestador QA (agente llamado, ronda, si se agotó el presupuesto).
+Estandarizar los campos de log (`batch_id`, `project_id`, `mutation_kind`, `intent_type`, `recovery_task_ids`, `followup_depth`, `guard_triggered`, `aria_tool_called`, `qa_verdict`, `qa_findings_count`) en todo el pipeline. Incluir telemetría del loop de Aria y del orquestador QA.
 
 **13. Tests de integración end-to-end del flujo conversacional**
-Tests que cubran el flujo completo con WebSocket real: gathering → Start → executing → revisión manual → confirmación → reanudación. Los tests actuales mockean el LLM pero no prueban el ciclo completo con WebSocket y persistencia en BD.
+Tests que cubran el flujo completo con WebSocket real: gathering → Start → executing → revisión manual con eliminación de tareas → confirmación → reanudación. Los tests actuales mockean el LLM pero no prueban el ciclo completo con WebSocket y persistencia en BD.
 
 ### Baja prioridad
 
 **14. Panel de complejidad del plan de ejecución en el frontend**
-Mostrar `estimated_complexity` por tarea en el panel de tareas del proyecto: un badge de color (XS=verde, S=azul, M=amarillo, L=naranja, XL=rojo) junto al título de cada tarea atómica. En la vista del batch actual, indicar la carga agregada del batch (suma ponderada de complejidades) para que el usuario identifique visualmente batches sobrecargados. Los datos ya están en BD.
+Mostrar `estimated_complexity` por tarea: badge de color (XS=verde, S=azul, M=amarillo, L=naranja, XL=rojo) junto al título de cada atómica. En la vista del batch actual, indicar la carga agregada (suma ponderada) para identificar visualmente batches sobrecargados. Los datos ya están en BD.
 
 **15. Historial comparativo de sesiones QA en el frontend**
-Mostrar gráficamente la evolución de hallazgos entre sesiones QA sucesivas del mismo proyecto: tendencia de `high` + `critical` en el tiempo, hallazgos nuevos vs. resueltos por sesión (datos disponibles vía `regression_qa_agent`), y duración por sesión.
+Evolución de hallazgos entre sesiones QA sucesivas: tendencia de `high`+`critical` en el tiempo, hallazgos nuevos vs. resueltos por sesión (via `regression_qa_agent`), duración por sesión.
 
 **16. Nuevo executor type: generación de media**
-Para proyectos con assets (sprites, iconos, sonidos), añadir un nuevo `executor_type` (`image_generation`, `audio_generation`) que llame APIs generativas externas sin necesidad de contenedor Docker. El `atomic_task_generator` emitiría tareas de este tipo; el orquestador las delegaría a un `MediaGenerationAgent`.
+Para proyectos con assets (sprites, iconos, sonidos), añadir `executor_type="image_generation"` / `"audio_generation"` que llame APIs generativas externas sin Docker. El `atomic_task_generator` emitiría estas tareas; el orquestador las delegaría a un `MediaGenerationAgent`.
 
 **17. Métricas de ejecución por proyecto**
-Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de episodios de revisión por tarea, tiempo medio hasta confirmación. Datos para ajustar parámetros de orquestación y detectar proyectos problemáticos antes del iteration limit.
+Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de episodios de revisión, tiempo medio hasta confirmación, tasa de tareas canceladas por proyecto. Datos para ajustar parámetros de orquestación y detectar proyectos problemáticos antes del iteration limit.
 
 **18. Contexto estructural del repositorio en `context_selection_agent`**
-El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace como input adicional para mejorar la relevancia del contexto.
+El agente selecciona tareas históricas pero no tiene visibilidad del layout actual del repo. Añadir un snapshot ligero de la estructura del workspace para mejorar la relevancia del contexto histórico.
 
 **19. Mantenimiento del catálogo de imágenes Docker**
 Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter stable), política de versionado en el catálogo, y estrategia de publicación en un registry privado para evitar builds locales en cada máquina.
@@ -1202,13 +1264,13 @@ Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter s
 | Workspace | Aislamiento total entre runs; `run/` siempre eliminado; promoción controlada |
 | Plan | El checkpoint final siempre incluye `stage_closure` |
 | Recovery | `is_recovery_task=True` bloquea `reatomize`; `followup_depth >= 2` bloquea `insert_followup`; ≥1 sibling recovery fallado bloquea nuevo followup |
-| Jerarquía | Propagación determinista; rollback si falla algún paso; sin efectos parciales sobre padres |
+| Jerarquía | Propagación determinista; rollback si falla algún paso; sin efectos parciales sobre padres; padre → `COMPLETED` si hay trabajo productivo aunque el resto de hijos sea `CANCELLED`/`SUPERSEDED`; padre → `CANCELLED` sólo cuando TODOS sus hijos son `CANCELLED` y el padre no tiene trabajo completado |
 | Descomposición | `MAX_ATOMIC_TASKS_PER_PARENT = 8`; `MAX_IMPLEMENTATION_STEPS_PER_ATOMIC = 20` |
 | Entorno | Smoke test obligatorio antes de usar el contenedor; repair automático con LLM ante fallo de bootstrap; selección de imagen via LLM con fallback a imagen libre si ninguna del catálogo encaja |
 | EnvironmentManager | `environment_manager_agent` no produce entregables validables (en `IGNORED_VALIDATION_PRODUCERS`); su fallo es terminal (no entra en loop de reparación); `exact_only` + conflicto de versión → `needs_user_input`; archivos de manifiesto modificados en disco siempre se registran en evidencia independientemente del éxito de la instalación |
 | Aria loop | `MAX_STEPS = 4`; misma herramienta ≤ 1 vez por turno (no-repeat); si el loop se agota sin `respond`, se fuerza una respuesta de fallback; los eventos de sistema aplican transiciones DB antes del loop LLM |
 | ReviewContext | `conversation.proposed_plan != None` ↔ estado "esperando confirmación"; `conversation.review_context` serializa el ADT completo (`TaskReviewContext` \| `ProjectReviewContext`); se limpia al resolver la revisión |
-| Supervisor | `result=None` (not_supervised) si el agente nunca fue llamado en el proyecto; los evaluadores de validador (`code_change_agent_validator_evaluator` et al.) DEBEN tener `_AGENT_NAME` igual al **ejecutor** (ej. `"code_change_agent"`), NO al validador — `build_pair_evaluation_context()` filtra por `execution_agent_sequence` donde los validadores nunca aparecen; `_VALIDATOR_NAME` sigue siendo el nombre del validador para extraer su resultado del artefacto; veredicto global = media ponderada, no worst-case; >30% not_supervised → `not_evaluated` antes de calcular la media |
+| Supervisor | `result=None` (not_supervised) si el agente nunca fue llamado en el proyecto; los evaluadores de validador (`code_change_agent_validator_evaluator` et al.) DEBEN tener `_AGENT_NAME` igual al **ejecutor** (ej. `"code_change_agent"`), NO al validador — `build_pair_evaluation_context()` filtra por `execution_agent_sequence` donde los validadores nunca aparecen; `_VALIDATOR_NAME` sigue siendo el nombre del validador para extraer su resultado del artefacto; veredicto global = media ponderada, no worst-case; >30% not_supervised → `not_evaluated` antes de calcular la media; `planner_evaluator.completion_rate` excluye tareas `cancelled` del denominador — cancelaciones por decisión del usuario no distorsionan la métrica de calidad del planificador; artefacto `review_episode` incluye `tasks_eliminated_count` para que el evaluador calibre scope contra eliminaciones reales |
 | test_builder_agent | escribe una entrada en `execution_trace.jsonl` por cada llamada materializada o bloqueada (`call_type="materialise"` \| `"needs_dependency"`); la entrada incluye `files_written[]`, `coverage_summary` completo, y `needs_dependency` cuando aplica; `target_paths` DEBE estar poblado por el orquestador en toda llamada — un `target_paths` vacío es un error de routing |
 | Motor QA — orquestador | Guardas de presupuesto (timeout, max_rounds, max_findings) se evalúan ANTES de cada llamada LLM; tras la decisión, el orden de validación es fijo: synthesis_agent excluido → no repetición → estrategia → límite por agente → registrado; synthesis_agent nunca participa en el bucle de sondeo |
 | Motor QA — agentes | `session.record_agent_call(self.name)` es obligatorio al inicio de cada `probe()`; `session.add_probe(ProbeRecord(...))` es obligatorio antes de retornar; los agentes nunca lanzan excepciones por fallos de sondeo esperados (retornan `outcome="skipped"`); `producer_agent=self.name` en todos los `QAFindingDetail` emitidos |

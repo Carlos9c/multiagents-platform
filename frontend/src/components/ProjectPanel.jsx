@@ -11,6 +11,7 @@ const STATUS_LABELS = {
   reatomized: 'Reatomizado',
   followed_up: 'Continuado',
   superseded: 'Reemplazado',
+  cancelled: 'Cancelado',
 }
 
 function TaskRow({ task, indented }) {

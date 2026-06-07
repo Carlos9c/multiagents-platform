@@ -28,6 +28,7 @@ VALID_MESSAGE_ROLES = {
 CONVERSATION_PHASE_GATHERING = "gathering_requirements"
 CONVERSATION_PHASE_EXECUTING = "executing"
 CONVERSATION_PHASE_REVIEWING = "reviewing"
+CONVERSATION_PHASE_REPLANNING = "replanning"
 CONVERSATION_PHASE_PAUSED = "paused"
 CONVERSATION_PHASE_COMPLETED = "completed"
 CONVERSATION_PHASE_QA_RUNNING = "qa_running"
@@ -36,6 +37,7 @@ VALID_CONVERSATION_PHASES = {
     CONVERSATION_PHASE_GATHERING,
     CONVERSATION_PHASE_EXECUTING,
     CONVERSATION_PHASE_REVIEWING,
+    CONVERSATION_PHASE_REPLANNING,
     CONVERSATION_PHASE_PAUSED,
     CONVERSATION_PHASE_COMPLETED,
     CONVERSATION_PHASE_QA_RUNNING,
@@ -88,6 +90,15 @@ class Conversation(Base):
         default=0,
     )
 
+    # ID of the ConversationMessage (role=system) that opened the current review episode.
+    # Used by ReviewTool to determine the episode boundary without scanning all messages.
+    # NULL for pre-migration rows or when no review is active.
+    review_episode_start_message_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("conversation_messages.id"),
+        nullable=True,
+    )
+
     # Living requirements document built during GATHERING phase.
     # Becomes project.description when the agent decides it has enough context.
     requirements_draft: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -103,6 +114,10 @@ class Conversation(Base):
     # JSON-serialized QAResult stored while Aria awaits remediation confirmation.
     # Cleared when user confirms or declines remediation tasks.
     pending_qa_report: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Stores the failure reason when the conversation transitions to PAUSED via a
+    # project-level review abandonment. Cleared when execution resumes.
+    paused_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -122,6 +137,7 @@ class Conversation(Base):
         "ConversationMessage",
         back_populates="conversation",
         order_by="ConversationMessage.id",
+        foreign_keys="ConversationMessage.conversation_id",
     )
 
 
@@ -152,4 +168,5 @@ class ConversationMessage(Base):
     conversation: Mapped["Conversation"] = relationship(
         "Conversation",
         back_populates="messages",
+        foreign_keys=[conversation_id],
     )

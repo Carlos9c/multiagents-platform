@@ -60,6 +60,7 @@ def _make_review_episode_payload(
         "impact_scope": impact_scope,
         "tasks_modified_count": 1 if impact_scope == "moderate" else 0,
         "tasks_added_count": 0,
+        "tasks_eliminated_count": 0,
         "tasks_superseded_count": 0,
         "impact_reasoning": "Moderate scope: only task 10 needs revision.",
     }

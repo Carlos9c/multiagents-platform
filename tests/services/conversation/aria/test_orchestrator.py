@@ -435,7 +435,12 @@ class TestReviewFlow:
             patch(
                 "app.services.conversation.aria.tools.resumption_tool.resume_after_review",
                 return_value=MagicMock(
-                    scope="narrow", message="Clarification applied", tasks_modified=1, tasks_added=0
+                    scope="narrow",
+                    message="Clarification applied",
+                    tasks_modified=1,
+                    tasks_added=0,
+                    tasks_eliminated=0,
+                    tasks_superseded=0,
                 ),
             ),
         ):
@@ -613,6 +618,7 @@ class TestReviewResumptionGuard:
                     message="Clarification applied",
                     tasks_modified=1,
                     tasks_added=0,
+                    tasks_eliminated=0,
                     tasks_superseded=0,
                 ),
             ),
@@ -699,6 +705,7 @@ class TestReviewResumptionGuard:
                 message="Applied",
                 tasks_modified=1,
                 tasks_added=0,
+                tasks_eliminated=0,
                 tasks_superseded=0,
             )
 
@@ -764,6 +771,7 @@ class TestReviewResumptionGuard:
                     message="Applied",
                     tasks_modified=1,
                     tasks_added=0,
+                    tasks_eliminated=0,
                     tasks_superseded=0,
                 ),
             ),
@@ -778,3 +786,92 @@ class TestReviewResumptionGuard:
         # Even via the fallback path, resumption must have been forced
         assert conv.phase == CONVERSATION_PHASE_EXECUTING
         assert response.event == "review_resolved"
+
+
+# ── Tests: MAX_STEPS = 6 ─────────────────────────────────────────────────────
+
+
+class TestMaxSteps:
+    """Verify that MAX_STEPS=6 allows deep tool chains without triggering fallback."""
+
+    def test_four_distinct_tool_calls_do_not_trigger_fallback(
+        self, db_session: Session, make_project
+    ):
+        """Four distinct tool calls followed by respond complete normally (no fallback).
+
+        Previously at MAX_STEPS=4 this was exactly the limit, leaving zero margin.
+        At MAX_STEPS=6 there are 2 spare steps.
+        """
+        project = make_project()
+        # Use a reviewing conversation so REVIEW + CONFIRMATION + RESUMPTION tools are valid
+        ctx = TaskReviewContext(task_id=99, task_title="Setup DB")
+        conv = _make_conversation(
+            db_session,
+            project.id,
+            phase=CONVERSATION_PHASE_REVIEWING,
+            review_context=review_context_to_json(ctx),
+            proposed_plan="Use PostgreSQL",
+        )
+
+        # Sequence: QUERY → REVIEW → CONFIRMATION(confirmed=True) → guard injects RESUMPTION → respond
+        # That's 3 explicit tool calls + 1 guard-injected = 4 total, well within 6
+        sequence = [
+            _aria_step_call(ToolName.QUERY, hint="what's left?"),
+            _aria_step_call(ToolName.REVIEW),
+            _aria_step_call(ToolName.CONFIRMATION, hint="yes go ahead"),
+            _aria_step_respond("Resumption complete!"),
+        ]
+        call_iter = iter(sequence)
+
+        with (
+            patch(
+                "app.services.conversation.aria.orchestrator._call_aria_llm",
+                side_effect=lambda *a, **kw: next(call_iter),
+            ),
+            patch(
+                "app.services.conversation.aria.tools.query_tool.answer_project_query",
+                return_value="2 tasks pending",
+            ),
+            patch(
+                "app.services.conversation.aria.tools.review_tool.evaluate_review",
+                return_value=MagicMock(
+                    status="ready_to_confirm",
+                    next_question=None,
+                    clarification_summary="use postgres",
+                    action_summary="Switch to PostgreSQL",
+                    reasoning="ok",
+                ),
+            ),
+            patch(
+                "app.services.conversation.aria.tools.confirmation_tool.evaluate_confirmation",
+                return_value=MagicMock(confirmed=True, follow_up=None, reasoning="yes"),
+            ),
+            patch(
+                "app.services.conversation.aria.tools.resumption_tool.resume_after_review",
+                return_value=MagicMock(
+                    scope="narrow",
+                    message="Applied",
+                    tasks_modified=1,
+                    tasks_added=0,
+                    tasks_eliminated=0,
+                    tasks_superseded=0,
+                    reasoning="ok",
+                ),
+            ),
+        ):
+            response = process_with_pre_transitions(
+                db_session,
+                conv.id,
+                AriaInput(source="user", user_message="yes go ahead"),
+            )
+
+        db_session.refresh(conv)
+        # Normal completion path — no fallback
+        assert response.event != "fallback"
+        assert conv.phase == CONVERSATION_PHASE_EXECUTING
+
+    def test_max_steps_value_is_six(self):
+        """MAX_STEPS must be 6 — regression guard against accidental reduction."""
+        from app.services.conversation.aria.orchestrator import MAX_STEPS
+
+        assert MAX_STEPS == 6

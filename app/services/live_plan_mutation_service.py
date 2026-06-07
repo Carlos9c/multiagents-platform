@@ -61,6 +61,20 @@ def _sync_sequence_order_from_plan(
     db.flush()
 
 
+def sync_sequence_order_from_plan(
+    db: Session,
+    *,
+    plan: ExecutionPlan,
+    task_ids_to_sync: set[int],
+) -> None:
+    """Public entry point for syncing sequence_order from a plan.
+
+    Used by ResumptionService (Phase 6) after plan reintegration via the
+    execution sequencer to apply the new batch ordering to Task records.
+    """
+    _sync_sequence_order_from_plan(db, plan=plan, task_ids_to_sync=task_ids_to_sync)
+
+
 def _read_attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 

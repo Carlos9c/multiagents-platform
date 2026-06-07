@@ -28,6 +28,7 @@ class ToolName(str, Enum):
     START_PROJECT = "start_project"
     RESUMPTION = "resumption_agent"
     QA = "qa_tool"
+    RESUME_PROJECT = "resume_project"
 
 
 # ── Aria's per-step decision (LLM output schema) ──────────────────────────────
@@ -169,6 +170,7 @@ class AriaResponse:
         "qa_completed_no_issues",
         "qa_completed_with_findings",
         "qa_remediation_started",
+        "workflow_resumed",
         "fallback",
     ]
     project_id: int | None = None

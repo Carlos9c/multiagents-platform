@@ -36,6 +36,7 @@ def _one_episode_context() -> list[dict]:
             "impact_scope": "moderate",
             "tasks_modified_count": 2,
             "tasks_added_count": 1,
+            "tasks_eliminated_count": 0,
             "tasks_superseded_count": 0,
             "impact_reasoning": "Moderate scope: distinct JWT and session concerns.",
         }

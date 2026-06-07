@@ -11,6 +11,7 @@ from app.models.task import (
     TASK_STATUS_FAILED,
     TERMINAL_TASK_STATUSES,
     Task,
+    format_acceptance_criteria,
 )
 from app.services.conversation.aria.contracts import (
     ProjectReviewContext,
@@ -19,6 +20,8 @@ from app.services.conversation.aria.contracts import (
     ToolResult,
     review_context_from_json,
 )
+from app.services.conversation.impact_assessment_agent import TaskContextForReview
+from app.services.conversation.language_utils import detect_language
 from app.services.conversation.requirements_evaluator import ConversationTurn
 from app.services.conversation.review_evaluator import (
     BlockedTaskContext,
@@ -89,6 +92,9 @@ class ReviewTool:
         # Build episode history
         episode_history = self._load_episode_history(db, conversation, review_ctx)
 
+        # Detect language once from episode history so the evaluator doesn't re-detect
+        detected_language = detect_language(episode_history)
+
         # Build task summary
         task_summary = self._build_task_summary(
             db,
@@ -98,6 +104,11 @@ class ReviewTool:
             ),
         )
 
+        # Build full task tree for cascade-aware review (task-level only)
+        full_task_tree: list[TaskContextForReview] = []
+        if not is_project_level:
+            full_task_tree = self._build_full_task_tree(db, project_id)
+
         result = evaluate_review(
             ReviewEvaluatorInput(
                 project_goal=project_goal,
@@ -105,6 +116,8 @@ class ReviewTool:
                 episode_history=episode_history,
                 project_task_summary=task_summary,
                 is_project_level_error=is_project_level,
+                language=detected_language,
+                full_task_tree=full_task_tree,
             )
         )
 
@@ -136,27 +149,79 @@ class ReviewTool:
                 .all()
             )
         else:
-            # Task-level: messages since the conversation entered reviewing phase.
-            # We use the last reviewing-phase entry point by finding the most recent
-            # system message that introduced the review, then taking all messages after it.
-            all_messages = (
-                db.query(ConversationMessage)
-                .filter(ConversationMessage.conversation_id == conversation.id)
-                .order_by(ConversationMessage.id.asc())
-                .all()
-            )
-            # Find last system message (review opening) and include from there
-            last_system_idx = -1
-            for i, m in enumerate(all_messages):
-                if m.role == "system":
-                    last_system_idx = i
-            messages = all_messages[last_system_idx:] if last_system_idx >= 0 else all_messages
+            # Task-level: use the stored episode anchor when available.
+            anchor_id = conversation.review_episode_start_message_id
+            if anchor_id is not None:
+                messages = (
+                    db.query(ConversationMessage)
+                    .filter(
+                        ConversationMessage.conversation_id == conversation.id,
+                        ConversationMessage.id >= anchor_id,
+                    )
+                    .order_by(ConversationMessage.id.asc())
+                    .all()
+                )
+            else:
+                # Fallback for pre-migration rows (anchor is NULL): scan for last system message.
+                all_messages = (
+                    db.query(ConversationMessage)
+                    .filter(ConversationMessage.conversation_id == conversation.id)
+                    .order_by(ConversationMessage.id.asc())
+                    .all()
+                )
+                last_system_idx = -1
+                for i, m in enumerate(all_messages):
+                    if m.role == "system":
+                        last_system_idx = i
+                messages = all_messages[last_system_idx:] if last_system_idx >= 0 else all_messages
 
         return [
             ConversationTurn(role=m.role, content=m.content)  # type: ignore[arg-type]
             for m in messages
             if m.role in ("user", "assistant", "system")
         ]
+
+    def _build_full_task_tree(
+        self,
+        db: Session,
+        project_id: int,
+    ) -> list[TaskContextForReview]:
+        """Build the full pending task tree for cascade-aware review responses.
+
+        Includes all non-terminal tasks with parent titles resolved so the
+        evaluator can reason about hierarchy and cascade implications.
+        """
+        all_tasks = (
+            db.query(Task)
+            .filter(Task.project_id == project_id)
+            .order_by(Task.sequence_order.asc().nullslast())
+            .all()
+        )
+
+        # Build title lookup for parent resolution
+        title_by_id: dict[int, str] = {t.id: t.title for t in all_tasks}
+
+        result: list[TaskContextForReview] = []
+        for task in all_tasks:
+            if task.status in TERMINAL_TASK_STATUSES:
+                continue
+            result.append(
+                TaskContextForReview(
+                    task_id=task.id,
+                    title=task.title,
+                    description=task.description,
+                    planning_level=task.planning_level,
+                    parent_task_id=task.parent_task_id,
+                    parent_title=(
+                        title_by_id.get(task.parent_task_id) if task.parent_task_id else None
+                    ),
+                    status=task.status,
+                    depends_on_task_titles=task.depends_on_task_titles or [],
+                    acceptance_criteria=format_acceptance_criteria(task.acceptance_criteria),
+                    sequence_order=task.sequence_order,
+                )
+            )
+        return result
 
     def _build_task_summary(
         self,
