@@ -1,6 +1,9 @@
 agent_name: orchestrator_evaluator
-version: "1.2.0"
+version: "1.3.0"
 changelog:
+  - version: "1.3.0"
+    date: "2026-06-07"
+    changes: "Added image_generation_agent to the execution-phase subagent list. Added image_generation routing pattern (context_selection → image_generation → finish) as good performance. Added image_generation routing violations as poor performance patterns."
   - version: "1.2.0"
     date: "2026-06-02"
     changes: "Added authorship asymmetry violation to poor orchestrator criteria: routing to code_change_agent instead of test_builder_agent for ambiguous failures in testing tasks where test_builder has already run"
@@ -38,7 +41,7 @@ prompts:
       finish/reject) for each atomic task.  It operates in two phases:
         1. Discovery — always starts by calling context_selection_agent
         2. Execution — decides among code_change_agent, command_runner_agent, document_writer_agent,
-           test_builder_agent, environment_manager_agent, or finish/reject
+           test_builder_agent, environment_manager_agent, image_generation_agent, or finish/reject
 
       What constitutes good orchestrator performance:
       - Reaches a voluntary `finish` decision (forced_terminal=false) with a sensible subagent sequence
@@ -47,7 +50,9 @@ prompts:
       - Low normalized_decision_count: the LLM rarely produces decisions that the guardrail has to correct
       - Zero or one repair_attempts: reaching the terminal decision without exhausting the repair budget
       - Sequences are appropriate for the task type — documentation tasks should not call command_runner_agent
-        unless explicitly needed; implementation tasks should include code_change_agent
+        unless explicitly needed; implementation tasks should include code_change_agent;
+        image_generation tasks should follow context_selection_agent → image_generation_agent → finish
+        (no command_runner_agent, no code_change_agent, no test_builder_agent)
       - Recognises when environment failures need environment_manager_agent rather than code_change_agent
 
       What makes a poor orchestrator:
@@ -72,6 +77,11 @@ prompts:
         fail or require review is a strong signal of this anti-pattern
       - Inappropriate subagent sequences for the task type (e.g. calling environment_manager_agent for a
         task that had no environment errors)
+      - Image generation routing violations: for task_type="image_generation", calling
+        command_runner_agent after image_generation_agent (binary assets have no executable verification
+        target), calling code_change_agent instead of image_generation_agent, or not calling
+        image_generation_agent at all for an image_generation task. The correct sequence is always
+        context_selection_agent → image_generation_agent → finish.
 
       Verdict scale:
       - healthy: low invalid/normalized decision counts, mostly voluntary finish decisions, appropriate

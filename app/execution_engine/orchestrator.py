@@ -125,6 +125,7 @@ def _last_attempted_subagent_name(runtime_state: ExecutionState) -> str | None:
             "document_writer_agent",
             "test_builder_agent",
             "environment_manager_agent",
+            "image_generation_agent",
         }:
             return agent_name
     return None
@@ -163,6 +164,7 @@ def _allowed_subagents_for_phase(phase: str) -> list[str]:
             "document_writer_agent",
             "test_builder_agent",
             "environment_manager_agent",
+            "image_generation_agent",
         ]
 
     return []
@@ -622,6 +624,7 @@ def _latest_step_failure_indicates_repairable_gap(
         "code_change_agent",
         "document_writer_agent",
         "test_builder_agent",
+        "image_generation_agent",
     }:
         return True
 
@@ -1336,6 +1339,7 @@ def _maybe_build_forced_terminal_decision(
         "code_change_agent",
         "document_writer_agent",
         "test_builder_agent",
+        "image_generation_agent",
     }
 
     if (

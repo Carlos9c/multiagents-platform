@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import time
@@ -9,6 +10,27 @@ from app.services.llm.base import LLMProvider
 from app.services.llm.schema_utils import to_openai_strict_json_schema
 
 logger = logging.getLogger("app.services.llm")
+
+
+def _detect_image_mime_type(data: bytes) -> str:
+    if data[:4] == b"\x89PNG":
+        return "image/png"
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:4] == b"GIF8":
+        return "image/gif"
+    return "image/png"
+
+
+def _build_image_content_block(image_bytes: bytes) -> dict[str, Any]:
+    mime = _detect_image_mime_type(image_bytes)
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    return {
+        "type": "input_image",
+        "image_url": f"data:{mime};base64,{b64}",
+    }
 
 
 class OpenAIProvider(LLMProvider):
@@ -59,14 +81,16 @@ class OpenAIProvider(LLMProvider):
         user_prompt: str,
         schema_name: str,
         json_schema: dict[str, Any],
+        images: list[bytes] | None = None,
     ) -> dict[str, Any]:
         started_at = time.perf_counter()
         system_chars = len(system_prompt or "")
         user_chars = len(user_prompt or "")
         total_prompt_chars = system_chars + user_chars
+        image_count = len(images) if images else 0
 
         logger.info(
-            "llm_call_started provider=openai model=%s schema=%s timeout_s=%s max_retries=%s prompt_chars_total=%d system_chars=%d user_chars=%d",
+            "llm_call_started provider=openai model=%s schema=%s timeout_s=%s max_retries=%s prompt_chars_total=%d system_chars=%d user_chars=%d images=%d",
             self.model,
             schema_name,
             self.timeout,
@@ -74,10 +98,16 @@ class OpenAIProvider(LLMProvider):
             total_prompt_chars,
             system_chars,
             user_chars,
+            image_count,
         )
 
         adapted_schema = to_openai_strict_json_schema(json_schema)
         response = None
+
+        user_content: list[dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
+        if images:
+            for img_bytes in images:
+                user_content.append(_build_image_content_block(img_bytes))
 
         try:
             logger.info(
@@ -98,7 +128,7 @@ class OpenAIProvider(LLMProvider):
                             },
                             {
                                 "role": "user",
-                                "content": [{"type": "input_text", "text": user_prompt}],
+                                "content": user_content,
                             },
                         ],
                         text={

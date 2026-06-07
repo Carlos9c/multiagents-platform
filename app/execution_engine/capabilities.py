@@ -251,6 +251,41 @@ def get_execution_engine_capabilities() -> ExecutorCapabilities:
                 ],
             ),
             SubagentCapability(
+                name="image_generation_agent",
+                role=(
+                    "Generates raster image files (PNG, JPG, WebP) from the task description "
+                    "using a two-step process: first translates the task into a detailed visual "
+                    "prompt via an LLM, then calls the image generation API. Handles multiple "
+                    "size variants (e.g. favicon at 16/32/64/128px) in a single invocation by "
+                    "generating at full native resolution and resizing to all targets."
+                ),
+                uses_tools=[
+                    "generate_image",
+                    "resize_image",
+                    "write_binary_file",
+                ],
+                strengths=[
+                    "Translates task descriptions into detailed, professional-grade image generation prompts.",
+                    "Produces consistent style across variants by resizing from a single high-resolution source.",
+                    "Saves the original high-resolution source alongside resized outputs for future variation tasks.",
+                    "Registers rich FileDocumentationEntry for every image (use case, style, colors, rationale).",
+                    "Records a structured observation payload with full prompt engineering and generation metadata.",
+                ],
+                limits=[
+                    "Produces raster images only (PNG, JPG, WebP) — not SVG, video, or 3D assets.",
+                    "Image quality depends on the image generation model's capabilities and prompt quality.",
+                    "Cannot modify or edit existing images — only generates new ones.",
+                    "Does not write source code, test files, or documentation.",
+                ],
+                usage_guidance=[
+                    "Use for tasks with task_type='image_generation' or 'image_variation'.",
+                    "Use when acceptance_criteria or task description explicitly requires producing image files.",
+                    "A single task can cover one image plus multiple size variants (e.g. favicon multiscale). "
+                    "Do not create separate tasks for each size variant of the same image.",
+                    "Do not use for tasks that only require modifying or referencing existing images without creating new ones.",
+                ],
+            ),
+            SubagentCapability(
                 name="document_writer_agent",
                 role=(
                     "Produces documentation and design artifacts by deciding which files to "

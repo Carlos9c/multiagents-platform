@@ -10,6 +10,9 @@ from app.services.validation.validators.command_runner_agent_validator import (
 from app.services.validation.validators.document_writer_agent_validator import (
     DocumentWriterAgentValidator,
 )
+from app.services.validation.validators.image_generation_agent_validator import (
+    ImageGenerationAgentValidator,
+)
 from app.services.validation.validators.test_builder_agent_validator import (
     TestBuilderAgentValidator,
 )
@@ -26,6 +29,7 @@ class ValidationRegistry:
             CommandRunnerAgentValidator(),
             DocumentWriterAgentValidator(),
             TestBuilderAgentValidator(),
+            ImageGenerationAgentValidator(),
         ]
 
         self._validators_by_key: dict[str, BaseTaskValidator] = {}

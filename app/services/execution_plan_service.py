@@ -61,6 +61,7 @@ _PHASE_ORDER: dict[str, int] = {
     "requirements": 1,
     "design": 1,
     "planning": 1,
+    "image_generation": 1,
     "configuration": 2,
     "implementation": 2,
     "refactor": 2,

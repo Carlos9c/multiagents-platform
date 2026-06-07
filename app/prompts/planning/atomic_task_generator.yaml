@@ -1,6 +1,9 @@
 agent_name: atomic_task_generator
-version: "3.5.0"
+version: "3.6.0"
 changelog:
+  - version: "3.6.0"
+    date: "2026-06-07"
+    changes: "Added image_generation task type: atomicity rules (one image = one task, multiple sizes = one task), isolation rule with recovery-cost rationale, path conventions, dependency/ordering guidance, verification_level=none, acceptance_criteria requirements"
   - version: "3.5.0"
     date: "2026-06-02"
     changes: "Problem 2: Clarified documentation vs design taxonomy — documentation is delivery/consumption artifacts; design is specification/contract artifacts; added decisive test: DEFINES behavior = design, EXPLAINS behavior = documentation"
@@ -215,6 +218,66 @@ prompts:
       - onboarding: produces contributor setup guides, quickstart docs, or handoff material
       - configuration: produces environment setup, CI/CD pipelines, tooling config, or infrastructure-as-code
       - refactor: restructures existing code without changing external behavior
+      - image_generation: produces one or more raster image files (PNG, JPG, WebP) as project assets —
+        icons, logos, hero banners, covers, illustrations, placeholders. This type is phase_order=1
+        (alongside design), meaning it must be placed before implementation tasks.
+        See the dedicated image_generation rules below.
+
+      image_generation task rules (applied whenever task_type="image_generation" is assigned):
+
+      Atomicity of image_generation tasks:
+      - One atomic image_generation task = one visually distinct image.
+        A single image at multiple output sizes (e.g. favicon at 16/32/64/128px) is ONE task, not four:
+        the image is generated once at high resolution and resized to all target sizes in the same
+        execution step. Multiple size variants of the same image share a single validation boundary.
+      - Distinct images that serve different visual purposes (logo vs. hero banner vs. favicon vs.
+        email header) MUST each be a separate task, even if they belong to the same visual identity.
+        Each has an independent validation boundary ("does this hero banner match its requirements?").
+      - Do NOT bundle multiple visually distinct images into one task to save on task count.
+        Recovery cost is the key: image generation calls an external API (slow, expensive, non-deterministic).
+        Isolation guarantees that if a downstream task fails and triggers recovery, the already-completed
+        image is never regenerated. Mixing images in one task forces the entire API call to repeat on retry.
+
+      Isolation rule — NEVER mix image_generation with other task types:
+      - An image_generation task MUST NOT also produce source code, configuration files, documentation,
+        or test files. These are separate tasks with their own producers and validation contracts.
+      - Coordination between the image and downstream code/docs that reference it is handled through
+        dependencies (depends_on_task_titles) and path conventions, not by bundling them.
+      - If a task description says "generate the logo AND update the manifest to reference it":
+        split into two tasks — one image_generation for the PNG, one implementation for the manifest —
+        with the manifest task declaring depends_on_task_titles=["<image task title>"].
+
+      Path convention for image_generation tasks:
+      - Decide the output path at planning time and encode it explicitly in the acceptance_criteria
+        and/or implementation_notes of the image task.
+      - Use POSIX-style relative paths with a clear assets directory: assets/icons/, assets/images/,
+        public/images/, src/assets/.
+      - Use descriptive kebab-case filenames: app-icon.png, hero-banner.webp, logo-primary.png.
+      - Downstream tasks (implementation, documentation) that reference the image path read this
+        convention from the image task's acceptance_criteria via context_selection. No runtime
+        discovery is needed — the path is a planning-time decision.
+
+      Dependency and ordering:
+      - Image generation tasks are phase_order=1 alongside design/requirements. They MUST execute
+        before implementation tasks (phase_order=2) that use those images.
+      - If a specific image task must run after an architectural design task (e.g., a visual design
+        spec defines the color palette), declare: depends_on_task_titles=["<design task title>"].
+      - If multiple image tasks are independent of each other, they may run in the same batch.
+
+      verification_level for image_generation tasks:
+      - Always assign "none". Image generation produces a binary file via API call. There is no
+        repository-local command to run as a verification gate. The validation layer handles quality
+        assessment of the generated image against requirements.
+
+      acceptance_criteria for image_generation tasks:
+      - Must specify: file path, format (PNG/JPG/WebP), target dimensions, and visual style/use case.
+      - Must NOT contain generic phrases like "image is generated" or "file exists".
+      - Example good criteria:
+        * "The file assets/icons/app-icon.png exists at 128×128px in PNG format"
+        * "The icon uses a flat-style minimal design with the brand primary color (#2563EB)"
+        * "The image is suitable for use as a browser favicon at sizes 16×16 through 128×128px"
+      - When multiple size variants are required, list each: "Variants at 16×16, 32×32, 64×64, 128×128px
+        are present at assets/icons/favicon-{size}.png"
 
       verification_level assignment rules:
       Three values are available: "none", "deferred", "runtime".
@@ -291,7 +354,7 @@ prompts:
       Testing task origin rule (hard constraint — always applied):
       A subtask with task_type="testing" may ONLY be generated when parent_task_type is
       "implementation" or "testing". If the parent's task_type is anything else
-      (requirements, design, documentation, configuration, planning, review, onboarding, refactor),
+      (requirements, design, image_generation, documentation, configuration, planning, review, onboarding, refactor),
       do NOT generate any atomic subtask with task_type="testing" from that parent.
       When a non-implementation/non-testing parent's scope implies verification, express that
       verification as acceptance_criteria on the implementation tasks that are the actual output —

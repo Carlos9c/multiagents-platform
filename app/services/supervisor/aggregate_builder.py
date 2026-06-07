@@ -33,6 +33,8 @@ _AGENT_NAMES = [
     "test_builder_agent_validator",
     "document_writer_agent",
     "document_writer_agent_validator",
+    "image_generation_agent",
+    "image_generation_agent_validator",
     "stage_evaluator",
     "recovery_planner",
     "recovery_assignment",

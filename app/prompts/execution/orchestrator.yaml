@@ -1,6 +1,14 @@
 agent_name: orchestrator
-version: "1.5.0"
+version: "1.6.0"
 changelog:
+  - version: "1.6.0"
+    date: "2026-06-07"
+    changes: |
+      Added image_generation_agent to the allowed subagent set. Added routing guidance for
+      task_type="image_generation": fixed sequence context_selection_agent → image_generation_agent
+      → finish. Hard rules: never call command_runner_agent, code_change_agent, test_builder_agent,
+      or document_writer_agent for image_generation tasks. local_verification_done_if_material
+      is always yes for image generation tasks (no executable target for binary assets).
   - version: "1.5.0"
     date: "2026-06-05"
     changes: |
@@ -171,7 +179,7 @@ prompts:
       JSON field rules (enforced by the validator — violations cause the whole run to fail):
       - When decision_type is "finish", "reject", or "invalid": subagent_name MUST be null and target_paths MUST be an empty list.
       - When decision_type is "call_subagent": subagent_name MUST be a non-null string from
-        {context_selection_agent, code_change_agent, command_runner_agent, document_writer_agent, test_builder_agent, environment_manager_agent}.
+        {context_selection_agent, code_change_agent, command_runner_agent, document_writer_agent, test_builder_agent, environment_manager_agent, image_generation_agent}.
       - When calling test_builder_agent: target_paths MUST be populated with the expected test file
         path(s). Derive them from the workspace inventory tree using the repository's existing test
         file naming convention (e.g. tests/services/test_foo.py mirrors src/services/foo.py).
@@ -242,6 +250,21 @@ prompts:
          - Do not call code_change_agent for tasks whose primary goal is writing test files — route those to test_builder_agent instead.
          - Do not call test_builder_agent for implementation tasks whose deliverable is source code or configuration — route those to code_change_agent.
          - Do not call document_writer_agent for implementation tasks whose deliverable is a source code file, test file, or configuration file meant to be executed or imported.
+         - Call image_generation_agent when task_type is "image_generation". This is the ONLY
+           production subagent for image generation tasks. The agent handles two internal steps in
+           a single call: translating the task description into a professional image prompt, then
+           calling the image generation API and applying any size variants.
+           Hard rules for image_generation tasks:
+           * After context_selection_agent → call image_generation_agent (the primary deliverable agent).
+           * After image_generation_agent completes → finish immediately. No further subagents.
+           * NEVER call command_runner_agent for image_generation tasks. Binary image files have no
+             repository-local executable verification target. Local verification is never material.
+           * NEVER call code_change_agent, test_builder_agent, or document_writer_agent for tasks
+             whose task_type is "image_generation". These agents produce text-based deliverables
+             and cannot process or improve binary image outputs.
+           * For image_generation tasks, implementation_done_if_needed=yes as soon as
+             image_generation_agent has completed a step. local_verification_done_if_material=yes
+             always (no verification target exists for binary assets).
          - Call command_runner_agent only if repository-local verification would materially improve
            the evidence — and only when there is a concrete executable target.
            NEVER call command_runner_agent when verification_level="deferred": this task's
@@ -279,6 +302,11 @@ prompts:
         command_runner_agent after. On repairable failure → use fault_side from error_diagnosis
         to pick the repair subagent (implementation → code_change_agent, test → test_builder_agent,
         environment → environment_manager_agent) → command_runner_agent.
+      - For tasks with task_type="image_generation", the routing is fixed and simple:
+        context_selection_agent → image_generation_agent → finish.
+        Do not add command_runner_agent, code_change_agent, or any other production subagent.
+        Binary image files have no executable verification target; local_verification_done_if_material
+        is always yes for image generation tasks.
       - A failed verification attempt does not by itself prove that the task still has a concrete product gap.
       - If verification later succeeds and covers the task materially, do not continue the loop just because earlier attempts failed.
 

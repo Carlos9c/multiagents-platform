@@ -691,7 +691,7 @@ def test_supervisor_runner_includes_qa_evaluators():
 
 
 def test_supervisor_runner_total_evaluator_count():
-    """Total evaluator count is 22 (original) + 6 (QA agents) + 1 (QA session) = 29."""
+    """Total evaluator count is 22 (original) + 6 (QA agents) + 1 (QA session) + 2 (image generation) = 31."""
     from app.services.supervisor.supervisor_runner import _EVALUATORS
 
-    assert len(_EVALUATORS) == 29
+    assert len(_EVALUATORS) == 31

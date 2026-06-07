@@ -13,6 +13,7 @@ from app.execution_engine.subagents.command_runner_agent import CommandRunnerAge
 from app.execution_engine.subagents.context_selection_agent import ContextSelectionAgent
 from app.execution_engine.subagents.document_writer_agent import DocumentWriterAgent
 from app.execution_engine.subagents.environment_manager_agent import EnvironmentManagerAgent
+from app.execution_engine.subagents.image_generation_agent import ImageGenerationAgent
 from app.execution_engine.subagents.test_builder_agent import TestBuilderAgent
 
 
@@ -43,6 +44,10 @@ class OrchestratedExecutionEngine(BaseExecutionEngine):
             model=settings.test_agent_model,
             provider=settings.test_agent_provider,
         )
+        image_agent_runtime = StructuredLLMRuntime(
+            model=settings.image_agent_model,
+            provider=settings.image_agent_provider,
+        )
 
         registry = SubagentRegistry(
             subagents=[
@@ -52,6 +57,7 @@ class OrchestratedExecutionEngine(BaseExecutionEngine):
                 DocumentWriterAgent(runtime=doc_writer_runtime),
                 TestBuilderAgent(runtime=test_agent_runtime),
                 EnvironmentManagerAgent(runtime=orchestrator_runtime),
+                ImageGenerationAgent(runtime=image_agent_runtime),
             ]
         )
 

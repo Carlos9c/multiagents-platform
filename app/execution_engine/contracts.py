@@ -35,6 +35,7 @@ OBSERVATION_TYPE_ERROR_DIAGNOSIS = "error_diagnosis"
 OBSERVATION_TYPE_TEST_COVERAGE = "test_coverage_observation"
 OBSERVATION_TYPE_DEPENDENCY_REQUIRED = "dependency_required"
 OBSERVATION_TYPE_DOCUMENT_WARNING = "document_quality_warning"
+OBSERVATION_TYPE_IMAGE_GENERATED = "image_generated"
 
 ChangeType = Literal["created", "modified"]
 

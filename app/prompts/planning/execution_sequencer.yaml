@@ -1,6 +1,9 @@
 agent_name: execution_sequencer
-version: "1.6.0"
+version: "1.7.0"
 changelog:
+  - version: "1.7.0"
+    date: "2026-06-07"
+    changes: "Added image_generation to phase_order=1 mapping alongside design/requirements/planning"
   - version: "1.6.0"
     date: "2026-06-02"
     changes: "Hardened depends_on_task_titles rule: HARD CONSTRAINT language with explicit violation examples; guardrail enforced programmatically — retry triggered on violations"
@@ -70,7 +73,7 @@ prompts:
       Phase ordering rule (phase_order field):
       - Each candidate task carries a phase_order integer that classifies it into one of four
         development phases:
-          1 = design / requirements / planning  (architectural decisions and specifications)
+          1 = design / requirements / planning / image_generation  (architectural decisions, specifications, and visual asset production)
           2 = implementation / configuration / refactor  (core functionality and infrastructure)
           3 = testing  (verification and quality assurance)
           4 = documentation / onboarding / review  (finalization artifacts)

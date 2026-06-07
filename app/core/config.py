@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     execution_engine_max_command_runs: int = 4
     execution_engine_max_repair_attempts: int = 2
 
+    # Image generation provider
+    image_provider: str = "openai"
+    image_model: str = "dall-e-3"
+    # Image generation agent (LLM for prompt engineering step)
+    # Defaults to gpt-5.2 (multimodal, on par with document_writer_agent)
+    image_agent_provider: str = "openai"
+    image_agent_model: str = "gpt-5.2"
+
     # Android Gradle wrapper — version seeded into source_dir during bootstrap
     gradle_wrapper_version: str = "8.7"
 

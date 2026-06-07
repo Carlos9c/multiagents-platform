@@ -32,11 +32,31 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 10. **Q&A de estado del proyecto** — en fases PAUSED y COMPLETED, el `ProjectQueryAgent` responde preguntas del usuario sobre el estado del proyecto con información real de la BD (tareas completadas, pendientes, fallidas).
 
-11. **Sistema Supervisor — meta-evaluación de agentes** — capa de supervisión post-ejecución que evalúa retrospectivamente la calidad de cada agente del sistema. 22 evaluadores LLM independientes producen un veredicto por agente (`healthy` / `needs_attention` / `degraded` / `not_supervised`). El veredicto global se calcula como media ponderada (healthy=2, needs_attention=1, degraded=0) con umbrales 1.7/1.3. Si más del 30% de los agentes no pudieron evaluarse, el veredicto global es `not_evaluated`. Incluye un analizador agregado multi-proyecto que detecta patrones de degradación transversales entre 5–20 proyectos. Todos los resultados se persisten en `SupervisorReport` y `AgentEvaluation` en base de datos.
+11. **Sistema Supervisor — meta-evaluación de agentes** — capa de supervisión post-ejecución que evalúa retrospectivamente la calidad de cada agente del sistema. 31 evaluadores LLM independientes producen un veredicto por agente (`healthy` / `needs_attention` / `degraded` / `not_supervised`). El veredicto global se calcula como media ponderada (healthy=2, needs_attention=1, degraded=0) con umbrales 1.7/1.3. Si más del 30% de los agentes no pudieron evaluarse, el veredicto global es `not_evaluated`. Incluye un analizador agregado multi-proyecto que detecta patrones de degradación transversales entre 5–20 proyectos. Todos los resultados se persisten en `SupervisorReport` y `AgentEvaluation` en base de datos.
 
-12. **Motor QA — aseguramiento de calidad adversarial autónomo** — sistema QA post-ejecución que analiza el proyecto completo usando un portafolio de 11 agentes especializados orquestados por un bucle LLM. Se activa cuando el proyecto alcanza `COMPLETED` y el usuario lo confirma a través de Aria. La arquitectura incluye: (a) **7 estrategias por tipo de producto** que definen los agentes permitidos para cada caso; (b) **QABootstrapper** para compilar artefactos antes del sondeo (APK Android); (c) **QAOrchestrator** con bucle de decisión LLM y 7 restricciones de presupuesto en tiempo real; (d) **5 agentes Fase 5** que ejecutan en Docker (functional_tester, security_scanner, contract_validator, performance_profiler, apk_installer); (e) **6 agentes Fase 7-9** de análisis estructurado puro (functional_qa_agent, boundary_qa_agent, adversarial_qa_agent, security_qa_agent, performance_qa_agent, regression_qa_agent); (f) **synthesis_agent** que sintetiza el veredicto final con tareas de remediación priorizadas; (g) **7 evaluadores del Supervisor** para los agentes QA (evidencia filtrada por `producer_agent`); (h) **QATool** integrado en Aria con flujo completo: oferta → aceptación → ejecución en fondo → presentación de hallazgos → creación de tareas de remediación. Hallazgos persistidos en `QAFinding` con atribución `producer_agent`, `ProbeRecord`s en `QASession.probes` como JSON.
+12. **Sistema de generación de imágenes multimodal** — capa de generación de assets visuales integrada en el motor de ejecución. Las tareas con `task_type="image_generation"` (phase_order=1, ejecutadas antes que el código) producen imágenes raster (PNG, JPG, WebP) como artefactos del proyecto. El `image_generation_agent` opera en dos pasos internos: (1) traducción de la tarea a un prompt de imagen profesional mediante LLM de texto (GPT-5.2), con decisiones de dimensiones, estilo, paleta de colores, rationale de diseño y variantes de tamaño; (2) generación via `BaseImageProvider` (DALL-E 3 por defecto). Soporta múltiples variantes de tamaño en una sola tarea (ej. favicon 16/32/64/128px: una generación + N resizes via Pillow). Cada imagen generada produce un `FileDocumentationEntry` completo (use case, estilo, colores, rationale, prompt) que el `context_selection_agent` puede usar como referencia de estilo en tareas posteriores. El `image_generation_agent_validator` valida en dos fases: técnica (sin LLM, verificación de existencia y tamaño) y semántica (vision LLM que evalúa coherencia visual con los requisitos de la tarea). El `ImageFileAnalyzer` describe imágenes preexistentes en proyectos usando vision LLM para poblar el catálogo de codebase. Dos evaluadores del Supervisor independientes (`image_generation_agent_evaluator` + `image_generation_agent_validator_evaluator`) evalúan calidad de prompt engineering y calibración del validador.
+
+13. **Motor QA — aseguramiento de calidad adversarial autónomo** — sistema QA post-ejecución que analiza el proyecto completo usando un portafolio de 11 agentes especializados orquestados por un bucle LLM. Se activa cuando el proyecto alcanza `COMPLETED` y el usuario lo confirma a través de Aria. La arquitectura incluye: (a) **7 estrategias por tipo de producto** que definen los agentes permitidos para cada caso; (b) **QABootstrapper** para compilar artefactos antes del sondeo (APK Android); (c) **QAOrchestrator** con bucle de decisión LLM y 7 restricciones de presupuesto en tiempo real; (d) **5 agentes Fase 5** que ejecutan en Docker (functional_tester, security_scanner, contract_validator, performance_profiler, apk_installer); (e) **6 agentes Fase 7-9** de análisis estructurado puro (functional_qa_agent, boundary_qa_agent, adversarial_qa_agent, security_qa_agent, performance_qa_agent, regression_qa_agent); (f) **synthesis_agent** que sintetiza el veredicto final con tareas de remediación priorizadas; (g) **7 evaluadores del Supervisor** para los agentes QA (evidencia filtrada por `producer_agent`); (h) **QATool** integrado en Aria con flujo completo: oferta → aceptación → ejecución en fondo → presentación de hallazgos → creación de tareas de remediación. Hallazgos persistidos en `QAFinding` con atribución `producer_agent`, `ProbeRecord`s en `QASession.probes` como JSON.
 
 ### Cambios recientes significativos
+
+- **Sistema de generación de imágenes multimodal (2026-06-07)**:
+
+  Nueva capa de generación de assets visuales integrada en el motor de ejecución. Nuevo `task_type="image_generation"` (phase_order=1) con atomicidad clara: una imagen = una tarea (variantes de tamaño del mismo original = una tarea). Las tareas de imagen se ejecutan siempre antes que las tareas de implementación que las referencian.
+
+  **Componentes nuevos:**
+  - **`image_generation_agent`** — subagente con dos pasos internos: ingeniería de prompt (LLM GPT-5.2, prompt engineering profesional con colores, estilo, composición, rationale de diseño) y generación via DALL-E 3. Soporta resize a múltiples tamaños del mismo original via Pillow.
+  - **`BaseImageProvider` / `OpenAIImageProvider`** — abstracción análoga a `BaseLLMProvider`. Selección automática de resolución nativa DALL-E 3 según ratio pedido. Configurable via `IMAGE_PROVIDER`, `IMAGE_MODEL`.
+  - **Herramientas**: `generate_image_tool`, `write_binary_file_tool`, `resize_image_tool` (modos fit/fill/crop).
+  - **`image_generation_agent_validator`** — dos fases: validación técnica (sin LLM: existencia, tamaño) y semántica (vision LLM con la imagen como contexto).
+  - **`ImageFileAnalyzer`** — analizador para `CodebaseAnalysisService` que describe imágenes preexistentes via vision LLM, poblando el catálogo de codebase para `context_selection_agent`.
+  - **`FileDocumentationEntry` completo** — cada imagen generada registra use case, estilo visual, colores de la paleta, design rationale y prompt de generación.
+  - **2 evaluadores del Supervisor**: `image_generation_agent_evaluator` (calidad de prompt engineering) y `image_generation_agent_validator_evaluator` (calibración del validador).
+  - **`generate_structured` con visión** — `BaseLLMProvider.generate_structured(images: list[bytes] | None = None)`: parámetro opcional que activa vision en el provider OpenAI. `BinaryResource` + `read_binary_from_context` en `validation/helpers/resources.py`.
+  - **`atomic_task_generator.yaml` v3.6.0** — sección completa para `image_generation`: atomicidad, aislamiento (recovery cost como razón correcta), convención de rutas, dependencias, `verification_level="none"`.
+  - **`execution_sequencer.yaml` v1.7.0** + **`execution_plan_service.py`** — `image_generation` mapeado a `phase_order=1`.
+  - **`orchestrator.yaml` v1.6.0** — routing fijo para `image_generation`: `context_selection_agent` → `image_generation_agent` → finish. Reglas explícitas de NO usar `command_runner_agent` ni `code_change_agent` para este tipo.
+  - **42 tests nuevos** — tools, subagente, validador, analizador, supervisor, image provider.
 
 - **Eliminación de tareas durante revisión manual con propagación en cascada (2026-06-07)**:
 
@@ -125,7 +145,7 @@ El sistema es capaz de gestionar un proyecto de software de extremo a extremo de
 
 ### Números actuales
 
-- **1773 tests unitarios** — todos passing
+- **1815 tests unitarios** — todos passing
 - **12 tests de integración** (Docker) — se ejecutan con `-m integration`
 - **0 failures** en CI
 
@@ -519,6 +539,7 @@ class LoopBudget:
 | `document_writer_agent` | Produce documentación y artefactos de diseño: Markdown, YAML/JSON (OpenAPI, AsyncAPI), RST, AsciiDoc, diagramas como código (PlantUML, Mermaid) |
 | `test_builder_agent` | Escribe ficheros de test basándose en los `acceptance_criteria` de la tarea; evalúa la cobertura en una fase separada e informa de gaps |
 | `environment_manager_agent` | Instala paquetes faltantes diagnosticados como `fault_side=="environment"`; invoca `EnvironmentManager`, persiste `RuntimeSpec`, registra archivos de manifiesto modificados en evidencia |
+| `image_generation_agent` | Genera imágenes raster (PNG, JPG, WebP) para tareas `task_type="image_generation"`. Dos pasos internos: (1) ingeniería de prompt con LLM de texto; (2) generación via `BaseImageProvider` (DALL-E 3). Soporta resize a múltiples tamaños en un solo paso. Registra `FileDocumentationEntry` completo por cada imagen producida |
 
 Cada subagente recibe `(ExecutionRequest, ExecutionStep, ResolutionState)` y retorna un `ResolutionState` actualizado.
 
@@ -547,7 +568,7 @@ Independiente del engine. Corre después de que el engine retorna.
 2. **Ejecución** — cada validador evalúa `TaskValidationInput` de forma independiente
 3. **Agregación** — merges con prioridad: `failed > manual_review > partial > completed`
 
-Validadores activos: `code_change_agent_validator`, `command_runner_agent_validator`.
+Validadores activos: `code_change_agent_validator`, `command_runner_agent_validator`, `document_writer_agent_validator`, `test_builder_agent_validator`, `image_generation_agent_validator`.
 
 ---
 
@@ -748,7 +769,7 @@ POST /supervisor/projects/{project_id}/run
 
 | Archivo | Rol |
 |---|---|
-| `supervisor_runner.py` | Orquesta los 22 evaluadores, calcula `overall_verdict`, llama al sintetizador |
+| `supervisor_runner.py` | Orquesta los 31 evaluadores, calcula `overall_verdict`, llama al sintetizador |
 | `supervisor_synthesizer.py` | Genera síntesis narrativa cross-agent via LLM |
 | `contracts.py` | `EvaluatorOutput`, `AgentEvaluationOutput` |
 | `prompt_resolver.py` | Resuelve el prompt histórico del agente via `git show` |
@@ -1086,6 +1107,10 @@ TEST_AGENT_PROVIDER=...          # test_builder_agent (si no se define, hereda o
 TEST_AGENT_MODEL=...             # ej. gpt-5.2
 VALIDATOR_PROVIDER=...           # ambos validadores (ej. openai)
 VALIDATOR_MODEL=...              # ej. gpt-5.2
+IMAGE_PROVIDER=openai            # proveedor de generación de imágenes (default: openai)
+IMAGE_MODEL=dall-e-3             # modelo de generación de imágenes (default: dall-e-3)
+IMAGE_AGENT_PROVIDER=openai      # proveedor LLM para el paso de prompt engineering
+IMAGE_AGENT_MODEL=gpt-5.2        # modelo LLM para el paso de prompt engineering (default: gpt-5.2)
 
 # Motor de ejecución
 EXECUTION_ENGINE_BACKEND=orchestrated
@@ -1133,7 +1158,7 @@ CI: `ruff check .` + `black --check .` + `pytest -q` en Python 3.12.
 
 SQLite in-memory (`:memory:`) via fixtures en `tests/conftest.py`. Fixtures clave: `db_session`, `make_project`, `make_task`, `make_execution_run`, `make_recovery_decision`, `make_execution_plan`.
 
-**1773 tests unitarios + 12 tests de integración — todos passing.**
+**1815 tests unitarios + 12 tests de integración — todos passing.**
 
 | Área | Archivo(s) |
 |---|---|
@@ -1240,8 +1265,8 @@ Mostrar `estimated_complexity` por tarea: badge de color (XS=verde, S=azul, M=am
 **15. Historial comparativo de sesiones QA en el frontend**
 Evolución de hallazgos entre sesiones QA sucesivas: tendencia de `high`+`critical` en el tiempo, hallazgos nuevos vs. resueltos por sesión (via `regression_qa_agent`), duración por sesión.
 
-**16. Nuevo executor type: generación de media**
-Para proyectos con assets (sprites, iconos, sonidos), añadir `executor_type="image_generation"` / `"audio_generation"` que llame APIs generativas externas sin Docker. El `atomic_task_generator` emitiría estas tareas; el orquestador las delegaría a un `MediaGenerationAgent`.
+**16. Imagen como contexto visual directo en tareas de variación (`image_variation`)**
+Fase 3 del sistema multimodal: cuando una tarea declara `task_type="image_variation"`, el `image_generation_agent` recibirá la imagen original de alta resolución (ya guardada como `_source.png`) y usará APIs imagen→imagen (DALL-E edit, Stable Diffusion img2img) en lugar de texto→imagen. Requiere extender `BaseImageProvider` con `generate_variation(reference: bytes, delta_prompt: str)` y extender `HistoricalTaskRunContext` con `image_assets: list[ImageAssetRef]` para que el `context_selection_agent` pueda pasar thumbnails como referencia visual en el contexto.
 
 **17. Métricas de ejecución por proyecto**
 Tasa de recovery por acción, tasa de replan, distribución de `mutation_kind` por batch, frecuencia de episodios de revisión, tiempo medio hasta confirmación, tasa de tareas canceladas por proyecto. Datos para ajustar parámetros de orquestación y detectar proyectos problemáticos antes del iteration limit.
@@ -1277,3 +1302,4 @@ Automatizar actualizaciones de versiones base (Node LTS, Python minor, Flutter s
 | Motor QA — persistencia | `findings_summary` se almacena como dict JSON (sin `json.dumps` adicional); veredicto `blocked` en `QAResult` → `QASession.status = BLOCKED`; cualquier otro veredicto → `status = COMPLETED`; `_persist_result` nunca lanza — sus errores se capturan con `logger.warning` |
 | Motor QA — estrategias | Todo agente nuevo DEBE añadirse a `allowed_agents` de todas las estrategias relevantes o nunca será llamado por el orquestador (bug crítico histórico) |
 | Motor QA — Supervisor QA | Los evaluadores de agente QA filtran hallazgos por `producer_agent == agent_name` en la consulta BD; el `qa_session_evaluator` recibe TODO sin filtro; guardia `not_supervised` (`result=None`) cuando `ctx["sessions"]` está vacío |
+| image_generation_agent | Una imagen = una tarea; múltiples tamaños del mismo original = una tarea (no varios `task_type="image_generation"` para variantes de resize). Las tareas de imagen son `phase_order=1` y siempre ejecutan antes que las tareas de implementación que las referencian. El orquestador nunca invoca `command_runner_agent` para este tipo: `local_verification_done_if_material` es siempre `yes` (no hay target ejecutable para assets binarios). El original de alta resolución se guarda como `[name]_source.png` cuando `needs_resize=True` — se persiste en source_dir para uso en variaciones futuras. Todos los archivos generados (principal, source, variantes) tienen `FileDocumentationEntry` completo con colores, rationale y prompt |

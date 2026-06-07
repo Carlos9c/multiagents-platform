@@ -5,6 +5,16 @@ from pathlib import Path
 
 from app.execution_engine.contracts import ExecutionRequest
 
+_IMAGE_CONTENT_TYPES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+    ".ico": "image/x-icon",
+}
+
 
 @dataclass(frozen=True)
 class ResolvedContextPath:
@@ -21,6 +31,17 @@ class TextResource:
     source_kind: str | None
     exists: bool
     content: str | None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class BinaryResource:
+    logical_path: str
+    resolved_path: str | None
+    source_kind: str | None
+    exists: bool
+    content: bytes | None
+    content_type: str | None
     error: str | None = None
 
 
@@ -163,4 +184,60 @@ def read_relevant_files_from_request(
     return read_many_text_resources(
         execution_request,
         logical_paths=list(execution_request.context.relevant_files or []),
+    )
+
+
+def read_binary_from_context(
+    execution_request: ExecutionRequest,
+    *,
+    logical_path: str,
+) -> BinaryResource:
+    resolved = resolve_context_path(execution_request, logical_path=logical_path)
+
+    if not resolved.exists or not resolved.resolved_path:
+        return BinaryResource(
+            logical_path=resolved.logical_path,
+            resolved_path=None,
+            source_kind=None,
+            exists=False,
+            content=None,
+            content_type=None,
+            error="resource_not_found",
+        )
+
+    path = Path(resolved.resolved_path)
+    if not path.is_file():
+        return BinaryResource(
+            logical_path=resolved.logical_path,
+            resolved_path=str(path),
+            source_kind=resolved.source_kind,
+            exists=False,
+            content=None,
+            content_type=None,
+            error="resource_is_not_a_file",
+        )
+
+    content_type = _IMAGE_CONTENT_TYPES.get(path.suffix.lower())
+
+    try:
+        content = path.read_bytes()
+    except Exception as exc:
+        return BinaryResource(
+            logical_path=resolved.logical_path,
+            resolved_path=str(path),
+            source_kind=resolved.source_kind,
+            exists=True,
+            content=None,
+            content_type=content_type,
+            error=f"resource_read_failed: {str(exc)}",
+        )
+
+    return BinaryResource(
+        logical_path=resolved.logical_path,
+        resolved_path=str(path),
+        source_kind=resolved.source_kind,
+        exists=True,
+        content=content,
+        content_type=content_type,
+        error=None,
     )

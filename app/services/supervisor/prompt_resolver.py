@@ -39,12 +39,14 @@ _AGENT_YAML_PATHS: dict[str, str] = {
     "test_builder_agent": "execution/test_builder_agent.yaml",
     "document_writer_agent": "execution/document_writer_agent.yaml",
     "environment_manager_agent": "execution/environment_manager_agent.yaml",
+    "image_generation_agent": "execution/image_generation_agent.yaml",
     "error_diagnostic_tool": "execution/error_diagnostic_tool.yaml",
     # ── Validation agents ────────────────────────────────────────────────────
     "command_runner_agent_validator": "validation/command_runner_agent_validator.yaml",
     "code_change_agent_validator": "validation/code_change_agent_validator.yaml",
     "test_builder_agent_validator": "validation/test_builder_agent_validator.yaml",
     "document_writer_agent_validator": "validation/document_writer_agent_validator.yaml",
+    "image_generation_agent_validator": "validation/image_generation_agent_validator.yaml",
     # ── Recovery agents ──────────────────────────────────────────────────────
     "recovery_planner": "recovery/recovery_planner.yaml",
     "recovery_assignment": "recovery/recovery_assignment.yaml",
@@ -85,6 +87,8 @@ _AGENT_YAML_PATHS: dict[str, str] = {
     "test_builder_agent_validator_evaluator": "supervisor/test_builder_agent_validator_evaluator.yaml",
     "document_writer_agent_evaluator": "supervisor/document_writer_agent_evaluator.yaml",
     "document_writer_agent_validator_evaluator": "supervisor/document_writer_agent_validator_evaluator.yaml",
+    "image_generation_agent_evaluator": "supervisor/image_generation_agent_evaluator.yaml",
+    "image_generation_agent_validator_evaluator": "supervisor/image_generation_agent_validator_evaluator.yaml",
     "stage_evaluator_evaluator": "supervisor/stage_evaluator_evaluator.yaml",
     "recovery_planner_evaluator": "supervisor/recovery_planner_evaluator.yaml",
     "recovery_assignment_evaluator": "supervisor/recovery_assignment_evaluator.yaml",

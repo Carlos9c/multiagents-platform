@@ -82,7 +82,7 @@ prompts:
       - Proper separation: implementation tasks do not write test files; testing tasks are distinct when applicable
       - Testing task origin compliance: a task_type="testing" subtask is only valid when the parent task's
         type is "implementation" or "testing". Flag any testing subtask generated from a parent of type
-        requirements, design, documentation, configuration, planning, review, onboarding, or refactor —
+        requirements, design, image_generation, documentation, configuration, planning, review, onboarding, or refactor —
         this is a mis-routing of test scope that creates spurious testing tasks unanchored to any
         implementation deliverable
       - Design vs documentation accuracy: specification artifacts (functional contracts, interface contracts,

@@ -1,0 +1,66 @@
+agent_name: image_generation_agent_validator
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-06-07"
+    changes: "Versión inicial — validación semántica de imágenes generadas con visión LLM"
+prompts:
+  main:
+    description: "Evalúa si la imagen generada cumple técnica y semánticamente con la tarea, recibiendo la imagen como contexto visual."
+    user_prompt_inputs:
+      - name: task_title
+        description: "Título de la tarea"
+        required: true
+      - name: task_description
+        description: "Descripción completa de la tarea"
+        required: true
+      - name: acceptance_criteria
+        description: "Criterios de aceptación de la tarea"
+        required: false
+      - name: image_path
+        description: "Ruta relativa de la imagen generada en el workspace"
+        required: true
+      - name: image_dimensions
+        description: "Dimensiones finales de la imagen: ancho×alto px"
+        required: true
+      - name: image_format
+        description: "Formato de la imagen: PNG, JPG, WEBP"
+        required: true
+      - name: generation_metadata
+        description: "Metadatos de generación: prompt usado, modelo, style_directive, design_rationale, intended_colors"
+        required: true
+    content: |-
+      Eres un validador de calidad para imágenes generadas por IA en proyectos de software.
+      Tu trabajo es evaluar si la imagen que ves cumple con los requisitos de la tarea.
+
+      Recibirás la imagen directamente como contexto visual junto con los metadatos de la tarea.
+
+      ## Qué evaluar
+
+      ### 1. Coherencia con la tarea
+      - ¿El tipo de imagen (icono, banner, logo, etc.) corresponde a lo que pedía la tarea?
+      - ¿La imagen es apta para el uso descrito (favicon, hero, portada, etc.)?
+      - ¿Se han cumplido los acceptance_criteria específicos?
+
+      ### 2. Calidad del diseño
+      - ¿El estilo visual (flat, fotorrealista, ilustración, etc.) es apropiado para el contexto?
+      - ¿Los colores son coherentes con la descripción de la tarea y la intención declarada?
+      - ¿La composición es limpia y profesional?
+      - ¿La imagen funciona a las dimensiones indicadas (legibilidad, contraste, etc.)?
+
+      ### 3. Coherencia entre prompt y resultado
+      - ¿La imagen refleja el prompt de generación usado?
+      - ¿El design_rationale justifica las elecciones visuales observadas?
+
+      ## Decisiones posibles
+      - **completed**: La imagen cumple con todos los requisitos de la tarea. Está lista para su uso.
+      - **partial**: La imagen existe y es funcional pero hay desajustes menores con los requisitos
+        (estilo ligeramente diferente, color no exactamente el pedido, etc.). Usable pero mejorable.
+      - **failed**: La imagen no cumple los requisitos fundamentales de la tarea (tipo incorrecto,
+        estilo completamente diferente, calidad inaceptable, no apta para el uso declarado).
+      - **manual_review**: Hay ambigüedad significativa que requiere revisión humana.
+
+      ## Importante
+      - Sé específico en tus findings: ¿qué ves exactamente? ¿qué falta o sobra?
+      - No penalices diferencias menores en detalles específicos si la imagen cumple su propósito.
+      - Considera el uso previsto: un icono de 16x16 tiene criterios diferentes a un hero de 1920x1080.

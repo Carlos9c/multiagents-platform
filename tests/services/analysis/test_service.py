@@ -36,6 +36,16 @@ def fake_summary() -> dict:
     }
 
 
+def fake_image_description() -> dict:
+    return {
+        "use_case": "application icon",
+        "visual_style": "flat icon",
+        "primary_colors": ["blue", "white"],
+        "dimensions_description": "square icon",
+        "summary": "Application icon — flat icon, blue on white.",
+    }
+
+
 def source_dir(svc: CodebaseAnalysisService, project_id: int) -> Path:
     return svc.storage_service.ensure_project_storage(project_id).source_dir
 
@@ -88,21 +98,27 @@ def test_text_files_reach_llm(tmp_path: Path):
 
 def test_binary_files_bypass_llm_batch(tmp_path: Path):
     llm = MagicMock()
-    llm.generate_structured.return_value = fake_summary()
+    # Image files use the vision LLM (1 call) then the summary (1 call)
+    llm.generate_structured.side_effect = [fake_image_description(), fake_summary()]
     svc = make_service(tmp_path, llm)
     src = source_dir(svc, 1)
     (src / "icon.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00")
 
     result = svc.analyze(project_id=1, source_path=str(src))
 
-    # Only the summary call; no batch call for binary
-    assert llm.generate_structured.call_count == 1
+    # image description call + summary call (no text batch)
+    assert llm.generate_structured.call_count == 2
     assert result.files[0].file_type == "asset"
 
 
 def test_mixed_files_route_correctly(tmp_path: Path):
     llm = MagicMock()
-    llm.generate_structured.side_effect = [fake_batch(["script.py"]), fake_summary()]
+    # Files sorted alphabetically: logo.png (ImageFileAnalyzer) before script.py (TextFileAnalyzer)
+    llm.generate_structured.side_effect = [
+        fake_image_description(),
+        fake_batch(["script.py"]),
+        fake_summary(),
+    ]
     svc = make_service(tmp_path, llm)
     src = source_dir(svc, 1)
     (src / "script.py").write_text("pass", encoding="utf-8")

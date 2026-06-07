@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from app.services.analysis.analyzers.default_analyzer import DefaultFileAnalyzer
+from app.services.analysis.analyzers.image_analyzer import ImageFileAnalyzer
 from app.services.analysis.analyzers.text_analyzer import TextFileAnalyzer
 from app.services.analysis.base import (
     ANALYSIS_FILENAME,
@@ -93,7 +94,10 @@ class CodebaseAnalysisService:
 
     def _build_registry(self) -> FileAnalyzerRegistry:
         return FileAnalyzerRegistry(
-            analyzers=[TextFileAnalyzer(llm_provider=self._llm)],
+            analyzers=[
+                TextFileAnalyzer(llm_provider=self._llm),
+                ImageFileAnalyzer(llm_provider=self._llm),
+            ],
             fallback=DefaultFileAnalyzer(),
         )
 

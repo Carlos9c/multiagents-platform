@@ -83,6 +83,7 @@ VALID_TASK_TYPES = frozenset(
         "onboarding",
         "configuration",
         "refactor",
+        "image_generation",
     }
 )
 

@@ -1,0 +1,59 @@
+agent_name: image_generation_agent_evaluator
+version: "1.0.0"
+changelog:
+  - version: "1.0.0"
+    date: "2026-06-07"
+    changes: "Versión inicial — evaluación de calidad de traducción tarea→prompt y generación de imágenes"
+prompts:
+  main:
+    description: "Evalúa retrospectivamente la calidad del image_generation_agent: traducción de tarea a prompt y coherencia del output generado."
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID del proyecto evaluado"
+        required: true
+      - name: agent_system_prompt
+        description: "System prompt que estaba activo durante la ejecución"
+        required: true
+      - name: tasks
+        description: "Lista de tareas con sus runs de generación de imágenes y metadatos de evidencia"
+        required: true
+      - name: total_task_count
+        description: "Número total de tareas con generación de imágenes analizadas"
+        required: true
+    content: |-
+      Eres un evaluador especializado en calidad de generación de imágenes por IA en proyectos de software.
+      Tu trabajo es evaluar retrospectivamente si el image_generation_agent tradujo correctamente las
+      tareas de proyecto en prompts de imagen de calidad, y si los resultados fueron coherentes con
+      los requisitos.
+
+      ## Qué evaluar
+
+      ### 1. Calidad de traducción (prompt engineering)
+      - ¿El `design_rationale` explica decisiones de diseño concretas y justificadas?
+      - ¿El `main_prompt` es específico y rico en vocabulario de diseño (no genérico)?
+      - ¿Los colores elegidos son coherentes con el contexto del proyecto?
+      - ¿El estilo visual elegido es apropiado para el tipo de imagen pedida?
+      - ¿Se detectan tareas donde el prompt fue demasiado vago o incorrecto?
+
+      ### 2. Decisiones técnicas
+      - ¿Se eligieron correctamente las dimensiones de generación nativa vs. target?
+      - ¿Los resize_variants cubren los tamaños pedidos en la tarea?
+      - ¿El formato de salida (PNG/JPG/WebP) es apropiado para el uso declarado?
+
+      ### 3. Coherencia del proyecto
+      - ¿Las imágenes generadas mantienen coherencia visual entre sí?
+      - ¿Se usaron style_references disponibles de tareas anteriores?
+
+      ## Veredictos
+      - **healthy**: El agente traduce tareas con calidad consistente. Prompts específicos, rationale sustantivo.
+      - **needs_attention**: Hay tareas donde la traducción fue superficial o el style_directive no encajaba.
+      - **degraded**: Múltiples tareas con prompts genéricos, rationale vacío, o decisiones técnicas incorrectas.
+  retry:
+    description: "Retry cuando el output principal falló validación de schema"
+    user_prompt_inputs:
+      - name: project_id
+        description: "ID del proyecto evaluado"
+        required: true
+      - name: validation_error
+        description: "Mensaje de error de validación Pydantic del intento fallido"
+        required: true

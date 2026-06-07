@@ -72,6 +72,12 @@ from app.services.supervisor.evaluators.execution_sequencer_evaluator import (
 from app.services.supervisor.evaluators.functional_qa_agent_evaluator import (
     FunctionalQAAgentEvaluator,
 )
+from app.services.supervisor.evaluators.image_generation_agent_evaluator import (
+    ImageGenerationAgentEvaluator,
+)
+from app.services.supervisor.evaluators.image_generation_agent_validator_evaluator import (
+    ImageGenerationAgentValidatorEvaluator,
+)
 from app.services.supervisor.evaluators.orchestrator_evaluator import OrchestratorEvaluator
 from app.services.supervisor.evaluators.performance_qa_agent_evaluator import (
     PerformanceQAAgentEvaluator,
@@ -122,6 +128,8 @@ _EVALUATORS = [
     TestBuilderAgentValidatorEvaluator(),
     DocumentWriterAgentEvaluator(),
     DocumentWriterAgentValidatorEvaluator(),
+    ImageGenerationAgentEvaluator(),
+    ImageGenerationAgentValidatorEvaluator(),
     StageEvaluatorEvaluator(),
     RecoveryPlannerEvaluator(),
     RecoveryAssignmentEvaluator(),
